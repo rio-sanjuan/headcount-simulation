@@ -55,7 +55,7 @@ def test_intervals_are_consistent(world: World) -> None:
 
 def test_backfill_opens_at_the_true_probability(world: World) -> None:
     txn, reqs = world.tables["workforce_txn"], world.tables["req_interval"]
-    p = world.truth["processes"]["requisitions"]["backfill_probability"]
+    p = world.truth["config"]["requisitions"]["backfill_probability"]
     # Every departure and every transfer fill vacates a role that may be backfilled.
     vacated = int(
         (txn["trans_type"] == "TERM").sum() + (reqs["close_reason"] == "filled_transfer").sum()

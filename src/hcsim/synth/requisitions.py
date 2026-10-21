@@ -1,98 +1,76 @@
-"""The world's requisition process: openings, fills, and unfilled exits.
+"""The world's requisition book: every requisition opened, open or closed.
 
-Every requisition carries one opening in the lite world. Backfill opens on a departure with the
-true backfill probability, in the vacated role. Growth opens per cost center at a Poisson rate
-drawn per cost center. Each month, an open requisition fills externally (a hazard by age), fills
-by transfer when an internal candidate exists, exits unfilled, or stays open. A transfer fill
-vacates the mover's old role, which can open a backfill of its own, available from the next
-month. Every value is invented.
+Every requisition carries one opening in this world so far. Requisitions are rows of
+integer-coded columns. A closed requisition records its date, its reason, and the employee who
+filled it. Requisition ids start high, so they never collide with employee ids.
 """
 
 from __future__ import annotations
 
-import datetime as dt
-from dataclasses import dataclass
-from typing import Any
+from typing import Final
 
-import pandas as pd
+import numpy as np
+from numpy.typing import NDArray
 
-REQ_COLUMNS = [
-    "req_id",
-    "req_type",
-    "cost_center",
-    "job_code",
-    "job_family",
-    "job_level",
-    "location",
-    "company",
-    "is_manager",
-    "openings",
-    "opened_date",
-    "closed_date",
-    "close_reason",
-    "filled_by",
-]
+from hcsim.synth.columns import Index, Table
+from hcsim.synth.population import ROLE_DTYPES, Roles
 
-
-@dataclass
-class Requisition:
-    req_id: int
-    req_type: str
-    role: dict[str, Any]
-    opened_date: dt.date
-    opened_month: int
-    closed_date: dt.date | None = None
-    close_reason: str | None = None
-    filled_by: int | None = None
+REQ_TYPES: Final = ("backfill", "campus", "growth")
+CLOSE_REASONS: Final = ("filled_external", "filled_transfer", "unfilled")
+OPEN: Final = -1
 
 
 class RequisitionBook:
-    """Every requisition the world opens, open or closed."""
-
     def __init__(self, first_id: int = 500_001) -> None:
+        self.reqs = Table(
+            {
+                "req_id": np.int64,
+                "req_type": np.int8,
+                **ROLE_DTYPES,
+                "opened_date": "datetime64[D]",
+                "opened_month": np.int32,
+                "closed_date": "datetime64[D]",
+                "close_reason": np.int8,
+                "filled_by": np.int64,
+            }
+        )
         self.next_id = first_id
-        self.open: dict[int, Requisition] = {}
-        self.closed: list[Requisition] = []
 
-    def open_requisition(
-        self, req_type: str, role: dict[str, Any], date: dt.date, month: int
-    ) -> Requisition:
-        req = Requisition(self.next_id, req_type, dict(role), date, month)
-        self.next_id += 1
-        self.open[req.req_id] = req
-        return req
+    def __len__(self) -> int:
+        return len(self.reqs)
+
+    def column(self, name: str) -> np.ndarray:
+        return self.reqs.column(name)
+
+    def roles(self, index: Index) -> Roles:
+        return {name: self.reqs.column(name)[index] for name in ROLE_DTYPES}
+
+    def open(self, req_type: str, roles: Roles, dates: NDArray[np.datetime64], month: int) -> Index:
+        n = len(dates)
+        ids = self.next_id + np.arange(n, dtype=np.int64)
+        self.next_id += n
+        return self.reqs.append(
+            n,
+            req_id=ids,
+            req_type=REQ_TYPES.index(req_type),
+            opened_date=dates,
+            opened_month=month,
+            close_reason=OPEN,
+            filled_by=-1,
+            **roles,
+        )
+
+    def open_requisitions(self) -> Index:
+        return np.flatnonzero(self.reqs.column("close_reason") == OPEN)
 
     def close(
-        self, req: Requisition, date: dt.date, reason: str, filled_by: int | None = None
+        self,
+        index: Index,
+        dates: NDArray[np.datetime64],
+        reason: str,
+        filled_by: NDArray[np.int64] | None = None,
     ) -> None:
-        req.closed_date, req.close_reason, req.filled_by = date, reason, filled_by
-        self.closed.append(self.open.pop(req.req_id))
-
-    def frame(self) -> pd.DataFrame:
-        reqs = sorted([*self.closed, *self.open.values()], key=lambda r: r.req_id)
-        rows = [
-            {
-                "req_id": r.req_id,
-                "req_type": r.req_type,
-                **{
-                    k: r.role[k]
-                    for k in (
-                        "cost_center",
-                        "job_code",
-                        "job_family",
-                        "job_level",
-                        "location",
-                        "company",
-                        "is_manager",
-                    )
-                },
-                "openings": 1,
-                "opened_date": r.opened_date,
-                "closed_date": r.closed_date,
-                "close_reason": r.close_reason,
-                "filled_by": r.filled_by,
-            }
-            for r in reqs
-        ]
-        frame = pd.DataFrame(rows, columns=REQ_COLUMNS)
-        return frame.astype({"filled_by": "Int64"})
+        self.reqs.column("closed_date")[index] = dates
+        self.reqs.column("close_reason")[index] = CLOSE_REASONS.index(reason)
+        if filled_by is not None:
+            self.reqs.column("filled_by")[index] = filled_by

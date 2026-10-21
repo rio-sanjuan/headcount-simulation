@@ -34,6 +34,11 @@ def job_code(family: str, level: int) -> str:
     return f"{family[:3].upper()}-{level}"
 
 
+def job_codes(config: WorldConfig) -> list[str]:
+    """Every job code, family by family and level by level: the job dimension's order."""
+    return [job_code(family, level) for family in config.families for level in config.levels]
+
+
 def job_dimension(config: WorldConfig) -> pd.DataFrame:
     rows = [
         {
@@ -58,8 +63,3 @@ def company_dimension(config: WorldConfig) -> pd.DataFrame:
 
 def account_dimension() -> pd.DataFrame:
     return pd.DataFrame({"account": ["ACCT-100"], "account_group": ["regular"]})
-
-
-def dominant_family(config: WorldConfig, cost_center_index: int) -> str:
-    """Each cost center leans toward one family, so attributes vary by cost center."""
-    return config.families[cost_center_index % len(config.families)]

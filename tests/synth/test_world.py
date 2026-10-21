@@ -17,7 +17,7 @@ from hcsim.synth.world import generate_world, month_ends, write_world
 def tiny() -> pd.DataFrame:
     """The initial stock: ACTIVE rows at the first month-end."""
     txn = generate_world(preset("tiny", seed=1)).tables["workforce_txn"]
-    first = pd.Timestamp("2021-01-31").date()
+    first = pd.Timestamp("2021-01-31")
     return txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == first)]
 
 
@@ -37,7 +37,7 @@ def test_the_initial_population_is_one_active_row_per_employee(tiny: pd.DataFram
     assert len(tiny) == 200
     assert tiny["employee_id"].is_unique
     assert (tiny["trans_type"] == "ACTIVE").all()
-    assert (tiny["event_date"] == pd.Timestamp("2021-01-31").date()).all()
+    assert (tiny["event_date"] == pd.Timestamp("2021-01-31")).all()
     assert (pd.to_datetime(tiny["hire_date"]) < pd.Timestamp("2021-01-01")).all()
 
 
