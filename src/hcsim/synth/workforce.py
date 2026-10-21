@@ -1,11 +1,19 @@
 """The world's workforce register, and the transactions every change records.
 
-`Workforce` is the world's own register of who is employed: one row per person ever employed,
-as integer-coded columns, with an active flag. Every change goes through it, and each change
-appends transaction rows that the data contract carries: `HIRE` (+1), `TERM` (-1), the two legs
-of a move between roles, `XFER_OUT` (-1) and `XFER_IN` (+1), a `PROMO` (0) that changes the
-job in place, and one `ACTIVE` stock row per employee at every month-end. A row's index never
-changes, so indices stay valid all run.
+`Workforce` is the world's own register of who works there: one row per person ever present, as
+integer-coded columns, with an active flag and a contingent flag. Every change goes through it,
+and each change appends transaction rows that the data contract carries:
+
+- `HIRE` (+1) and `TERM` (-1) for regular employees.
+- Two legs for a move between roles, `XFER_OUT` (-1) then `XFER_IN` (+1), and for a
+  reorganization, `REORG_OUT` (-1) then `REORG_IN` (+1).
+- `PROMO` (0) and `RECLASS` (0), which change the job in place.
+- `CTG_START` (+1) and `CTG_END` (-1) for contingent workers, who book to a contingent account.
+  A conversion out is `CONV_OUT` (-1) then `CTG_START` (+1), and a conversion in is `CTG_END`
+  (-1) then `CONV_IN` (+1), so each account's stock stays in step with its flows.
+- One `ACTIVE` stock row per person, regular or contingent, at every month-end.
+
+A row's index never changes, so indices stay valid all run.
 """
 
 from __future__ import annotations
@@ -18,7 +26,21 @@ from numpy.typing import DTypeLike, NDArray
 from hcsim.synth.columns import EventLog, Index, Table
 from hcsim.synth.population import ROLE_DTYPES, Roles
 
-TRANS_TYPES: Final = ("ACTIVE", "HIRE", "TERM", "XFER_IN", "XFER_OUT", "PROMO")
+TRANS_TYPES: Final = (
+    "ACTIVE",
+    "HIRE",
+    "TERM",
+    "XFER_IN",
+    "XFER_OUT",
+    "PROMO",
+    "REORG_IN",
+    "REORG_OUT",
+    "RECLASS",
+    "CONV_IN",
+    "CONV_OUT",
+    "CTG_START",
+    "CTG_END",
+)
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
 #: Transaction columns, coded. `*_previous` hold the role before a move.
@@ -48,6 +70,7 @@ class Workforce:
                 "active": bool,
                 "rating": np.int8,  # a code into the rating scale; -1 until first rated
                 "readiness": np.float32,  # latent promotion readiness
+                "contingent": np.bool_,  # in the contingent pool, outside regular headcount
             }
         )
         self.people.append(
@@ -60,7 +83,11 @@ class Workforce:
         return int(self.people.column("active").sum())
 
     def active(self) -> Index:
-        return np.flatnonzero(self.people.column("active"))
+        """Regular employees in post."""
+        return np.flatnonzero(self.people.column("active") & ~self.people.column("contingent"))
+
+    def contingent_pool(self) -> Index:
+        return np.flatnonzero(self.people.column("active") & self.people.column("contingent"))
 
     def roles(self, index: Index) -> Roles:
         return {name: self.people.column(name)[index] for name in ROLE_DTYPES}
@@ -124,8 +151,73 @@ class Workforce:
             self.people.column(name)[index] = values
         self._record(index, "PROMO", 0, dates, previous=before)
 
+    def reorganize(self, index: Index, cost_center: int, dates: NDArray[np.datetime64]) -> None:
+        """Move people to another cost center in a batch: `REORG_OUT`, then `REORG_IN`."""
+        before = self.roles(index)
+        self._record(index, "REORG_OUT", -1, dates)
+        self.people.column("cost_center")[index] = cost_center
+        self._record(index, "REORG_IN", +1, dates, previous=before)
+
+    def reclassify(self, index: Index, family: int, dates: NDArray[np.datetime64]) -> None:
+        """Change people's family in place: one `RECLASS` row with the job before."""
+        before = self.roles(index)
+        self.people.column("family")[index] = family
+        self._record(index, "RECLASS", 0, dates, previous=before)
+
+    def enroll_contingent(self, roles: Roles, start_dates: NDArray[np.datetime64]) -> None:
+        """Add contingent workers already in post when the world starts, with no event."""
+        n = len(start_dates)
+        ids = self.next_id + np.arange(n, dtype=np.int64)
+        self.next_id += n
+        self.people.append(
+            n,
+            employee_id=ids,
+            hire_date=start_dates,
+            active=True,
+            rating=-1,
+            contingent=True,
+            **roles,
+        )
+
+    def start_contingent(self, roles: Roles, dates: NDArray[np.datetime64]) -> NDArray[np.int64]:
+        n = len(dates)
+        ids = self.next_id + np.arange(n, dtype=np.int64)
+        self.next_id += n
+        index = self.people.append(
+            n, employee_id=ids, hire_date=dates, active=True, rating=-1, contingent=True, **roles
+        )
+        self._record(index, "CTG_START", +1, dates)
+        return ids
+
+    def end_contingent(self, index: Index, dates: NDArray[np.datetime64]) -> None:
+        self._record(index, "CTG_END", -1, dates)
+        self.people.column("active")[index] = False
+
+    def convert_out(self, index: Index, account: int, dates: NDArray[np.datetime64]) -> Roles:
+        """Regular employees join the contingent pool. Returns the roles they left."""
+        before = self.roles(index)
+        self._record(index, "CONV_OUT", -1, dates)
+        self.people.column("account")[index] = account
+        self.people.column("contingent")[index] = True
+        self.people.column("rating")[index] = -1
+        self._record(index, "CTG_START", +1, dates, previous=before)
+        return before
+
+    def convert_in(self, index: Index, roles: Roles, dates: NDArray[np.datetime64]) -> None:
+        """Contingent workers become regular employees in `roles`, with service from today."""
+        before = self.roles(index)
+        self._record(index, "CTG_END", -1, dates)
+        for name, values in roles.items():
+            self.people.column(name)[index] = values
+        self.people.column("contingent")[index] = False
+        self.people.column("hire_date")[index] = dates
+        self.people.column("readiness")[index] = 0.0
+        self._record(index, "CONV_IN", +1, dates, previous=before)
+
     def snapshot(self, month_end: np.datetime64) -> None:
-        self._record(self.active(), "ACTIVE", 1, month_end)
+        """One `ACTIVE` row per person in post, regular or contingent."""
+        everyone = np.flatnonzero(self.people.column("active"))
+        self._record(everyone, "ACTIVE", 1, month_end)
 
 
 def tenure_months(

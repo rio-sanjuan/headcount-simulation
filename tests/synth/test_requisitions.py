@@ -44,7 +44,12 @@ def test_intervals_are_consistent(world: World) -> None:
     reqs = world.tables["req_interval"]
     closed = reqs[reqs["closed_date"].notna()]
     assert (pd.to_datetime(closed["closed_date"]) >= pd.to_datetime(closed["opened_date"])).all()
-    assert set(closed["close_reason"]) <= {"filled_external", "filled_transfer", "unfilled"}
+    assert set(closed["close_reason"]) <= {
+        "filled_external",
+        "filled_transfer",
+        "filled_conversion",
+        "unfilled",
+    }
     filled = closed["close_reason"].str.startswith("filled")
     assert closed.loc[filled, "filled_by"].notna().all()
     assert closed.loc[~filled, "filled_by"].isna().all()

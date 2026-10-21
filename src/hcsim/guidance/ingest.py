@@ -30,11 +30,14 @@ VALUE: Final = "value"
 GROUPINGS: Final = ("cost_center", "org_level1", TOPLINE)
 
 # Each measure is a SQL query yielding (month, cost_center, value). The trans_type codes are
-# the data contract's.
+# the data contract's. Headcount measures count regular employees only: contingent and
+# temporary workers book to their own account groups.
 _FLOW = """
     SELECT date_trunc('month', CAST(event_date AS DATE)) AS month, cost_center,
            count(*) AS value
-    FROM workforce_txn WHERE trans_type = '{code}'
+    FROM workforce_txn
+    WHERE trans_type = '{code}'
+      AND account IN (SELECT account FROM dim_account WHERE account_group = 'regular')
     GROUP BY ALL
 """
 MEASURES: Final[dict[GuidanceCategory, str]] = {

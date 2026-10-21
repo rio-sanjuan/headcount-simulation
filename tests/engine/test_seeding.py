@@ -46,7 +46,7 @@ def test_employees_seed_from_the_last_month_end_stock(con: duckdb.DuckDBPyConnec
     state, report = seed_state(con, schema_from_world(con), RUN)
     (active,) = con.execute(
         "SELECT count(*) FROM workforce_txn WHERE trans_type='ACTIVE' "
-        "AND event_date = DATE '2025-12-31'"
+        "AND event_date = DATE '2025-12-31' AND account = 'ACCT-100'"
     ).fetchone() or (0,)
     assert report.snapshot_date == dt.date(2025, 12, 31)
     assert report.employees_seeded == state.n_employees == active

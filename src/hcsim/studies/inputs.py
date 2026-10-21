@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from hcsim.engine.config import DomainModels
-from hcsim.engine.seeding import snapshot_before
+from hcsim.engine.seeding import REGULAR, snapshot_before
 from hcsim.model.core.layouts import OPENING
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 from hcsim.model.ml.entity import ConstantModel
@@ -81,7 +81,7 @@ def fit_models(
     at_risk = _scalar(
         con,
         "SELECT count(*) FROM workforce_txn WHERE trans_type = 'ACTIVE' "
-        "AND event_date >= ? AND event_date < ?",
+        f"AND event_date >= ? AND event_date < ? AND account IN ({REGULAR})",
         window,
     )
     # Fills and exits: closures over the openings exposed each month, open at the prior

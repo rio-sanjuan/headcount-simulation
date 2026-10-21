@@ -81,7 +81,11 @@ def test_the_small_preset_generates_at_its_scale() -> None:
     assert len(world.tables["dim_org"]) == 250
     assert world.tables["dim_org"]["org_level1"].nunique() == 5
     txn = world.tables["workforce_txn"]
-    first = txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == txn["event_date"].min())]
+    first = txn[
+        (txn["trans_type"] == "ACTIVE")
+        & (txn["event_date"] == txn["event_date"].min())
+        & (txn["account"] == "ACCT-100")
+    ]
     assert len(first) == 5_000
     assert len(world.tables["dim_location"]) == 4
     assert len(world.tables["comp_range"]) == 8 * 7 * 4  # families x levels x locations

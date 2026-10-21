@@ -30,7 +30,7 @@ def raw_counts(con: duckdb.DuckDBPyConnection, code: str) -> pd.Series:
     return (
         con.execute(
             f"SELECT cost_center, count(*) n FROM workforce_txn WHERE trans_type = '{code}' "
-            "GROUP BY ALL"
+            "AND account = 'ACCT-100' GROUP BY ALL"
         )
         .df()
         .set_index("cost_center")["n"]
@@ -68,7 +68,7 @@ def test_headcount_is_the_month_end_stock(con: duckdb.DuckDBPyConnection) -> Non
     stock = series.values("CC-01", HEADCOUNT)
     (first,) = con.execute(
         "SELECT count(*) FROM workforce_txn WHERE trans_type='ACTIVE' AND cost_center='CC-01' "
-        "AND event_date = DATE '2021-01-31'"
+        "AND event_date = DATE '2021-01-31' AND account = 'ACCT-100'"
     ).fetchone() or (0,)
     assert stock.iloc[0] == first
     assert stock.index.min() == pd.Period("2021-01", freq="M")

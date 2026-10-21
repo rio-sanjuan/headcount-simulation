@@ -354,6 +354,54 @@ class PromotionTruth:
         return found
 
 
+@dataclass(frozen=True)
+class MovementTruth:
+    """Moves that aren't hires or departures: reclassifications, reorganizations, and the
+    contingent pool with its conversions. Invented, round values.
+
+    - A reclassification batch changes one family to another, in place, for a share of that
+      family's people in one level-1 org.
+    - A reorganization batch moves a share of one cost center's people to another cost center
+      in the same level-1 org.
+    - Contingent workers book to a contingent account and sit outside regular headcount. They
+      start and end at their own rates. A regular employee may convert out to the pool, and an
+      open requisition may fill by converting a contingent worker in.
+    """
+
+    reclass_probability: float = 0.03
+    reclass_share: float = 0.30
+    reorg_probability: float = 0.10
+    reorg_share: tuple[float, float] = (0.3, 0.7)
+    #: The pool's starting size, and its monthly starts, as shares of regular headcount.
+    contingent_share: float = 0.08
+    contingent_start_rate: float = 0.005
+    contingent_end_hazard: float = 0.06
+    conversion_out_hazard: float = 0.0008
+    #: The monthly chance an open requisition fills by converting a contingent worker.
+    conversion_fill_hazard: float = 0.03
+    #: A converting worker shares the requisition's family and sits within this many levels.
+    conversion_level_band: int = 1
+
+    def problems(self) -> list[str]:
+        found = []
+        for name in (
+            "reclass_probability",
+            "reclass_share",
+            "reorg_probability",
+            "contingent_share",
+            "contingent_start_rate",
+            "contingent_end_hazard",
+            "conversion_out_hazard",
+            "conversion_fill_hazard",
+        ):
+            if not 0 <= getattr(self, name) <= 1:
+                found.append(f"movements.{name} must lie in [0, 1]")
+        low, high = self.reorg_share
+        if not 0 < low <= high <= 1:
+            found.append("movements.reorg_share must be a range inside (0, 1]")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -416,6 +464,7 @@ class WorldConfig:
     grants: GrantTruth = field(default_factory=GrantTruth)
     ratings: RatingTruth = field(default_factory=RatingTruth)
     promotions: PromotionTruth = field(default_factory=PromotionTruth)
+    movements: MovementTruth = field(default_factory=MovementTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -475,6 +524,9 @@ class WorldConfig:
         problems += self.ratings.problems()
         problems += self.attrition.problems(len(self.ratings.scale))
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
+        problems += self.movements.problems()
+        if "contingent" not in [group for _, group in self.accounts]:
+            problems.append("accounts need a contingent account for the contingent pool")
         if problems:
             raise ValueError("invalid WorldConfig: " + "; ".join(problems))
 

@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.movements import MovementProcess
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
 from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
@@ -178,10 +179,17 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(7)
-    population_rng, process_rng, price_rng, grant_rng, structure_rng, rating_rng, promotion_rng = (
-        np.random.default_rng(s) for s in streams
-    )
+    streams = np.random.SeedSequence(config.seed).spawn(8)
+    (
+        population_rng,
+        process_rng,
+        price_rng,
+        grant_rng,
+        structure_rng,
+        rating_rng,
+        promotion_rng,
+        movement_rng,
+    ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
     world.tables["dim_job"] = structure.job_dimension(config)
@@ -199,8 +207,18 @@ def generate_world(config: WorldConfig) -> World:
         org["org_level1"].map({t: i for i, t in enumerate(tops)}), dtype=np.int64
     )
     promotions = PromotionProcess(config, workforce, promotion_rng)
+    movements = MovementProcess(config, workforce, org_of_cost_center, movement_rng)
+    movements.seed(pd.Period(ends[0], freq="M"))
     process_truth = process.simulate(
-        config, workforce, book, ends, process_rng, ratings, org_of_cost_center, promotions
+        config,
+        workforce,
+        book,
+        ends,
+        process_rng,
+        ratings,
+        org_of_cost_center,
+        promotions,
+        movements,
     )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)

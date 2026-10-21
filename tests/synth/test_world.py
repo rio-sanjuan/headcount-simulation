@@ -18,7 +18,8 @@ def tiny() -> pd.DataFrame:
     """The initial stock: ACTIVE rows at the first month-end."""
     txn = generate_world(preset("tiny", seed=1)).tables["workforce_txn"]
     first = pd.Timestamp("2021-01-31")
-    return txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == first)]
+    stock = txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == first)]
+    return stock[stock["account"] == "ACCT-100"]  # regular employees, not the contingent pool
 
 
 def test_the_tiny_preset_has_the_planned_shape() -> None:
@@ -84,7 +85,8 @@ def test_the_world_writes_to_duckdb_with_its_truth_manifest(tmp_path: Path) -> N
         assert {"dim_org", "dim_job", "workforce_txn", "truth_manifest"} <= tables
         (count,) = con.execute(
             "SELECT count(*) FROM workforce_txn "
-            "WHERE trans_type = 'ACTIVE' AND event_date = DATE '2021-01-31'"
+            "WHERE trans_type = 'ACTIVE' AND event_date = DATE '2021-01-31' "
+            "AND account = 'ACCT-100'"
         ).fetchone() or (0,)
         (manifest,) = con.execute("SELECT manifest FROM truth_manifest").fetchone() or ("",)
     assert count == 200

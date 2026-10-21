@@ -34,7 +34,11 @@ def test_each_cycle_rates_everyone_active_with_enough_tenure(world: World) -> No
     txn = world.tables["workforce_txn"]
     cycle = pd.Timestamp("2023-03-01")
     # Active at the start of the cycle month is active at the prior month-end.
-    stock = txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == pd.Timestamp("2023-02-28"))]
+    stock = txn[
+        (txn["trans_type"] == "ACTIVE")
+        & (txn["event_date"] == pd.Timestamp("2023-02-28"))
+        & (txn["account"] == "ACCT-100")  # contingent workers aren't rated
+    ]
     tenure = (cycle - pd.to_datetime(stock["hire_date"])).dt.days / 30.4
     eligible = set(stock.loc[tenure >= 6.0, "employee_id"])
     rated = ratings(world)
@@ -48,7 +52,11 @@ def test_first_ratings_follow_the_entry_distribution(world: World) -> None:
         observed = int((first == label).sum())
         se = float(np.sqrt(len(first) * p * (1 - p)))
         stat_check(observed, len(first) * p, se, label=f"first {label}")
-    assert ratings(world)["is_first"].groupby(ratings(world)["employee_id"]).sum().max() == 1
+    # Only someone who converts out and back in is rated as new twice.
+    txn = world.tables["workforce_txn"]
+    returned = set(txn.loc[txn["trans_type"] == "CONV_IN", "employee_id"])
+    firsts = ratings(world)["is_first"].groupby(ratings(world)["employee_id"]).sum()
+    assert firsts.drop(list(returned & set(firsts.index))).max() == 1
 
 
 def test_later_ratings_follow_the_transition_matrix(world: World) -> None:
