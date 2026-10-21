@@ -20,7 +20,7 @@ This project doesn't accept pull requests from outside contributors, and a workf
 
 Everything in this repository is public and synthetic. Issues and comments follow the same rules as the code:
 
-- No real company, product, or internal system names, internal codes, or org identifiers.
+- No company, product, or internal system names, internal codes, or org identifiers.
 - No real people's names, and no real workforce, compensation, or financial figures.
 - Examples use synthetic values only.
 
