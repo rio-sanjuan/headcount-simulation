@@ -4,11 +4,13 @@
 UV_RUN := uv run --locked
 FAST := not slow and not acceptance and not e2e
 HEAVY := slow or acceptance or e2e
+# The official image, pinned by digest. Used when no local gitleaks binary is installed.
+GITLEAKS_IMAGE := ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
 # CI narrows TESTS to the test directories a change can affect (tools/affected.py).
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr sanitize-main sanitize-text affected
+.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -58,6 +60,18 @@ sanitize-main: ## Denylist scan of the whole tree and the pushed commits (CI)
 # and release notes. The text never touches a command line.
 sanitize-text: ## Denylist scan of text on stdin, reported as NAME (CI)
 	$(UV_RUN) python tools/sanitize_scan.py --stdin "$$NAME"
+
+# Credential patterns across the whole git history. Findings print redacted. Not part of
+# `make check`, so local checks don't need gitleaks: install it with `brew install gitleaks`.
+secrets: ## Credential scan of the git history (gitleaks)
+	@if command -v gitleaks >/dev/null; then \
+		gitleaks git --redact --no-banner --verbose .; \
+	elif command -v docker >/dev/null; then \
+		docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/repo:ro" \
+			$(GITLEAKS_IMAGE) git --redact --no-banner --verbose /repo; \
+	else \
+		echo "gitleaks isn't installed and docker isn't available: brew install gitleaks"; exit 2; \
+	fi
 
 # CI passes the PR's base commit. With no BASE, everything runs.
 affected: ## Test paths a change since BASE can affect
