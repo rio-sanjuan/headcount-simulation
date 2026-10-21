@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import io
+import json
+import urllib.error
+from pathlib import Path
+
 import pytest
 
+from tools import licenses
 from tools.licenses import Metadata, Verdict, classify, parse_pins
 
 
@@ -63,3 +69,65 @@ def test_pins_are_parsed_from_uv_export_output() -> None:
         "-e .\n"
     )
     assert parse_pins(exported) == [("numpy", "2.3.5"), ("torch", "2.14.1")]
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+def test_fetch_reads_pypi_metadata_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: float) -> FakeResponse:
+        calls.append(url)
+        if len(calls) == 1:
+            raise urllib.error.URLError("transient")
+        info = {"license_expression": "MIT", "license": None, "classifiers": None}
+        return FakeResponse(json.dumps({"info": info}).encode())
+
+    monkeypatch.setattr(licenses.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(licenses.time, "sleep", lambda seconds: None)
+    assert licenses.fetch("pkg", "1.0") == Metadata("pkg", "1.0", "MIT", "", ())
+    assert calls == ["https://pypi.org/pypi/pkg/1.0/json"] * 2
+
+
+def test_fetch_gives_up_after_its_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    def always_fails(url: str, timeout: float) -> FakeResponse:
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(licenses.urllib.request, "urlopen", always_fails)
+    monkeypatch.setattr(licenses.time, "sleep", lambda seconds: None)
+    with pytest.raises(urllib.error.URLError):
+        licenses.fetch("pkg", "1.0", attempts=2)
+
+
+@pytest.mark.parametrize(("expression", "code"), [("MIT", 0), ("GPL-3.0-only", 1)])
+def test_main_exits_by_verdict(
+    expression: str,
+    code: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("pkg==1.0 \\\n    --hash=sha256:abc\n")
+    monkeypatch.setattr(licenses, "fetch", lambda n, v: Metadata(n, v, expression, "", ()))
+    assert licenses.main([str(requirements)]) == code
+    assert "1 packages" in capsys.readouterr().out
+
+
+def test_main_exits_2_when_pypi_is_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("pkg==1.0\n")
+
+    def unreachable(name: str, version: str) -> Metadata:
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(licenses, "fetch", unreachable)
+    assert licenses.main([str(requirements)]) == 2
