@@ -23,6 +23,7 @@ from hcsim.cli import main
 from hcsim.studies import baseline
 from hcsim.studies.harness import run_study
 from hcsim.studies.profile import StudyProfile
+from hcsim.studies.scorecard import results_digest
 
 pytestmark = pytest.mark.e2e
 
@@ -115,7 +116,8 @@ def test_another_seed_moves_the_results(world: tuple[Path, Path], tmp_path: Path
     b = run_study(profile.model_copy(update={"seed": 2}), *world)
     assert a.passed
     assert b.passed
-    assert not (a.result.headcount == b.result.headcount).all()
+    # Guided counts can match across seeds by construction, so compare every raw result.
+    assert results_digest(a.result) != results_digest(b.result)
 
 
 # 60 MiB measured on the Linux runner, where the memory job runs, and 16 MiB on macOS.

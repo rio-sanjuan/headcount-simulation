@@ -54,22 +54,22 @@ def test_the_manifest_records_the_whole_configuration() -> None:
 def test_a_bad_configuration_lists_every_problem() -> None:
     with pytest.raises(ValueError, match="invalid WorldConfig") as error:
         WorldConfig(
-            levels=(1, 2, 3, 4, 5, 6),
+            levels=(1, 2, 3, 4, 5, 9),
             level_mix=(0.2,) * 5 + (0.0,),
             families=("Engineering", "Astronomy"),
             locations=(),
-            requisitions=RequisitionTruth(growth_level_mix={9: 1.0}),
+            requisitions=RequisitionTruth(growth_level_mix={11: 1.0}),
             compensation=dataclasses.replace(CompensationTruth(), family_factor={}),
         )
     message = str(error.value)
     for expected in (
         "families without a tech indicator: ['Astronomy']",
         "at least one location",
-        "attrition.level_factor has no value for levels [6]",
-        "compensation.base_midpoint_by_level has no value for levels [6]",
-        "grants.new_hire_value_by_level has no value for levels [6]",
+        "attrition.level_factor has no value for levels [9]",
+        "compensation.base_midpoint_by_level has no value for levels [9]",
+        "grants.new_hire_value_by_level has no value for levels [9]",
         "compensation.family_factor has no value for ['Astronomy', 'Engineering']",
-        "growth_level_mix names unknown levels [9]",
+        "growth_level_mix names unknown levels [11]",
     ):
         assert expected in message
 
@@ -83,4 +83,4 @@ def test_the_small_preset_generates_at_its_scale() -> None:
     first = txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == txn["event_date"].min())]
     assert len(first) == 5_000
     assert len(world.tables["dim_location"]) == 4
-    assert len(world.tables["comp_range"]) == 4 * 5 * 4  # families x levels x locations
+    assert len(world.tables["comp_range"]) == 8 * 7 * 4  # families x levels x locations

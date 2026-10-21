@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from hcsim.synth.config import FAMILIES, WorldConfig
+from hcsim.synth.config import FAMILIES, FAMILY_CODES, WorldConfig
 
 
 def cost_center_names(config: WorldConfig) -> list[str]:
@@ -73,36 +73,77 @@ def org_dimension(config: WorldConfig, rng: np.random.Generator) -> pd.DataFrame
     )
 
 
-def job_code(family: str, level: int) -> str:
-    return f"{family[:3].upper()}-{level}"
+ROMAN = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII")
+
+
+def job_code(family: str, level: int, manager: bool = False) -> str:
+    """`ENG-4` for an individual role, and `ENG-4M` for its manager title."""
+    return f"{FAMILY_CODES[family]}-{level}{'M' if manager else ''}"
+
+
+def jobs(config: WorldConfig) -> list[tuple[str, int, bool]]:
+    """Every job as (family, level, manager), in the job dimension's order. Manager titles
+    exist from `manager_min_level` up."""
+    return [
+        (family, level, manager)
+        for family in config.families
+        for level in config.levels
+        for manager in ((False, True) if level >= config.manager_min_level else (False,))
+    ]
 
 
 def job_codes(config: WorldConfig) -> list[str]:
-    """Every job code, family by family and level by level: the job dimension's order."""
-    return [job_code(family, level) for family in config.families for level in config.levels]
+    return [job_code(*job) for job in jobs(config)]
 
 
 def job_dimension(config: WorldConfig) -> pd.DataFrame:
+    """The job catalog: one row per job, with an ordered level vocabulary (`job_level`, with
+    `level_name` and the executive band), the family's tech indicator, and a title that marks
+    manager roles."""
     rows = [
         {
-            "job_code": job_code(family, level),
+            "job_code": job_code(family, level, manager),
+            "job_title": f"{family} {'Manager ' if manager else ''}{ROMAN[level - 1]}",
             "job_family": family,
             "job_level": level,
+            "level_name": f"L{level}",
+            "is_executive": level >= config.executive_min_level,
+            "manager_title": manager,
             "tech_indicator": FAMILIES[family],
         }
-        for family in config.families
-        for level in config.levels
+        for family, level, manager in jobs(config)
     ]
     return pd.DataFrame(rows)
 
 
 def location_dimension(config: WorldConfig) -> pd.DataFrame:
-    return pd.DataFrame({"location": list(config.locations), "region": "REGION-1"})
+    """Locations with their region tree: locations dealt to countries, countries to regions."""
+    index = np.arange(len(config.locations))
+    country = index // config.locations_per_country
+    region = country // config.countries_per_region
+    return pd.DataFrame(
+        {
+            "location": list(config.locations),
+            "country": [f"CTRY-{c + 1}" for c in country],
+            "region": [f"REGION-{r + 1}" for r in region],
+        }
+    )
 
 
 def company_dimension(config: WorldConfig) -> pd.DataFrame:
-    return pd.DataFrame({"company": list(config.companies), "planning_company": "PCO-1"})
+    """Companies and their planning rollup. The primary company and the online subsidiaries
+    roll up to `PCO-1`. Offline subsidiaries, the last ones, roll up to `PCO-2`."""
+    n = len(config.companies)
+    offline = np.arange(n) >= n - config.offline_subsidiaries
+    return pd.DataFrame(
+        {
+            "company": list(config.companies),
+            "planning_company": np.where(offline, "PCO-2", "PCO-1"),
+            "is_primary": np.arange(n) == 0,
+            "is_offline": offline,
+        }
+    )
 
 
-def account_dimension() -> pd.DataFrame:
-    return pd.DataFrame({"account": ["ACCT-100"], "account_group": ["regular"]})
+def account_dimension(config: WorldConfig) -> pd.DataFrame:
+    return pd.DataFrame(list(config.accounts), columns=["account", "account_group"])

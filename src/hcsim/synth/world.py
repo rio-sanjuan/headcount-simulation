@@ -79,6 +79,11 @@ class _Labels:
         self.jobs = structure.job_codes(config)
         self.level_index = np.zeros(max(config.levels) + 1, dtype=np.int64)
         self.level_index[list(config.levels)] = np.arange(len(config.levels))
+        # Position of each (family, level, manager) job in the catalog, or -1 for none.
+        self.job_position = np.full((len(config.families), len(config.levels), 2), -1)
+        for position, (family, level, manager) in enumerate(structure.jobs(config)):
+            index = (config.families.index(family), config.levels.index(level), int(manager))
+            self.job_position[index] = position
 
     @staticmethod
     def of(codes: np.ndarray, labels: Sequence[str]) -> pd.Categorical:
@@ -87,9 +92,9 @@ class _Labels:
             cast("Sequence[int]", codes.astype(np.int64)), categories=pd.Index(list(labels))
         )
 
-    def job(self, family: np.ndarray, level: np.ndarray) -> pd.Categorical:
-        index = family.astype(np.int64) * len(self.config.levels) + self.level_index[level]
-        return self.of(index, self.jobs)
+    def job(self, family: np.ndarray, level: np.ndarray, manager: np.ndarray) -> pd.Categorical:
+        position = self.job_position[family, self.level_index[level], manager.astype(np.int64)]
+        return self.of(position, self.jobs)
 
     def dates(self, values: np.ndarray) -> np.ndarray:
         return values.astype("datetime64[s]")
@@ -108,11 +113,13 @@ def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
             "amount": c["amount"].astype(np.int64),
             "cost_center": labels.of(c["cost_center"], labels.cost_centers),
             "cost_center_previous": labels.of(c["cost_center_previous"], labels.cost_centers),
-            "job_code": labels.job(c["family"], c["level"]),
-            "job_code_previous": labels.job(c["family_previous"], c["level_previous"]),
+            "job_code": labels.job(c["family"], c["level"], c["is_manager"]),
+            "job_code_previous": labels.job(
+                c["family_previous"], c["level_previous"], c["is_manager_previous"]
+            ),
             "location": labels.of(c["location"], config.locations),
             "company": labels.of(c["company"], config.companies),
-            "account": labels.of(c["account"], population.ACCOUNTS),
+            "account": labels.of(c["account"], [name for name, _ in config.accounts]),
             "is_manager": c["is_manager"],
             "hire_date": labels.dates(c["hire_date"]),
         },
@@ -130,7 +137,7 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
             "req_id": col("req_id"),
             "req_type": labels.of(col("req_type"), REQ_TYPES),
             "cost_center": labels.of(col("cost_center"), labels.cost_centers),
-            "job_code": labels.job(col("family"), col("level")),
+            "job_code": labels.job(col("family"), col("level"), col("is_manager")),
             "job_family": labels.of(col("family"), config.families),
             "job_level": col("level").astype(np.int64),
             "location": labels.of(col("location"), config.locations),
@@ -163,7 +170,7 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["dim_job"] = structure.job_dimension(config)
     world.tables["dim_location"] = structure.location_dimension(config)
     world.tables["dim_company"] = structure.company_dimension(config)
-    world.tables["dim_account"] = structure.account_dimension()
+    world.tables["dim_account"] = structure.account_dimension(config)
     ids, roles, hire_dates = population.initial_population(config, population_rng)
     workforce = Workforce(ids, roles, hire_dates)
     book = RequisitionBook()
