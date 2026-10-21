@@ -1,0 +1,16 @@
+name: Question or idea
+description: Ask about the design or the code, or suggest an improvement.
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or idea
+      description: Please use synthetic values only in any example.
+    validations:
+      required: true
+  - type: input
+    id: area
+    attributes:
+      label: Area
+      description: For example synth, model, guidance, engine, financial, studies, or docs.

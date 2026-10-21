@@ -1,0 +1,16 @@
+name: Task (maintainer)
+description: One PR-sized unit of work under an epic.
+labels: [task]
+projects: ["rio-sanjuan/4"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      value: It's merged as one PR, with tests where they apply.
