@@ -15,7 +15,10 @@ from hcsim.synth.world import generate_world, month_ends, write_world
 
 @pytest.fixture(scope="module")
 def tiny() -> pd.DataFrame:
-    return generate_world(preset("tiny", seed=1)).tables["workforce_txn"]
+    """The initial stock: ACTIVE rows at the first month-end."""
+    txn = generate_world(preset("tiny", seed=1)).tables["workforce_txn"]
+    first = pd.Timestamp("2021-01-31").date()
+    return txn[(txn["trans_type"] == "ACTIVE") & (txn["event_date"] == first)]
 
 
 def test_the_tiny_preset_has_the_planned_shape() -> None:
@@ -79,7 +82,10 @@ def test_the_world_writes_to_duckdb_with_its_truth_manifest(tmp_path: Path) -> N
     with duckdb.connect(str(path), read_only=True) as con:
         tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
         assert {"dim_org", "dim_job", "workforce_txn", "truth_manifest"} <= tables
-        (count,) = con.execute("SELECT count(*) FROM workforce_txn").fetchone() or (0,)
+        (count,) = con.execute(
+            "SELECT count(*) FROM workforce_txn "
+            "WHERE trans_type = 'ACTIVE' AND event_date = DATE '2021-01-31'"
+        ).fetchone() or (0,)
         (manifest,) = con.execute("SELECT manifest FROM truth_manifest").fetchone() or ("",)
     assert count == 200
     assert json.loads(manifest)["config"]["seed"] == 1
