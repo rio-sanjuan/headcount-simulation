@@ -8,7 +8,7 @@ HEAVY := slow or acceptance or e2e
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize
+.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -40,3 +40,7 @@ test-heavy: ## Slow, acceptance, and e2e tests
 
 sanitize: ## Denylist scan of every tracked file
 	$(UV_RUN) python tools/sanitize_scan.py --tree
+
+# CI passes the PR's base commit. With no BASE, everything runs.
+affected: ## Test paths a change since BASE can affect
+	@$(UV_RUN) --quiet python tools/affected.py --base "$(BASE)"
