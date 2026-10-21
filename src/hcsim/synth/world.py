@@ -16,7 +16,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from hcsim.synth import population, process, structure
+from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
 
 GENERATOR_VERSION = 1
@@ -65,29 +65,53 @@ class World:
 
 
 def generate_world(config: WorldConfig) -> World:
-    rng = np.random.default_rng(np.random.SeedSequence(config.seed))
+    # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
+    streams = np.random.SeedSequence(config.seed).spawn(4)
+    population_rng, process_rng, price_rng, grant_rng = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config)
     world.tables["dim_job"] = structure.job_dimension(config)
     world.tables["dim_location"] = structure.location_dimension(config)
     world.tables["dim_company"] = structure.company_dimension(config)
     world.tables["dim_account"] = structure.account_dimension()
-    people = population.initial_population(config, rng)
+    people = population.initial_population(config, population_rng)
     txn, reqs, process_truth = process.simulate(
         people,
         month_ends(config),
         structure.cost_center_names(config),
         config.first_employee_id + len(people),
-        rng,
+        process_rng,
         lambda cc, level, r: population.draw_role(config, cc, level, r),
     )
     world.tables["workforce_txn"] = txn[TXN_COLUMNS].reset_index(drop=True)
     world.tables["req_interval"] = reqs
     world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in month_ends(config)]})
+    comp, price, grant = equity.CompensationTruth(), equity.PriceTruth(), equity.GrantTruth()
+    ends = month_ends(config)
+    world.tables["comp_range"] = equity.compensation_ranges(
+        config.families, config.levels, config.locations, comp
+    )
+    world.tables["stock_price"] = equity.stock_prices(ends, price, price_rng)
+    hires = txn[txn["trans_type"] == "HIRE"]
+    terms = txn[txn["trans_type"] == "TERM"]
+    awards, vests = equity.new_hire_awards(
+        hires,
+        terms,
+        world.tables["dim_job"],
+        world.tables["stock_price"],
+        grant,
+        price,
+        ends[-1].date(),
+        grant_rng,
+    )
+    vests = equity.vest_status(vests, awards, terms, ends[-1].date())
+    world.tables["equity_award"] = awards
+    world.tables["equity_vest"] = vests
+    world.tables["equity_expense"] = equity.reference_ledger(awards, vests, ends)
     world.truth = {
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
-        "processes": process_truth,
+        "processes": process_truth | {"equity": equity.truth_dict(comp, price, grant)},
     }
     return world
 
