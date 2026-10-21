@@ -16,7 +16,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from hcsim.synth import population, structure
+from hcsim.synth import population, structure, workforce
 from hcsim.synth.config import WorldConfig
 
 GENERATOR_VERSION = 1
@@ -73,10 +73,20 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["dim_company"] = structure.company_dimension(config)
     world.tables["dim_account"] = structure.account_dimension()
     people = population.initial_population(config, rng)
-    world.tables["workforce_txn"] = active_rows(people, month_ends(config)[0]).reset_index(
-        drop=True
+    txn, process_truth = workforce.simulate_workforce(
+        people,
+        month_ends(config),
+        structure.cost_center_names(config),
+        config.first_employee_id + len(people),
+        rng,
+        lambda cc, level, r: population.draw_role(config, cc, level, r),
     )
-    world.truth = {"generator_version": GENERATOR_VERSION, "config": config.to_dict()}
+    world.tables["workforce_txn"] = txn[TXN_COLUMNS].reset_index(drop=True)
+    world.truth = {
+        "generator_version": GENERATOR_VERSION,
+        "config": config.to_dict(),
+        "processes": process_truth,
+    }
     return world
 
 
