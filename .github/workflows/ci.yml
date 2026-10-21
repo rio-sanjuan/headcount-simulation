@@ -77,6 +77,35 @@ jobs:
           enable-cache: true
       - run: make arch
 
+  workflows:
+    name: workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      # With a token, zizmor also runs its online audits, such as known-vulnerable actions.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: make workflows
+
+  deps:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - run: make deps
+
   test:
     name: test (python ${{ matrix.python }})
     needs: changes
@@ -172,7 +201,7 @@ jobs:
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [changes, lint, typecheck, arch, test, sanitize, secrets, pr-title]
+    needs: [changes, lint, typecheck, arch, workflows, deps, test, sanitize, secrets, pr-title]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
