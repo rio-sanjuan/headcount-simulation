@@ -8,9 +8,10 @@ follow the data contract that hcsim's extraction SQL reads. Only `synth` writes 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import duckdb
 import numpy as np
@@ -18,6 +19,8 @@ import pandas as pd
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
+from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
 
 GENERATOR_VERSION = 1
 
@@ -37,6 +40,22 @@ TXN_COLUMNS = [
     "is_manager",
     "hire_date",
 ]
+REQ_COLUMNS = [
+    "req_id",
+    "req_type",
+    "cost_center",
+    "job_code",
+    "job_family",
+    "job_level",
+    "location",
+    "company",
+    "is_manager",
+    "openings",
+    "opened_date",
+    "closed_date",
+    "close_reason",
+    "filled_by",
+]
 
 
 def month_ends(config: WorldConfig) -> list[pd.Timestamp]:
@@ -44,24 +63,92 @@ def month_ends(config: WorldConfig) -> list[pd.Timestamp]:
     return [(first + i).end_time.normalize() for i in range(config.months)]
 
 
-def active_rows(employees: pd.DataFrame, month_end: pd.Timestamp) -> pd.DataFrame:
-    """One ACTIVE stock row per employee at a month-end."""
-    rows = employees.assign(
-        reporting_date=month_end.date(),
-        event_date=month_end.date(),
-        trans_type="ACTIVE",
-        amount=1,
-        cost_center_previous=employees["cost_center"],
-        job_code_previous=employees["job_code"],
-    )
-    return rows[TXN_COLUMNS]
-
-
 @dataclass
 class World:
     config: WorldConfig
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     truth: dict[str, Any] = field(default_factory=dict)
+
+
+class _Labels:
+    """Turns the world's integer codes into the data contract's labels."""
+
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.cost_centers = structure.cost_center_names(config)
+        self.jobs = structure.job_codes(config)
+        self.level_index = np.zeros(max(config.levels) + 1, dtype=np.int64)
+        self.level_index[list(config.levels)] = np.arange(len(config.levels))
+
+    @staticmethod
+    def of(codes: np.ndarray, labels: Sequence[str]) -> pd.Categorical:
+        # The stubs want a Sequence; an integer array is the fast path pandas takes anyway.
+        return pd.Categorical.from_codes(
+            cast("Sequence[int]", codes.astype(np.int64)), categories=pd.Index(list(labels))
+        )
+
+    def job(self, family: np.ndarray, level: np.ndarray) -> pd.Categorical:
+        index = family.astype(np.int64) * len(self.config.levels) + self.level_index[level]
+        return self.of(index, self.jobs)
+
+    def dates(self, values: np.ndarray) -> np.ndarray:
+        return values.astype("datetime64[s]")
+
+
+def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
+    c = workforce.log.collect(TXN_DTYPES)
+    config = labels.config
+    dates = labels.dates(c["event_date"])
+    return pd.DataFrame(
+        {
+            "employee_id": c["employee_id"],
+            "reporting_date": dates,
+            "event_date": dates,
+            "trans_type": labels.of(c["trans_type"], TRANS_TYPES),
+            "amount": c["amount"].astype(np.int64),
+            "cost_center": labels.of(c["cost_center"], labels.cost_centers),
+            "cost_center_previous": labels.of(c["cost_center_previous"], labels.cost_centers),
+            "job_code": labels.job(c["family"], c["level"]),
+            "job_code_previous": labels.job(c["family_previous"], c["level_previous"]),
+            "location": labels.of(c["location"], config.locations),
+            "company": labels.of(c["company"], config.companies),
+            "account": labels.of(c["account"], population.ACCOUNTS),
+            "is_manager": c["is_manager"],
+            "hire_date": labels.dates(c["hire_date"]),
+        },
+        columns=TXN_COLUMNS,
+    )
+
+
+def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
+    config = labels.config
+    col = book.column
+    filled_by = pd.array(col("filled_by"), dtype="Int64")
+    filled_by[col("filled_by") < 0] = pd.NA
+    return pd.DataFrame(
+        {
+            "req_id": col("req_id"),
+            "req_type": labels.of(col("req_type"), REQ_TYPES),
+            "cost_center": labels.of(col("cost_center"), labels.cost_centers),
+            "job_code": labels.job(col("family"), col("level")),
+            "job_family": labels.of(col("family"), config.families),
+            "job_level": col("level").astype(np.int64),
+            "location": labels.of(col("location"), config.locations),
+            "company": labels.of(col("company"), config.companies),
+            "is_manager": col("is_manager"),
+            "openings": np.ones(len(book), dtype=np.int64),
+            "opened_date": labels.dates(col("opened_date")),
+            "closed_date": labels.dates(col("closed_date")),
+            "close_reason": labels.of(col("close_reason"), CLOSE_REASONS),
+            "filled_by": filled_by,
+        },
+        columns=REQ_COLUMNS,
+    )
+
+
+def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
+    """Plain `datetime.date` values, for the equity world's per-award arithmetic."""
+    return frame.assign(**{c: frame[c].dt.date for c in columns})
 
 
 def generate_world(config: WorldConfig) -> World:
@@ -74,28 +161,23 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["dim_location"] = structure.location_dimension(config)
     world.tables["dim_company"] = structure.company_dimension(config)
     world.tables["dim_account"] = structure.account_dimension()
-    people = population.initial_population(config, population_rng)
-    txn, reqs, process_truth = process.simulate(
-        people,
-        month_ends(config),
-        structure.cost_center_names(config),
-        config.first_employee_id + len(people),
-        process_rng,
-        lambda cc, level, r: population.draw_role(config, cc, level, r),
-        config.attrition,
-        config.requisitions,
-    )
-    world.tables["workforce_txn"] = txn[TXN_COLUMNS].reset_index(drop=True)
-    world.tables["req_interval"] = reqs
-    world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in month_ends(config)]})
-    comp, price, grant = config.compensation, config.prices, config.grants
+    ids, roles, hire_dates = population.initial_population(config, population_rng)
+    workforce = Workforce(ids, roles, hire_dates)
+    book = RequisitionBook()
     ends = month_ends(config)
+    process_truth = process.simulate(config, workforce, book, ends, process_rng)
+    labels = _Labels(config)
+    txn = _transactions(workforce, labels)
+    world.tables["workforce_txn"] = txn
+    world.tables["req_interval"] = _requisitions(book, labels)
+    world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in ends]})
+    comp, price, grant = config.compensation, config.prices, config.grants
     world.tables["comp_range"] = equity.compensation_ranges(
         config.families, config.levels, config.locations, comp
     )
     world.tables["stock_price"] = equity.stock_prices(ends, price, price_rng)
-    hires = txn[txn["trans_type"] == "HIRE"]
-    terms = txn[txn["trans_type"] == "TERM"]
+    hires = _as_dates(txn[txn["trans_type"] == "HIRE"].astype({"job_code": str}), "event_date")
+    terms = _as_dates(txn[txn["trans_type"] == "TERM"], "event_date")
     awards, vests = equity.new_hire_awards(
         hires,
         terms,
@@ -118,6 +200,20 @@ def generate_world(config: WorldConfig) -> World:
     return world
 
 
+def _select_list(frame: pd.DataFrame) -> str:
+    """Columns as the warehouse stores them: categoricals as text, timestamps as dates."""
+    parts = []
+    for name, dtype in frame.dtypes.items():
+        quoted = f'"{name}"'
+        if isinstance(dtype, pd.CategoricalDtype):
+            parts.append(f"CAST({quoted} AS VARCHAR) AS {quoted}")
+        elif pd.api.types.is_datetime64_any_dtype(dtype):
+            parts.append(f"CAST({quoted} AS DATE) AS {quoted}")
+        else:
+            parts.append(quoted)
+    return ", ".join(parts)
+
+
 def write_world(world: World, path: Path) -> None:
     """Write every table, and the truth manifest, to a fresh DuckDB file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,7 +221,7 @@ def write_world(world: World, path: Path) -> None:
     with duckdb.connect(str(path)) as con:
         for name, frame in world.tables.items():
             con.register("frame", frame)
-            con.execute(f"CREATE TABLE {name} AS SELECT * FROM frame")
+            con.execute(f"CREATE TABLE {name} AS SELECT {_select_list(frame)} FROM frame")
             con.unregister("frame")
         # Month-end snapshots of every open requisition. A requisition opened and closed
         # inside one month never appears, as with real snapshot data.

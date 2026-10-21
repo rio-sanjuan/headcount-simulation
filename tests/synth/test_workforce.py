@@ -35,7 +35,7 @@ def test_stock_and_flows_agree_for_every_cost_center_and_month(world: World) -> 
     txn = monthly(world.tables["workforce_txn"])
     stock = (
         txn[txn["trans_type"] == "ACTIVE"]
-        .groupby(["month", "cost_center"])
+        .groupby(["month", "cost_center"], observed=False)
         .size()
         .unstack(fill_value=0)
         .sort_index()
@@ -43,7 +43,7 @@ def test_stock_and_flows_agree_for_every_cost_center_and_month(world: World) -> 
     flows = txn[txn["trans_type"].isin(FLOW_SIGN)]
     net = (
         flows.assign(delta=flows["amount"])
-        .groupby(["month", "cost_center"])["delta"]
+        .groupby(["month", "cost_center"], observed=False)["delta"]
         .sum()
         .unstack(fill_value=0)
         .reindex(index=stock.index, columns=stock.columns, fill_value=0)
@@ -104,7 +104,7 @@ def test_departures_recover_the_true_hazard(world: World) -> None:
     expected = variance = 0.0
     for previous, month in itertools.pairwise(months):
         at_risk = active[active["month"] == previous]
-        month_end = month.to_timestamp(how="end").normalize().date()
+        month_end = month.to_timestamp(how="end").normalize()
         for row in at_risk.itertuples():
             tenure = (month_end - row.hire_date).days / 30.4
             h = truth.hazard(int(jobs[row.job_code]), tenure, month.month, effect[row.cost_center])

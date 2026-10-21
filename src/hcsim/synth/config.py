@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Final
 
 import numpy as np
+from numpy.typing import NDArray
 
 # Families and their tech indicator. Synthetic names, chosen to read as generic functions.
 FAMILIES: dict[str, str] = {
@@ -37,15 +38,34 @@ class AttritionTruth:
     seasonal_peak_month: int = 3
     cost_center_sigma: float = 0.2
 
-    def hazard(
-        self, level: int, tenure_months: float, month_of_year: int, cost_center_effect: float
-    ) -> float:
+    def hazards(
+        self,
+        levels: NDArray[np.integer],
+        tenure_months: NDArray[np.floating],
+        month_of_year: int,
+        cost_center_effect: NDArray[np.floating],
+    ) -> NDArray[np.float64]:
+        """The monthly departure hazard for each person."""
         season = 1 + self.seasonal_amplitude * np.cos(
             2 * np.pi * (month_of_year - self.seasonal_peak_month) / 12
         )
-        tenure = self.first_year_factor if tenure_months < 12 else 1.0
-        h = self.base_monthly_hazard * self.level_factor[level] * tenure * season
-        return float(min(1.0, h * cost_center_effect))
+        factor = np.zeros(max(self.level_factor) + 1)
+        factor[list(self.level_factor)] = list(self.level_factor.values())
+        tenure = np.where(np.asarray(tenure_months) < 12, self.first_year_factor, 1.0)
+        h = self.base_monthly_hazard * factor[np.asarray(levels)] * tenure * season
+        return np.minimum(1.0, h * np.asarray(cost_center_effect))
+
+    def hazard(
+        self, level: int, tenure_months: float, month_of_year: int, cost_center_effect: float
+    ) -> float:
+        return float(
+            self.hazards(
+                np.array([level]),
+                np.array([tenure_months]),
+                month_of_year,
+                np.array([cost_center_effect]),
+            )[0]
+        )
 
 
 @dataclass(frozen=True)
@@ -63,6 +83,10 @@ class RequisitionTruth:
 
     def external_hazard(self, age_months: int) -> float:
         return self.external_fill_hazard[min(age_months, len(self.external_fill_hazard) - 1)]
+
+    def external_hazards(self, age_months: NDArray[np.integer]) -> NDArray[np.float64]:
+        table = np.asarray(self.external_fill_hazard, dtype=np.float64)
+        return table[np.minimum(np.asarray(age_months), len(table) - 1)]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

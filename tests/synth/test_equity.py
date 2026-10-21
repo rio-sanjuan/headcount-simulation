@@ -43,8 +43,8 @@ def test_awards_go_to_external_hires_still_there_on_the_award_date(world: World)
     assert awards["employee_id"].is_unique
     for award in awards.to_dict("records"):
         employee, award_date = award["employee_id"], award["award_date"]
-        assert 30 <= (award_date - hires[employee]).days <= 60
-        assert employee not in left or left[employee] > award_date
+        assert 30 <= (pd.Timestamp(award_date) - hires[employee]).days <= 60
+        assert employee not in left or left[employee] > pd.Timestamp(award_date)
         assert award_date <= WORLD_END
 
 
