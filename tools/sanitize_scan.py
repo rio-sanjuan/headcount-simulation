@@ -205,9 +205,10 @@ def scan_history_names(head: str, cwd: Path | None = None) -> list[Hit]:
 
 def scan_pre_push(patterns: Sequence[Pattern], env: dict[str, str]) -> list[Hit]:
     """Scan what a push sends, using the refs pre-commit exports for the pre-push stage."""
-    head = env.get("PRE_COMMIT_TO_REF", "")
+    # pre-commit omits the refs when it pushes a new root history, so scan all of HEAD then.
+    head = env.get("PRE_COMMIT_TO_REF") or "HEAD"
     base = env.get("PRE_COMMIT_FROM_REF", "")
-    if not head or ZERO_SHA.match(head):
+    if ZERO_SHA.match(head):
         return []  # Deleting a remote branch sends nothing.
     hits = scan_history_names(head)
     if not base or ZERO_SHA.match(base):
