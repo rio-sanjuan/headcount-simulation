@@ -9,11 +9,13 @@ the engine's vectorized calculator can be scored against it.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from hcsim.synth.config import CompensationTruth, GrantTruth, PriceTruth
 
 LEDGER_COLUMNS = [
     "award_id",
@@ -24,48 +26,6 @@ LEDGER_COLUMNS = [
     "trueup_vesting",
     "recognized",
 ]
-
-
-@dataclass(frozen=True)
-class CompensationTruth:
-    base_midpoint_by_level: dict[int, float] = field(
-        default_factory=lambda: {1: 60_000, 2: 80_000, 3: 110_000, 4: 150_000, 5: 200_000}
-    )
-    family_factor: dict[str, float] = field(
-        default_factory=lambda: {
-            "Engineering": 1.2,
-            "Finance": 1.0,
-            "Operations": 0.9,
-            "Sales": 1.0,
-        }
-    )
-    #: Equity's share of target total compensation, on top of base, by level.
-    equity_share_by_level: dict[int, float] = field(
-        default_factory=lambda: {1: 0.10, 2: 0.20, 3: 0.35, 4: 0.50, 5: 0.80}
-    )
-    range_half_width: float = 0.20
-    base_adjustment: float = 1.03
-
-
-@dataclass(frozen=True)
-class PriceTruth:
-    start_price: float = 100.0
-    monthly_drift: float = 0.008
-    monthly_volatility: float = 0.07
-    #: Grant-date fair value = month-end close times a uniform factor in this band.
-    fair_value_band: tuple[float, float] = (0.97, 1.03)
-
-
-@dataclass(frozen=True)
-class GrantTruth:
-    new_hire_value_by_level: dict[int, float] = field(
-        default_factory=lambda: {1: 5_000, 2: 15_000, 3: 40_000, 4: 90_000, 5: 200_000}
-    )
-    value_sigma: float = 0.15
-    award_lag_days: tuple[int, int] = (30, 60)
-    #: Vest schedule: months after the award, and the share of the award vesting at each.
-    vest_months: tuple[int, ...] = (12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48)
-    vest_shares: tuple[float, ...] = (0.25,) + (0.0625,) * 12
 
 
 def compensation_ranges(

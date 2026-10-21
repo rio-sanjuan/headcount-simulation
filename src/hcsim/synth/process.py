@@ -10,8 +10,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hcsim.synth.requisitions import Requisition, RequisitionBook, RequisitionTruth
-from hcsim.synth.workforce import AttritionTruth, Workforce, random_day, tenure_months
+from hcsim.synth.config import AttritionTruth, RequisitionTruth
+from hcsim.synth.requisitions import Requisition, RequisitionBook
+from hcsim.synth.workforce import Workforce, random_day, tenure_months
 
 RoleDrawer = Callable[[int, int, np.random.Generator], dict[str, Any]]
 

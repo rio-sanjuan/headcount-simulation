@@ -11,7 +11,7 @@ month. Every value is invented.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -32,26 +32,6 @@ REQ_COLUMNS = [
     "close_reason",
     "filled_by",
 ]
-
-
-@dataclass(frozen=True)
-class RequisitionTruth:
-    backfill_probability: float = 0.6
-    growth_requisitions_per_month: float = 0.25
-    growth_sigma: float = 0.3
-    growth_level_mix: dict[int, float] = field(default_factory=lambda: {1: 0.5, 2: 0.3, 3: 0.2})
-    #: Monthly external-fill hazard by age in months: 0, 1, 2, then 3 and older.
-    external_fill_hazard: tuple[float, ...] = (0.15, 0.30, 0.30, 0.25)
-    transfer_fill_hazard: float = 0.06
-    unfilled_exit_hazard: float = 0.04
-    #: A transfer candidate shares the family and sits within this many levels.
-    transfer_level_band: int = 1
-
-    def external_hazard(self, age_months: int) -> float:
-        return self.external_fill_hazard[min(age_months, len(self.external_fill_hazard) - 1)]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass

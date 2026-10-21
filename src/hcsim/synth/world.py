@@ -82,11 +82,13 @@ def generate_world(config: WorldConfig) -> World:
         config.first_employee_id + len(people),
         process_rng,
         lambda cc, level, r: population.draw_role(config, cc, level, r),
+        config.attrition,
+        config.requisitions,
     )
     world.tables["workforce_txn"] = txn[TXN_COLUMNS].reset_index(drop=True)
     world.tables["req_interval"] = reqs
     world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in month_ends(config)]})
-    comp, price, grant = equity.CompensationTruth(), equity.PriceTruth(), equity.GrantTruth()
+    comp, price, grant = config.compensation, config.prices, config.grants
     ends = month_ends(config)
     world.tables["comp_range"] = equity.compensation_ranges(
         config.families, config.levels, config.locations, comp
