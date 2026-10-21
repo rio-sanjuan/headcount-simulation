@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tool caches
+.cache/
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.memray/
+
+# Generated output. Only the code and SQL that produce it are tracked (plan section 6).
+data/
+outputs/
+artifacts/
+reports/
+site/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Never commit private material. The pre-push hook enforces this too.
+*denylist*.txt
+project-description.md
