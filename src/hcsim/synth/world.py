@@ -19,6 +19,7 @@ import pandas as pd
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
 from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
 from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
 
@@ -153,6 +154,20 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
     )
 
 
+def _ratings(ratings: RatingProcess, config: WorldConfig) -> pd.DataFrame:
+    """One row per employee and calibration cycle, with the rating's label and rank."""
+    c = ratings.log.collect(RATING_DTYPES)
+    return pd.DataFrame(
+        {
+            "employee_id": c["employee_id"],
+            "cycle_date": c["cycle_date"].astype("datetime64[s]"),
+            "rating": _Labels.of(c["rating"], config.ratings.scale),
+            "rating_rank": c["rating"].astype(np.int64) + 1,
+            "is_first": c["is_first"],
+        }
+    )
+
+
 def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
     """Plain `datetime.date` values, for the equity world's per-award arithmetic."""
     return frame.assign(**{c: frame[c].dt.date for c in columns})
@@ -161,8 +176,8 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(5)
-    population_rng, process_rng, price_rng, grant_rng, structure_rng = (
+    streams = np.random.SeedSequence(config.seed).spawn(6)
+    population_rng, process_rng, price_rng, grant_rng, structure_rng, rating_rng = (
         np.random.default_rng(s) for s in streams
     )
     world = World(config)
@@ -175,8 +190,10 @@ def generate_world(config: WorldConfig) -> World:
     workforce = Workforce(ids, roles, hire_dates)
     book = RequisitionBook()
     ends = month_ends(config)
-    process_truth = process.simulate(config, workforce, book, ends, process_rng)
+    ratings = RatingProcess(config.ratings, workforce, rating_rng)
+    process_truth = process.simulate(config, workforce, book, ends, process_rng, ratings)
     labels = _Labels(config)
+    world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels)
     world.tables["workforce_txn"] = txn
     world.tables["req_interval"] = _requisitions(book, labels)
