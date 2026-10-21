@@ -1,0 +1,33 @@
+# Artifacts on a public repository can be downloaded by anyone signed in to GitHub, so nothing is
+# uploaded without passing the sanitization scan first. Use this action for every upload.
+name: scan and upload
+description: Scan files with the denylist, then upload them as an artifact.
+
+inputs:
+  name:
+    description: Artifact name
+    required: true
+  path:
+    description: File or directory to scan and upload
+    required: true
+  denylist:
+    description: The denylist, from the SANITIZE_DENYLIST secret
+    required: true
+  retention-days:
+    description: Days to keep the artifact
+    default: "7"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SANITIZE_DENYLIST: ${{ inputs.denylist }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+      run: make sanitize-artifact
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ignore

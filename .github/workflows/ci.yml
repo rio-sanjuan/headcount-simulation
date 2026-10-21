@@ -145,6 +145,15 @@ jobs:
         env:
           TESTS: ${{ needs.changes.outputs.tests }}
         run: make test-cov TESTS="$TESTS"
+      # Hypothesis' example database holds the failing inputs. The upload is scanned first.
+      - if: failure()
+        # The newer `$/` form is safer, but actionlint 1.7.12 can't parse it yet. Nothing is cloned
+        # at runtime before this step, so `./` loads only this repository's action.
+        uses: ./.github/actions/scan-and-upload # zizmor: ignore[self-repository]
+        with:
+          name: hypothesis-${{ matrix.python }}
+          path: .hypothesis
+          denylist: ${{ secrets.SANITIZE_DENYLIST }}
       # At least 90% of the lines a PR changes must be tested, and 95% in hcsim.financial.
       - if: ${{ matrix.coverage && github.event_name == 'pull_request' }}
         env:

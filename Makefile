@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -91,6 +91,13 @@ sanitize-main: ## Denylist scan of the whole tree and the pushed commits (CI)
 # and release notes. The text never touches a command line.
 sanitize-text: ## Denylist scan of text on stdin, reported as NAME (CI)
 	$(UV_RUN) python tools/sanitize_scan.py --stdin "$$NAME"
+
+# CI, before any upload: every file under $ARTIFACT_PATH, names and text content. A missing path
+# has nothing to upload, so it passes.
+sanitize-artifact: ## Denylist scan of an artifact before upload (CI)
+	if [ -e "$$ARTIFACT_PATH" ]; then \
+		find "$$ARTIFACT_PATH" -type f -print0 | xargs -0 $(UV_RUN) python tools/sanitize_scan.py; \
+	fi
 
 # Credential patterns across the whole git history. Findings print redacted. Not part of
 # `make check`, so local checks don't need gitleaks: install it with `brew install gitleaks`.
