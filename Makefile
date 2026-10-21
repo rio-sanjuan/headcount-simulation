@@ -8,7 +8,7 @@ HEAVY := slow or acceptance or e2e
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize affected
+.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -40,6 +40,12 @@ test-heavy: ## Slow, acceptance, and e2e tests
 
 sanitize: ## Denylist scan of every tracked file
 	$(UV_RUN) python tools/sanitize_scan.py --tree
+
+# CI: what a PR adds since $BASE (lines, file names, commit messages) and its $BRANCH name.
+# Both come from the environment, never from make arguments, so they can't reach the shell.
+sanitize-pr: ## Denylist scan of a PR's changes and branch name (CI)
+	$(UV_RUN) python tools/sanitize_scan.py --range "$$BASE..HEAD"
+	printf '%s' "$$BRANCH" | $(UV_RUN) python tools/sanitize_scan.py --stdin "branch name"
 
 # CI passes the PR's base commit. With no BASE, everything runs.
 affected: ## Test paths a change since BASE can affect
