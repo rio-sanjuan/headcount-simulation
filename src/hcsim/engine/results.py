@@ -1,0 +1,105 @@
+"""Domain results: a declarative description of everything one domain does in one step.
+
+Handlers are pure. They read state and return a `DomainResult`, and only the apply step writes.
+Every index in a result refers to the live rows as the handler saw them, before any change.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+import numpy as np
+from numpy.typing import NDArray
+
+from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, BufferLayout
+
+Ints = NDArray[np.int64]
+
+
+def _no_index() -> Ints:
+    return np.zeros(0, dtype=np.int64)
+
+
+def _unset() -> Buffer:
+    return np.zeros((0, 0))
+
+
+@dataclass(frozen=True)
+class RowChange:
+    """Drops, in-place writes, and appends for one buffer.
+
+    Appended rows with a negative id get the next simulated id when applied.
+    """
+
+    layout: BufferLayout
+    drop: Ints = field(default_factory=_no_index)
+    write_index: Ints = field(default_factory=_no_index)
+    write_rows: Buffer = field(default_factory=_unset)
+    append: Buffer = field(default_factory=_unset)
+
+    def __post_init__(self) -> None:
+        for name in ("drop", "write_index"):
+            object.__setattr__(self, name, np.asarray(getattr(self, name), dtype=np.int64))
+        for name in ("write_rows", "append"):
+            rows = getattr(self, name)
+            if rows.shape == (0, 0):
+                object.__setattr__(self, name, self.layout.empty(0))
+            elif rows.ndim != 2 or rows.shape[1] != self.layout.width:
+                raise ValueError(f"{name} must use the {self.layout.name} layout")
+        if len(self.write_index) != len(self.write_rows):
+            raise ValueError("one written row per write index")
+        if len(np.intersect1d(self.drop, self.write_index)):
+            raise ValueError("a row can't be both dropped and written")
+
+    @property
+    def is_empty(self) -> bool:
+        return not (len(self.drop) or len(self.write_index) or len(self.append))
+
+
+def _no_employees() -> RowChange:
+    return RowChange(EMPLOYEE)
+
+
+def _no_openings() -> RowChange:
+    return RowChange(OPENING)
+
+
+@dataclass(frozen=True)
+class Grant:
+    """An award for every employee the result appends. Handlers emit grants whatever the run's
+    scope; a headcount-only run sizes nothing."""
+
+    award_type: str
+
+
+@dataclass(frozen=True)
+class QuotaRecord:
+    """A guided draw's accounting, per group: what guidance asked, who could leave or fill,
+    and what happened. Realized is the smaller of quota and eligible."""
+
+    quota: Ints
+    eligible: Ints
+    realized: Ints
+
+
+@dataclass(frozen=True)
+class DomainResult:
+    domain: str
+    employees: RowChange = field(default_factory=_no_employees)
+    openings: RowChange = field(default_factory=_no_openings)
+    grants: tuple[Grant, ...] = ()
+    #: Whether dropped employees forfeit their unvested equity.
+    forfeit: bool = True
+    #: Pre-departure rows of employees who left a role this step, for backfill to read.
+    departures: Buffer = field(default_factory=lambda: EMPLOYEE.empty(0))
+    #: Shared guidance quota this result used, by category, per group.
+    ledger: Mapping[str, Ints] = field(default_factory=dict)
+    #: Accounting for guided draws, by category.
+    quotas: Mapping[str, QuotaRecord] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.employees.layout is not EMPLOYEE or self.openings.layout is not OPENING:
+            raise ValueError("employees and openings changes must use their own layouts")
+        if self.departures.ndim != 2 or self.departures.shape[1] != EMPLOYEE.width:
+            raise ValueError("departures must use the employee layout")
