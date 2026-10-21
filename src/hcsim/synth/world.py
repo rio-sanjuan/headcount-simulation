@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
 from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
 from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
@@ -177,8 +178,8 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(6)
-    population_rng, process_rng, price_rng, grant_rng, structure_rng, rating_rng = (
+    streams = np.random.SeedSequence(config.seed).spawn(7)
+    population_rng, process_rng, price_rng, grant_rng, structure_rng, rating_rng, promotion_rng = (
         np.random.default_rng(s) for s in streams
     )
     world = World(config)
@@ -197,8 +198,9 @@ def generate_world(config: WorldConfig) -> World:
     org_of_cost_center: NDArray[np.int64] = np.asarray(
         org["org_level1"].map({t: i for i, t in enumerate(tops)}), dtype=np.int64
     )
+    promotions = PromotionProcess(config, workforce, promotion_rng)
     process_truth = process.simulate(
-        config, workforce, book, ends, process_rng, ratings, org_of_cost_center
+        config, workforce, book, ends, process_rng, ratings, org_of_cost_center, promotions
     )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)

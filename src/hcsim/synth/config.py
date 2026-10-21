@@ -316,6 +316,44 @@ class RatingTruth:
         return found
 
 
+@dataclass(frozen=True)
+class PromotionTruth:
+    """Promotions: a latent readiness that accrues every month, and promotion cycles.
+
+    Each month an employee's readiness grows by a non-negative draw whose mean depends on their
+    rating. At a cycle, everyone whose readiness has reached `readiness_threshold` is promoted
+    one level with their level's chance, and promotion resets readiness to zero. Some
+    promotions also move the employee to another family. Invented, round values.
+    """
+
+    cycle_months: tuple[int, ...] = (3, 9)
+    readiness_threshold: float = 36.0
+    #: Mean monthly readiness by rating, worst to best, and for the unrated.
+    readiness_drift: tuple[float, ...] = (0.2, 0.6, 1.0, 1.4, 1.9)
+    unrated_drift: float = 0.8
+    readiness_sigma: float = 0.5
+    #: The chance a ready employee is promoted at a cycle, by current level. The top level of
+    #: the world is never promoted.
+    promotion_probability: dict[int, float] = field(
+        default_factory=lambda: {1: 0.3, 2: 0.25, 3: 0.2, 4: 0.15, 5: 0.12, 6: 0.1, 7: 0.08}
+    )
+    family_change_probability: float = 0.10
+
+    def problems(self, rating_levels: int, levels: tuple[int, ...]) -> list[str]:
+        found = []
+        if not self.cycle_months or any(m not in range(1, 13) for m in self.cycle_months):
+            found.append("promotions.cycle_months must be calendar months 1-12")
+        if len(self.readiness_drift) != rating_levels:
+            found.append("promotions.readiness_drift needs one value per rating")
+        if missing := sorted(set(levels[:-1]) - set(self.promotion_probability)):
+            found.append(f"promotions.promotion_probability has no value for levels {missing}")
+        if not 0 <= self.family_change_probability <= 1:
+            found.append("promotions.family_change_probability must lie in [0, 1]")
+        if self.readiness_threshold <= 0:
+            found.append("promotions.readiness_threshold must be positive")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -377,6 +415,7 @@ class WorldConfig:
     prices: PriceTruth = field(default_factory=PriceTruth)
     grants: GrantTruth = field(default_factory=GrantTruth)
     ratings: RatingTruth = field(default_factory=RatingTruth)
+    promotions: PromotionTruth = field(default_factory=PromotionTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -435,6 +474,7 @@ class WorldConfig:
             problems.append(f"requisitions.growth_level_mix names unknown levels {extra}")
         problems += self.ratings.problems()
         problems += self.attrition.problems(len(self.ratings.scale))
+        problems += self.promotions.problems(len(self.ratings.scale), self.levels)
         if problems:
             raise ValueError("invalid WorldConfig: " + "; ".join(problems))
 

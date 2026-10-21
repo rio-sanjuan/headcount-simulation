@@ -102,11 +102,12 @@ def test_the_last_cycle_before_the_start() -> None:
 
 
 def test_ratings_draw_from_their_own_stream() -> None:
-    """With rating factors held flat, changing the rating truth leaves the workforce alone."""
-    flat = dataclasses.replace(
-        preset("tiny", seed=4).attrition, rating_factor=(1.0,) * 5, unrated_factor=1.0
-    )
-    base = dataclasses.replace(preset("tiny", seed=4), attrition=flat)
+    """With every rating effect held flat, changing the rating truth leaves the workforce
+    alone."""
+    tiny = preset("tiny", seed=4)
+    flat = dataclasses.replace(tiny.attrition, rating_factor=(1.0,) * 5, unrated_factor=1.0)
+    even = dataclasses.replace(tiny.promotions, readiness_drift=(1.0,) * 5, unrated_drift=1.0)
+    base = dataclasses.replace(tiny, attrition=flat, promotions=even)
     other = dataclasses.replace(base, ratings=RatingTruth(cycle_months=(6, 12)))
     a, b = generate_world(base), generate_world(other)
     pd.testing.assert_frame_equal(a.tables["workforce_txn"], b.tables["workforce_txn"])
