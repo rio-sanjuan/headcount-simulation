@@ -2,7 +2,8 @@
 
 Each month, in order:
 
-0. In a cycle month, a calibration rates everyone eligible (see `ratings`).
+0. In a cycle month, a calibration rates everyone eligible (see `ratings`), and then a
+   promotion cycle promotes everyone ready (see `promotions`).
 1. Every active employee may leave, with the true departure hazard. A departure may open a
    backfill requisition for the same role.
 2. Each cost center opens growth requisitions at its own Poisson rate.
@@ -25,6 +26,7 @@ from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.population import draw_roles
+from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RatingProcess
 from hcsim.synth.requisitions import RequisitionBook
 from hcsim.synth.structure import cost_center_names, level_one_names
@@ -133,6 +135,7 @@ def simulate(
     rng: np.random.Generator,
     ratings: RatingProcess | None = None,
     org_of_cost_center: NDArray[np.int64] | None = None,
+    promotions: PromotionProcess | None = None,
 ) -> dict[str, Any]:
     """Run the world over `month_ends`. The first month-end is the initial stock. Returns the
     random effects the run drew, for the truth manifest."""
@@ -152,12 +155,17 @@ def simulate(
 
     if ratings is not None:
         ratings.seed(pd.Period(month_ends[0], freq="M"))
+    if promotions is not None:
+        promotions.seed()
     for m, month_end in enumerate(month_ends[1:], start=1):
         end = np.datetime64(month_end.date(), "D")
         month = pd.Period(month_end, freq="M")
         # 0. A calibration takes effect on the first day of a cycle month.
         if ratings is not None and ratings.is_cycle(month):
             ratings.calibrate(month)
+        # 0b. Promotions take effect on the same day, reading the new ratings.
+        if promotions is not None and promotions.is_cycle(month):
+            promotions.promote(month)
         # 1. Departures, and the backfill each may open.
         multiplier = shocks.step(m, rng)
         active = workforce.active()
@@ -199,6 +207,8 @@ def simulate(
         _transfers(config, workforce, book, open_reqs[transfer], dates[transfer], m, rng)
         book.close(open_reqs[unfilled], dates[unfilled], "unfilled")
         workforce.snapshot(end)
+        if promotions is not None:
+            promotions.accrue()
 
     names = cost_center_names(config)
     months = [str(pd.Period(e, freq="M")) for e in month_ends[1:]]

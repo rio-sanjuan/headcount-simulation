@@ -3,8 +3,9 @@
 `Workforce` is the world's own register of who is employed: one row per person ever employed,
 as integer-coded columns, with an active flag. Every change goes through it, and each change
 appends transaction rows that the data contract carries: `HIRE` (+1), `TERM` (-1), the two legs
-of a move between roles, `XFER_OUT` (-1) and `XFER_IN` (+1), and one `ACTIVE` stock row per
-employee at every month-end. A row's index never changes, so indices stay valid all run.
+of a move between roles, `XFER_OUT` (-1) and `XFER_IN` (+1), a `PROMO` (0) that changes the
+job in place, and one `ACTIVE` stock row per employee at every month-end. A row's index never
+changes, so indices stay valid all run.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from numpy.typing import DTypeLike, NDArray
 from hcsim.synth.columns import EventLog, Index, Table
 from hcsim.synth.population import ROLE_DTYPES, Roles
 
-TRANS_TYPES: Final = ("ACTIVE", "HIRE", "TERM", "XFER_IN", "XFER_OUT")
+TRANS_TYPES: Final = ("ACTIVE", "HIRE", "TERM", "XFER_IN", "XFER_OUT", "PROMO")
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
 #: Transaction columns, coded. `*_previous` hold the role before a move.
@@ -46,6 +47,7 @@ class Workforce:
                 "hire_date": "datetime64[D]",
                 "active": bool,
                 "rating": np.int8,  # a code into the rating scale; -1 until first rated
+                "readiness": np.float32,  # latent promotion readiness
             }
         )
         self.people.append(
@@ -114,6 +116,13 @@ class Workforce:
             self.people.column(name)[index] = values
         self._record(index, "XFER_IN", +1, dates, previous=before)
         return before
+
+    def promote(self, index: Index, roles: Roles, dates: NDArray[np.datetime64]) -> None:
+        """Change jobs in place, recorded as one `PROMO` row with the job before."""
+        before = self.roles(index)
+        for name, values in roles.items():
+            self.people.column(name)[index] = values
+        self._record(index, "PROMO", 0, dates, previous=before)
 
     def snapshot(self, month_end: np.datetime64) -> None:
         self._record(self.active(), "ACTIVE", 1, month_end)
