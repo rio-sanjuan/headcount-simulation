@@ -32,6 +32,7 @@ dev = [
     "hypothesis>=6.170.5",
     "import-linter>=2.15",
     "mypy>=2.4.0",
+    "pandas-stubs>=2.2,<3",
     "pip-audit>=2.10.1",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
