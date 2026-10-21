@@ -2,8 +2,9 @@
 name = "hcsim"
 version = "0.1.0.dev0"
 description = "Employee-level Monte Carlo headcount forecast, aggregate guidance forecasting, and stock-based compensation (ASC 718) expense simulation on fully synthetic data."
+readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.2",
