@@ -153,10 +153,13 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
-    streams = np.random.SeedSequence(config.seed).spawn(4)
-    population_rng, process_rng, price_rng, grant_rng = (np.random.default_rng(s) for s in streams)
+    # A stream's draws depend only on its position, so new streams go at the end.
+    streams = np.random.SeedSequence(config.seed).spawn(5)
+    population_rng, process_rng, price_rng, grant_rng, structure_rng = (
+        np.random.default_rng(s) for s in streams
+    )
     world = World(config)
-    world.tables["dim_org"] = structure.org_dimension(config)
+    world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
     world.tables["dim_job"] = structure.job_dimension(config)
     world.tables["dim_location"] = structure.location_dimension(config)
     world.tables["dim_company"] = structure.company_dimension(config)
