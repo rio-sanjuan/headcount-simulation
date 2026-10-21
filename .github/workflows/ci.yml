@@ -109,7 +109,6 @@ jobs:
 
   sanitize:
     name: sanitization scan
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -121,11 +120,17 @@ jobs:
         with:
           enable-cache: true
       # A missing secret fails the scan (exit 2) rather than passing it.
-      - env:
+      - if: github.event_name == 'pull_request'
+        env:
           SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
           BASE: ${{ github.event.pull_request.base.sha }}
           BRANCH: ${{ github.head_ref }}
         run: make sanitize-pr
+      - if: github.event_name == 'push'
+        env:
+          SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
+          BEFORE: ${{ github.event.before }}
+        run: make sanitize-main
 
   pr-title:
     name: conventional PR title
