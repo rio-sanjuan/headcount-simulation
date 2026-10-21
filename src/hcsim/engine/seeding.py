@@ -46,6 +46,8 @@ from hcsim.model.core.schema import (
 REQ_TYPES: Final = ("backfill", "campus", "growth")
 AWARD_TYPES: Final = ("new_hire",)
 SIMULATED_ID_BASE: Final = 1_000_000_000
+#: Headcount is regular employees: contingent and temporary workers sit outside it.
+REGULAR: Final = "SELECT account FROM dim_account WHERE account_group = 'regular'"
 
 _EMPLOYEE_CODES = {
     COST_CENTER: EmployeeColumn.COST_CENTER,
@@ -142,11 +144,11 @@ def seed_state(
 ) -> tuple[SimulationState, SeedReport]:
     snapshot = snapshot_before(con, run_date)
     people = con.execute(
-        """
+        f"""
         SELECT t.employee_id, t.cost_center, j.job_family, j.job_level, j.tech_indicator,
                t.location, t.company, t.is_manager, t.hire_date
         FROM workforce_txn t JOIN dim_job j USING (job_code)
-        WHERE t.trans_type = 'ACTIVE' AND t.event_date = ?
+        WHERE t.trans_type = 'ACTIVE' AND t.event_date = ? AND t.account IN ({REGULAR})
         ORDER BY t.employee_id
         """,
         [snapshot],

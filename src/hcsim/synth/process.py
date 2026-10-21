@@ -8,7 +8,8 @@ Each month, in order:
    backfill requisition for the same role.
 2. Each cost center opens growth requisitions at its own Poisson rate.
 3. Every open requisition, including this month's, may fill externally (a hazard by age), fill
-   by transfer when an internal candidate exists, exit unfilled, or stay open. A transfer
+   by transfer when an internal candidate exists, fill by converting a contingent worker, exit
+   unfilled, or stay open. A transfer
    vacates the mover's old role, which may open a backfill of its own from the next month.
 4. The month-end stock is recorded.
 
@@ -25,6 +26,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.movements import MovementProcess
 from hcsim.synth.population import draw_roles
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RatingProcess
@@ -90,10 +92,17 @@ class TransferPool:
     another cost center. Each pick is uniform over the valid candidates.
     """
 
-    def __init__(self, workforce: Workforce, band: int) -> None:
+    def __init__(
+        self,
+        workforce: Workforce,
+        band: int,
+        members: NDArray[np.int64] | None = None,
+        other_cost_center: bool = True,
+    ) -> None:
         self.workforce = workforce
         self.band = band
-        active = workforce.active()
+        self.other_cost_center = other_cost_center
+        active = workforce.active() if members is None else members
         family, level = workforce.column("family")[active], workforce.column("level")[active]
         self.groups: dict[tuple[int, int], list[int]] = {}
         for f, lv, i in zip(family.tolist(), level.tolist(), active.tolist(), strict=True):
@@ -116,15 +125,17 @@ class TransferPool:
             r = int(rng.integers(total))
             g = int(np.searchsorted(bounds, r, side="right"))
             candidate = groups[g][r - (int(bounds[g - 1]) if g else 0)]
-            if cost_centers[candidate] != cost_center:
+            if not self.other_cost_center or cost_centers[candidate] != cost_center:
                 return candidate
         pool = np.array([i for g in groups for i in g])
-        valid = pool[cost_centers[pool] != cost_center]
+        valid = pool[cost_centers[pool] != cost_center] if self.other_cost_center else pool
         return int(valid[rng.integers(len(valid))]) if len(valid) else None
 
-    def move(self, index: int, old: tuple[int, int], new: tuple[int, int]) -> None:
+    def move(self, index: int, old: tuple[int, int], new: tuple[int, int] | None) -> None:
+        """Regroup a member whose job changed, or drop one that left the pool (`new=None`)."""
         self.groups[old].remove(index)
-        self.groups.setdefault(new, []).append(index)
+        if new is not None:
+            self.groups.setdefault(new, []).append(index)
 
 
 def simulate(
@@ -136,6 +147,7 @@ def simulate(
     ratings: RatingProcess | None = None,
     org_of_cost_center: NDArray[np.int64] | None = None,
     promotions: PromotionProcess | None = None,
+    movements: MovementProcess | None = None,
 ) -> dict[str, Any]:
     """Run the world over `month_ends`. The first month-end is the initial stock. Returns the
     random effects the run drew, for the truth manifest."""
@@ -166,6 +178,10 @@ def simulate(
         # 0b. Promotions take effect on the same day, reading the new ratings.
         if promotions is not None and promotions.is_cycle(month):
             promotions.promote(month)
+        # 0c. Reclassification and reorganization batches.
+        if movements is not None:
+            movements.reclassify(month)
+            movements.reorganize(month)
         # 1. Departures, and the backfill each may open.
         multiplier = shocks.step(m, rng)
         active = workforce.active()
@@ -183,6 +199,9 @@ def simulate(
         workforce.terminate(leavers, dates)
         backfill = rng.random(len(leavers)) < reqs.backfill_probability
         book.open("backfill", workforce.roles(leavers[backfill]), dates[backfill], m)
+        # 1b. Conversions out, and the contingent pool's own ends and starts.
+        if movements is not None:
+            movements.contingent(month)
 
         # 2. Growth requisitions.
         cost_centers = np.repeat(np.arange(n), rng.poisson(growth_rate))
@@ -195,16 +214,20 @@ def simulate(
         h_ext = reqs.external_hazards(m - book.column("opened_month")[open_reqs])
         u = rng.random(len(open_reqs))
         dates = random_days(month_end, len(open_reqs), rng, book.column("opened_date")[open_reqs])
+        h_conv = config.movements.conversion_fill_hazard if movements is not None else 0.0
         external = u < h_ext
         transfer = ~external & (u < h_ext + reqs.transfer_fill_hazard)
+        conversion = ~external & ~transfer & (u < h_ext + reqs.transfer_fill_hazard + h_conv)
         unfilled = (
             ~external
             & ~transfer
-            & (u < h_ext + reqs.transfer_fill_hazard + reqs.unfilled_exit_hazard)
+            & ~conversion
+            & (u < h_ext + reqs.transfer_fill_hazard + h_conv + reqs.unfilled_exit_hazard)
         )
         hired = workforce.hire(book.roles(open_reqs[external]), dates[external])
         book.close(open_reqs[external], dates[external], "filled_external", hired)
         _transfers(config, workforce, book, open_reqs[transfer], dates[transfer], m, rng)
+        _conversions(config, workforce, book, open_reqs[conversion], dates[conversion], rng)
         book.close(open_reqs[unfilled], dates[unfilled], "unfilled")
         workforce.snapshot(end)
         if promotions is not None:
@@ -214,6 +237,7 @@ def simulate(
     months = [str(pd.Period(e, freq="M")) for e in month_ends[1:]]
     tops = level_one_names(config.org_level1_nodes)
     return {
+        "movements": movements.manifest() if movements is not None else {},
         "attrition": {
             "cost_center_effect": dict(zip(names, cc_effect.round(6).tolist(), strict=True)),
             "turbulent_months": [mo for mo, on in zip(months, shocks.regime, strict=True) if on],
@@ -257,3 +281,37 @@ def _transfers(
         )
         if rng.random() < reqs.backfill_probability:
             book.open("backfill", vacated, np.array([date]), month + 1)
+
+
+def _conversions(
+    config: WorldConfig,
+    workforce: Workforce,
+    book: RequisitionBook,
+    requisitions: NDArray[np.int64],
+    dates: Dates,
+    rng: np.random.Generator,
+) -> None:
+    """Fill requisitions by converting contingent workers of the same family, within the band,
+    from any cost center. A requisition with no candidate stays open."""
+    pool = TransferPool(
+        workforce,
+        config.movements.conversion_level_band,
+        members=workforce.contingent_pool(),
+        other_cost_center=False,
+    )
+    for j, date in zip(requisitions.tolist(), dates, strict=True):
+        role = book.roles(np.array([j]))
+        family, level = int(role["family"][0]), int(role["level"][0])
+        worker = pool.pick(family, level, int(role["cost_center"][0]), rng)
+        if worker is None:
+            continue
+        index = np.array([worker])
+        old = (int(workforce.column("family")[worker]), int(workforce.column("level")[worker]))
+        workforce.convert_in(index, role, np.array([date]))
+        pool.move(worker, old, None)
+        book.close(
+            np.array([j]),
+            np.array([date]),
+            "filled_conversion",
+            workforce.column("employee_id")[index],
+        )

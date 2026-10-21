@@ -96,7 +96,8 @@ def test_reconciled_flows_satisfy_the_identity_against_the_anchor(
         last = dict(
             con.execute(
                 "SELECT cost_center, count(*) FROM workforce_txn "
-                "WHERE trans_type='ACTIVE' AND event_date = DATE '2025-12-31' GROUP BY ALL"
+                "WHERE trans_type='ACTIVE' AND event_date = DATE '2025-12-31' "
+                "AND account = 'ACCT-100' GROUP BY ALL"
             ).fetchall()
         )
     for group in artifact.groups:

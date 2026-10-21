@@ -15,7 +15,20 @@ from hcsim.synth.process import Shocks
 from hcsim.synth.world import World, generate_world
 from tests.support.stat_check import stat_check
 
-FLOW_SIGN = {"HIRE": 1, "TERM": -1, "XFER_IN": 1, "XFER_OUT": -1}
+FLOW_SIGN = {
+    "HIRE": 1,
+    "TERM": -1,
+    "XFER_IN": 1,
+    "XFER_OUT": -1,
+    "REORG_IN": 1,
+    "REORG_OUT": -1,
+    "CONV_IN": 1,
+    "CONV_OUT": -1,
+    "CTG_START": 1,
+    "CTG_END": -1,
+    "PROMO": 0,
+    "RECLASS": 0,
+}
 
 
 @pytest.fixture(scope="module")
@@ -43,7 +56,8 @@ def test_stock_and_flows_agree_for_every_cost_center_and_month(world: World) -> 
         .unstack(fill_value=0)
         .sort_index()
     )
-    flows = txn[txn["trans_type"].isin(FLOW_SIGN)]
+    flows = txn[txn["trans_type"] != "ACTIVE"]
+    assert set(flows["trans_type"]) <= set(FLOW_SIGN)
     net = (
         flows.assign(delta=flows["amount"])
         .groupby(["month", "cost_center"], observed=False)["delta"]
@@ -92,7 +106,7 @@ def test_hires_get_fresh_ids_and_their_hire_date(world: World) -> None:
 
 def test_the_truth_manifest_records_every_process(world: World) -> None:
     processes = world.truth["processes"]
-    assert set(processes) == {"attrition", "requisitions", "equity"}
+    assert set(processes) == {"attrition", "requisitions", "equity", "movements"}
     assert len(processes["attrition"]["cost_center_effect"]) == 10
 
 
