@@ -27,6 +27,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "hypothesis>=6.170.5",
+    "import-linter>=2.15",
     "mypy>=2.4.0",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
@@ -96,3 +97,66 @@ markers = [
     "acceptance: statistical checks over many trajectories",
     "e2e: end-to-end runs through every layer",
 ]
+
+# Layer contracts from section 3.2 of the plan. The study-module contracts ("no study imports
+# another", "studies.inputs imports nothing from studies.catalog") arrive with those modules in M8.
+[tool.importlinter]
+root_package = "hcsim"
+
+[[tool.importlinter.contracts]]
+name = "The Model Layer is the leaf"
+type = "forbidden"
+source_modules = ["hcsim.model"]
+forbidden_modules = [
+    "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies", "hcsim.synth",
+    "hcsim.bench",
+]
+
+[[tool.importlinter.contracts]]
+name = "The Financial Layer reads only the Model Layer's contract surface"
+type = "forbidden"
+source_modules = ["hcsim.financial"]
+forbidden_modules = [
+    "hcsim.model.ml", "hcsim.model.domains", "hcsim.model.data", "hcsim.model.sql",
+    "hcsim.guidance", "hcsim.engine", "hcsim.studies", "hcsim.synth", "hcsim.bench",
+]
+
+[[tool.importlinter.contracts]]
+name = "The guidance pipeline depends only on the Model Layer"
+type = "forbidden"
+source_modules = ["hcsim.guidance"]
+forbidden_modules = ["hcsim.financial", "hcsim.engine", "hcsim.studies", "hcsim.synth", "hcsim.bench"]
+
+[[tool.importlinter.contracts]]
+name = "The engine depends only on the Model and Financial layers"
+type = "forbidden"
+source_modules = ["hcsim.engine"]
+forbidden_modules = ["hcsim.guidance", "hcsim.studies", "hcsim.synth", "hcsim.bench"]
+
+[[tool.importlinter.contracts]]
+name = "The synthetic world shares no code with the rest of hcsim"
+type = "forbidden"
+source_modules = ["hcsim.synth"]
+forbidden_modules = [
+    "hcsim.model", "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies",
+    "hcsim.bench",
+]
+
+# Studies read the synthetic world through its data, never its code. Only the scale harness
+# imports it, to generate large worlds for benchmarks.
+[[tool.importlinter.contracts]]
+name = "Nothing but the scale harness imports the synthetic world"
+type = "forbidden"
+source_modules = [
+    "hcsim.model", "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies",
+]
+forbidden_modules = ["hcsim.synth"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing imports the scale harness"
+type = "forbidden"
+source_modules = [
+    "hcsim.model", "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies",
+    "hcsim.synth",
+]
+forbidden_modules = ["hcsim.bench"]
