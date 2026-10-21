@@ -1,0 +1,24 @@
+name: Epic (maintainer)
+description: A parent issue for one plan epic. Usually created by tools/plan_to_issues.py.
+labels: [epic]
+projects: ["rio-sanjuan/4"]
+body:
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone and plan section
+      placeholder: M1 — Walking skeleton (thin e2e path)
+    validations:
+      required: true
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      description: Sub-issues, or a checklist until the milestone is next.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      value: Every task is done. The milestone's own criteria live in its acceptance issue.
