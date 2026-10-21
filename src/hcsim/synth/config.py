@@ -148,6 +148,16 @@ class WorldConfig:
     initial_employees: int = 200
     org_level1_nodes: int = 2
     cost_centers: int = 10
+    #: Depth of the org hierarchy, counting the leaf. A cost center may sit shallower, and then
+    #: its own label pads every level below it.
+    org_levels: int = 2
+    #: Children per internal org node, and the chance that a node below level 1 holds cost
+    #: centers directly instead of splitting further: the source of uneven depth.
+    org_branching: int = 3
+    org_stop_probability: float = 0.25
+    #: Share of level-1 orgs that are field orgs, and of cost centers with variable cost.
+    field_org_share: float = 0.30
+    variable_cost_share: float = 0.20
     families: tuple[str, ...] = tuple(FAMILIES)
     levels: tuple[int, ...] = (1, 2, 3, 4, 5)
     #: Share of the initial population at each level, in `levels` order.
@@ -179,6 +189,13 @@ class WorldConfig:
             problems.append("need at least one cost center per org_level1 node")
         if self.org_level1_nodes < 1:
             problems.append("org_level1_nodes must be at least 1")
+        if self.org_levels < 2:
+            problems.append("org_levels must be at least 2: a level-1 org and the leaf")
+        if self.org_branching < 2:
+            problems.append("org_branching must be at least 2")
+        for name in ("org_stop_probability", "field_org_share", "variable_cost_share"):
+            if not 0 <= getattr(self, name) <= 1:
+                problems.append(f"{name} must lie in [0, 1]")
         if not 0 <= self.dominant_family_share <= 1:
             problems.append("dominant_family_share must lie in [0, 1]")
         if self.months < 1 or self.initial_employees < 1:
@@ -219,6 +236,7 @@ PRESETS: Final[dict[str, dict[str, Any]]] = {
         "initial_employees": 5_000,
         "cost_centers": 250,
         "org_level1_nodes": 5,
+        "org_levels": 4,
         "locations": _labels("LOC", 4),
         "companies": _labels("CO", 2),
     },
@@ -226,6 +244,7 @@ PRESETS: Final[dict[str, dict[str, Any]]] = {
         "initial_employees": 50_000,
         "cost_centers": 2_500,
         "org_level1_nodes": 10,
+        "org_levels": 5,
         "locations": _labels("LOC", 10),
         "companies": _labels("CO", 3),
     },
@@ -233,6 +252,7 @@ PRESETS: Final[dict[str, dict[str, Any]]] = {
         "initial_employees": 500_000,
         "cost_centers": 25_000,
         "org_level1_nodes": 20,
+        "org_levels": 6,
         "locations": _labels("LOC", 20),
         "companies": _labels("CO", 5),
     },
