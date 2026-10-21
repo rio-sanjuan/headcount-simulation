@@ -16,6 +16,7 @@ from typing import Any, cast
 import duckdb
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
@@ -191,7 +192,14 @@ def generate_world(config: WorldConfig) -> World:
     book = RequisitionBook()
     ends = month_ends(config)
     ratings = RatingProcess(config.ratings, workforce, rating_rng)
-    process_truth = process.simulate(config, workforce, book, ends, process_rng, ratings)
+    org = world.tables["dim_org"]
+    tops = structure.level_one_names(config.org_level1_nodes)
+    org_of_cost_center: NDArray[np.int64] = np.asarray(
+        org["org_level1"].map({t: i for i, t in enumerate(tops)}), dtype=np.int64
+    )
+    process_truth = process.simulate(
+        config, workforce, book, ends, process_rng, ratings, org_of_cost_center
+    )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels)
