@@ -178,7 +178,17 @@ jobs:
           enable-cache: true
       - env:
           TESTS: ${{ needs.changes.outputs.tests }}
+          # The performance smoke test records its timings here and in the job summary.
+          HCSIM_PERF_OUT: ${{ runner.temp }}/perf
         run: make test-heavy TESTS="$TESTS"
+      - if: always()
+        # See the test job on why this uses `./`.
+        uses: ./.github/actions/scan-and-upload # zizmor: ignore[self-repository]
+        with:
+          name: perf-tiny
+          path: ${{ runner.temp }}/perf
+          denylist: ${{ secrets.SANITIZE_DENYLIST }}
+          retention-days: "30"
 
   memory:
     name: peak memory
