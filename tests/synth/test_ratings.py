@@ -14,9 +14,9 @@ from hcsim.synth.world import World, generate_world
 from tests.support.stat_check import stat_check
 
 
-@pytest.fixture(scope="module")
-def world() -> World:
-    return generate_world(preset("small", seed=3))
+@pytest.fixture
+def world(small_world: World) -> World:
+    return small_world
 
 
 def ratings(world: World) -> pd.DataFrame:
@@ -102,13 +102,23 @@ def test_the_last_cycle_before_the_start() -> None:
 
 
 def test_ratings_draw_from_their_own_stream() -> None:
-    """Changing the rating truth leaves the workforce untouched."""
-    base = generate_world(preset("tiny", seed=4))
-    other = generate_world(
-        dataclasses.replace(preset("tiny", seed=4), ratings=RatingTruth(cycle_months=(6, 12)))
+    """With rating factors held flat, changing the rating truth leaves the workforce alone."""
+    flat = dataclasses.replace(
+        preset("tiny", seed=4).attrition, rating_factor=(1.0,) * 5, unrated_factor=1.0
     )
-    pd.testing.assert_frame_equal(base.tables["workforce_txn"], other.tables["workforce_txn"])
-    assert not base.tables["rating"].equals(other.tables["rating"])
+    base = dataclasses.replace(preset("tiny", seed=4), attrition=flat)
+    other = dataclasses.replace(base, ratings=RatingTruth(cycle_months=(6, 12)))
+    a, b = generate_world(base), generate_world(other)
+    pd.testing.assert_frame_equal(a.tables["workforce_txn"], b.tables["workforce_txn"])
+    assert not a.tables["rating"].equals(b.tables["rating"])
+
+
+def test_low_ratings_leave_more_often(world: World) -> None:
+    txn = world.tables["workforce_txn"]
+    left = set(txn.loc[txn["trans_type"] == "TERM", "employee_id"])
+    latest = ratings(world).drop_duplicates("employee_id", keep="last")
+    rate = latest.assign(left=latest["employee_id"].isin(left)).groupby("rating")["left"].mean()
+    assert rate["R1"] > rate["R3"] > rate["R5"]
 
 
 @pytest.mark.parametrize(

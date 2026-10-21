@@ -78,16 +78,47 @@ FAMILY_PAY: dict[str, float] = {
 
 @dataclass(frozen=True)
 class AttritionTruth:
-    """The true monthly departure hazard. Invented, round values."""
+    """The true monthly departure hazard. Invented, round values.
 
-    base_monthly_hazard: float = 0.008
+    The hazard multiplies a base rate by factors for level, tenure, rating, and season, by a
+    random effect per cost center, and by two kinds of shock: a company-wide regime that
+    switches between calm and turbulent, and short shocks to single level-1 orgs.
+
+    Tenure enters through a smooth curve: risk rises from hire to a peak at
+    `tenure_peak_months`, then fades toward `long_tenure_floor` for long-tenured people.
+    """
+
+    base_monthly_hazard: float = 0.006
     level_factor: dict[int, float] = field(
         default_factory=lambda: {1: 1.25, 2: 1.0, 3: 0.9, 4: 0.8, 5: 0.7, 6: 0.65, 7: 0.6, 8: 0.55}
     )
-    first_year_factor: float = 1.5
+    tenure_peak_months: float = 18.0
+    tenure_peak_factor: float = 1.8
+    long_tenure_floor: float = 0.6
+    long_tenure_scale_months: float = 120.0
+    #: One factor per rating, worst to best, and one for the unrated.
+    rating_factor: tuple[float, ...] = (3.0, 1.6, 1.0, 0.75, 0.6)
+    unrated_factor: float = 1.1
     seasonal_amplitude: float = 0.2
     seasonal_peak_month: int = 3
     cost_center_sigma: float = 0.2
+    #: The company-wide regime: a two-state Markov chain stepped every month.
+    turbulent_factor: float = 1.5
+    calm_to_turbulent: float = 0.04
+    turbulent_to_calm: float = 0.25
+    #: Org shocks: each level-1 org starts one with this monthly chance, and it lasts a while.
+    org_shock_probability: float = 0.01
+    org_shock_factor: float = 2.0
+    org_shock_months: int = 3
+
+    def tenure_factor(self, tenure_months: NDArray[np.floating]) -> NDArray[np.float64]:
+        t = np.maximum(np.asarray(tenure_months, dtype=np.float64), 0.0) / self.tenure_peak_months
+        bump = 1 + (self.tenure_peak_factor - 1) * t * np.exp(1 - t)
+        fade = self.long_tenure_floor + (1 - self.long_tenure_floor) * np.exp(
+            -np.asarray(tenure_months, dtype=np.float64) / self.long_tenure_scale_months
+        )
+        result: NDArray[np.float64] = bump * fade
+        return result
 
     def hazards(
         self,
@@ -95,19 +126,40 @@ class AttritionTruth:
         tenure_months: NDArray[np.floating],
         month_of_year: int,
         cost_center_effect: NDArray[np.floating],
+        ratings: NDArray[np.integer] | None = None,
+        shock: NDArray[np.floating] | float = 1.0,
     ) -> NDArray[np.float64]:
-        """The monthly departure hazard for each person."""
+        """The monthly departure hazard for each person. `ratings` are codes into the rating
+        scale, with -1 for the unrated; `shock` is the regime and org shock multiplier."""
         season = 1 + self.seasonal_amplitude * np.cos(
             2 * np.pi * (month_of_year - self.seasonal_peak_month) / 12
         )
-        factor = np.zeros(max(self.level_factor) + 1)
-        factor[list(self.level_factor)] = list(self.level_factor.values())
-        tenure = np.where(np.asarray(tenure_months) < 12, self.first_year_factor, 1.0)
-        h = self.base_monthly_hazard * factor[np.asarray(levels)] * tenure * season
-        return np.minimum(1.0, h * np.asarray(cost_center_effect))
+        level = np.zeros(max(self.level_factor) + 1)
+        level[list(self.level_factor)] = list(self.level_factor.values())
+        rating = np.ones(len(np.asarray(levels)))
+        if ratings is not None:
+            codes = np.asarray(ratings)
+            table = np.asarray(self.rating_factor, dtype=np.float64)
+            rating = np.where(codes >= 0, table[np.maximum(codes, 0)], self.unrated_factor)
+        h = (
+            self.base_monthly_hazard
+            * level[np.asarray(levels)]
+            * self.tenure_factor(tenure_months)
+            * rating
+            * season
+            * np.asarray(cost_center_effect)
+            * np.asarray(shock)
+        )
+        return np.minimum(1.0, h)
 
     def hazard(
-        self, level: int, tenure_months: float, month_of_year: int, cost_center_effect: float
+        self,
+        level: int,
+        tenure_months: float,
+        month_of_year: int,
+        cost_center_effect: float,
+        rating: int | None = None,
+        shock: float = 1.0,
     ) -> float:
         return float(
             self.hazards(
@@ -115,8 +167,23 @@ class AttritionTruth:
                 np.array([tenure_months]),
                 month_of_year,
                 np.array([cost_center_effect]),
+                None if rating is None else np.array([rating]),
+                shock,
             )[0]
         )
+
+    def problems(self, rating_levels: int) -> list[str]:
+        found = []
+        if len(self.rating_factor) != rating_levels:
+            found.append("attrition.rating_factor needs one factor per rating")
+        for name in ("calm_to_turbulent", "turbulent_to_calm", "org_shock_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                found.append(f"attrition.{name} must lie in [0, 1]")
+        if self.tenure_peak_months <= 0 or self.long_tenure_scale_months <= 0:
+            found.append("attrition tenure scales must be positive")
+        if self.org_shock_months < 1:
+            found.append("attrition.org_shock_months must be at least 1")
+        return found
 
 
 @dataclass(frozen=True)
@@ -367,6 +434,7 @@ class WorldConfig:
         if extra := sorted(set(self.requisitions.growth_level_mix) - levels):
             problems.append(f"requisitions.growth_level_mix names unknown levels {extra}")
         problems += self.ratings.problems()
+        problems += self.attrition.problems(len(self.ratings.scale))
         if problems:
             raise ValueError("invalid WorldConfig: " + "; ".join(problems))
 

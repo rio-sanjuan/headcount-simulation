@@ -27,7 +27,7 @@ from hcsim.synth.config import WorldConfig
 from hcsim.synth.population import draw_roles
 from hcsim.synth.ratings import RatingProcess
 from hcsim.synth.requisitions import RequisitionBook
-from hcsim.synth.structure import cost_center_names
+from hcsim.synth.structure import cost_center_names, level_one_names
 from hcsim.synth.workforce import Workforce, tenure_months
 
 Dates = NDArray[np.datetime64]
@@ -46,6 +46,39 @@ def random_days(
     if earliest is not None:
         low = np.maximum(0, (earliest - first).astype(np.int64))
     return first + rng.integers(low, month_end.day).astype("timedelta64[D]")
+
+
+class Shocks:
+    """The attrition regime and org shocks, stepped once a month.
+
+    The company-wide regime is a two-state Markov chain, calm or turbulent. Each level-1 org
+    may start a shock that multiplies its hazard for a few months. Both are drawn before the
+    month's departures, and both are recorded for the truth manifest.
+    """
+
+    def __init__(self, config: WorldConfig, org_of_cost_center: NDArray[np.int64]) -> None:
+        self.truth = config.attrition
+        self.org = org_of_cost_center
+        self.turbulent = False
+        self.remaining = np.zeros(int(org_of_cost_center.max(initial=-1)) + 1, dtype=np.int64)
+        self.regime: list[bool] = []
+        self.org_shocks: list[tuple[int, int]] = []  # (month, org)
+
+    def step(self, month: int, rng: np.random.Generator) -> NDArray[np.float64]:
+        """Advance one month and return each cost center's multiplier."""
+        t = self.truth
+        flip = t.turbulent_to_calm if self.turbulent else t.calm_to_turbulent
+        if rng.random() < flip:
+            self.turbulent = not self.turbulent
+        self.remaining = np.maximum(self.remaining - 1, 0)
+        start = (rng.random(len(self.remaining)) < t.org_shock_probability) & (self.remaining == 0)
+        self.remaining[start] = t.org_shock_months
+        self.regime.append(self.turbulent)
+        self.org_shocks += [(month, int(org)) for org in np.flatnonzero(start)]
+        org_factor = np.where(self.remaining > 0, t.org_shock_factor, 1.0)
+        regime = t.turbulent_factor if self.turbulent else 1.0
+        multiplier: NDArray[np.float64] = regime * org_factor[self.org]
+        return multiplier
 
 
 class TransferPool:
@@ -99,6 +132,7 @@ def simulate(
     month_ends: list[pd.Timestamp],
     rng: np.random.Generator,
     ratings: RatingProcess | None = None,
+    org_of_cost_center: NDArray[np.int64] | None = None,
 ) -> dict[str, Any]:
     """Run the world over `month_ends`. The first month-end is the initial stock. Returns the
     random effects the run drew, for the truth manifest."""
@@ -108,6 +142,12 @@ def simulate(
     growth_rate = reqs.growth_requisitions_per_month * np.exp(rng.normal(0, reqs.growth_sigma, n))
     growth_levels = np.array(list(reqs.growth_level_mix))
     growth_p = np.array(list(reqs.growth_level_mix.values()))
+    orgs = (
+        org_of_cost_center
+        if org_of_cost_center is not None
+        else np.arange(n, dtype=np.int64) % config.org_level1_nodes
+    )
+    shocks = Shocks(config, orgs)
     workforce.snapshot(np.datetime64(month_ends[0].date(), "D"))
 
     if ratings is not None:
@@ -119,12 +159,16 @@ def simulate(
         if ratings is not None and ratings.is_cycle(month):
             ratings.calibrate(month)
         # 1. Departures, and the backfill each may open.
+        multiplier = shocks.step(m, rng)
         active = workforce.active()
+        cost_center = workforce.column("cost_center")[active]
         h = attrition.hazards(
             workforce.column("level")[active],
             tenure_months(workforce.column("hire_date")[active], end),
             month_end.month,
-            cc_effect[workforce.column("cost_center")[active]],
+            cc_effect[cost_center],
+            workforce.column("rating")[active],
+            multiplier[cost_center],
         )
         leavers = active[rng.random(len(active)) < h]
         dates = random_days(month_end, len(leavers), rng)
@@ -157,9 +201,15 @@ def simulate(
         workforce.snapshot(end)
 
     names = cost_center_names(config)
+    months = [str(pd.Period(e, freq="M")) for e in month_ends[1:]]
+    tops = level_one_names(config.org_level1_nodes)
     return {
         "attrition": {
-            "cost_center_effect": dict(zip(names, cc_effect.round(6).tolist(), strict=True))
+            "cost_center_effect": dict(zip(names, cc_effect.round(6).tolist(), strict=True)),
+            "turbulent_months": [mo for mo, on in zip(months, shocks.regime, strict=True) if on],
+            "org_shocks": [
+                {"start": months[m - 1], "org": tops[org]} for m, org in shocks.org_shocks
+            ],
         },
         "requisitions": {
             "growth_rate": dict(zip(names, growth_rate.round(6).tolist(), strict=True))

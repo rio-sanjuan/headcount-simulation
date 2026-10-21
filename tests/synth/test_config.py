@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
 
@@ -84,3 +85,17 @@ def test_the_small_preset_generates_at_its_scale() -> None:
     assert len(first) == 5_000
     assert len(world.tables["dim_location"]) == 4
     assert len(world.tables["comp_range"]) == 8 * 7 * 4  # families x levels x locations
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"rating_factor": (1.0, 1.0)}, "attrition.rating_factor needs one factor per rating"),
+        ({"calm_to_turbulent": 2.0}, "attrition.calm_to_turbulent must lie in"),
+        ({"tenure_peak_months": 0.0}, "attrition tenure scales must be positive"),
+        ({"org_shock_months": 0}, "attrition.org_shock_months must be at least 1"),
+    ],
+)
+def test_a_bad_attrition_truth_is_refused(overrides: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(attrition=dataclasses.replace(AttritionTruth(), **overrides))

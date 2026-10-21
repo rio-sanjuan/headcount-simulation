@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from hcsim.synth.config import AttritionTruth, preset
+from hcsim.synth.process import Shocks
 from hcsim.synth.world import World, generate_world
 from tests.support.stat_check import stat_check
 
@@ -93,22 +96,111 @@ def test_the_truth_manifest_records_every_process(world: World) -> None:
     assert len(processes["attrition"]["cost_center_effect"]) == 10
 
 
-def test_departures_recover_the_true_hazard(world: World) -> None:
-    """Each month's departures, summed, match the hazard the truth manifest records."""
-    txn = monthly(world.tables["workforce_txn"])
+def _shock_multiplier(world: World, months: list[pd.Period]) -> pd.DataFrame:
+    """The regime and org shock multiplier per month and cost center, from the manifest."""
+    truth, recorded = world.config.attrition, world.truth["processes"]["attrition"]
+    turbulent = set(recorded["turbulent_months"])
+    org = world.tables["dim_org"].set_index("cost_center")["org_level1"]
+    active: dict[str, set[str]] = {}
+    for shock in recorded["org_shocks"]:
+        start = pd.Period(shock["start"], freq="M")
+        for k in range(truth.org_shock_months):
+            active.setdefault(str(start + k), set()).add(shock["org"])
+    rows = [
+        {
+            "month": month,
+            "cost_center": cc,
+            "shock": (truth.turbulent_factor if str(month) in turbulent else 1.0)
+            * (truth.org_shock_factor if org[cc] in active.get(str(month), set()) else 1.0),
+        }
+        for month in months
+        for cc in org.index
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_departures_recover_the_true_hazard(small_world: World) -> None:
+    """Departures match the full true hazard: level, tenure, rating, season, the cost center's
+    random effect, and the regime and org shocks the manifest records."""
+    world = small_world
+    txn = monthly(world.tables["workforce_txn"]).astype({"cost_center": str, "job_code": str})
     jobs = world.tables["dim_job"].set_index("job_code")["job_level"]
-    truth = AttritionTruth()
+    truth = world.config.attrition
     effect = world.truth["processes"]["attrition"]["cost_center_effect"]
+    scale = list(world.config.ratings.scale)
+    ratings = world.tables["rating"].assign(
+        code=lambda f: f["rating"].astype(str).map(scale.index),
+        cycle_date=lambda f: pd.to_datetime(f["cycle_date"]),
+    )
     active = txn[txn["trans_type"] == "ACTIVE"]
     months = sorted(active["month"].unique())
+    shocks = _shock_multiplier(world, months[1:])
     expected = variance = 0.0
     for previous, month in itertools.pairwise(months):
         at_risk = active[active["month"] == previous]
-        month_end = month.to_timestamp(how="end").normalize()
-        for row in at_risk.itertuples():
-            tenure = (month_end - row.hire_date).days / 30.4
-            h = truth.hazard(int(jobs[row.job_code]), tenure, month.month, effect[row.cost_center])
-            expected += h
-            variance += h * (1 - h)
+        start, end = month.start_time, month.to_timestamp(how="end").normalize()
+        latest = ratings[ratings["cycle_date"] <= start].drop_duplicates("employee_id", keep="last")
+        code = at_risk["employee_id"].map(latest.set_index("employee_id")["code"]).fillna(-1)
+        shock = at_risk["cost_center"].map(
+            shocks[shocks["month"] == month].set_index("cost_center")["shock"]
+        )
+        h = truth.hazards(
+            at_risk["job_code"].map(jobs).to_numpy(),
+            ((end - pd.to_datetime(at_risk["hire_date"])).dt.days / 30.4).to_numpy(),
+            month.month,
+            at_risk["cost_center"].map(effect).to_numpy(),
+            code.to_numpy(dtype=np.int64),
+            shock.to_numpy(),
+        )
+        expected += float(h.sum())
+        variance += float((h * (1 - h)).sum())
     observed = int((txn["trans_type"] == "TERM").sum())
     stat_check(observed, expected, float(np.sqrt(variance)), label="departures")
+
+
+def test_the_regime_and_org_shocks_are_recorded(small_world: World) -> None:
+    recorded = small_world.truth["processes"]["attrition"]
+    months = {str(pd.Period(f"2021-{m:02d}", freq="M") + k) for m in (2,) for k in range(59)}
+    assert set(recorded["turbulent_months"]) <= months
+    orgs = set(small_world.tables["dim_org"]["org_level1"])
+    assert all(
+        shock["org"] in orgs and shock["start"] in months for shock in recorded["org_shocks"]
+    )
+
+
+def _shocks(**overrides: Any) -> Shocks:
+    config = dataclasses.replace(
+        preset("tiny"), attrition=dataclasses.replace(AttritionTruth(), **overrides)
+    )
+    return Shocks(config, np.array([0, 1, 0, 1]))
+
+
+def test_the_regime_switches_with_its_transition_chances() -> None:
+    always = _shocks(calm_to_turbulent=1.0, turbulent_to_calm=0.0, org_shock_probability=0.0)
+    rng = np.random.default_rng(0)
+    assert all((always.step(m, rng) == 1.5).all() for m in range(1, 5))
+    never = _shocks(calm_to_turbulent=0.0, org_shock_probability=0.0)
+    assert (never.step(1, rng) == 1.0).all()
+    assert never.regime == [False]
+
+
+def test_an_org_shock_hits_its_cost_centers_for_its_duration() -> None:
+    shocks = _shocks(calm_to_turbulent=0.0, org_shock_probability=1.0, org_shock_months=3)
+    rng = np.random.default_rng(1)
+    first = shocks.step(1, rng)
+    assert first.tolist() == [2.0, 2.0, 2.0, 2.0]  # both orgs start a shock
+    assert [shocks.step(m, rng).tolist() for m in (2, 3)] == [[2.0] * 4, [2.0] * 4]
+    shocks.step(4, rng)  # the first shocks end and new ones start the same month
+    assert shocks.org_shocks == [(1, 0), (1, 1), (4, 0), (4, 1)]
+
+
+def test_a_turbulent_world_loses_more_people() -> None:
+    def departures(**overrides: Any) -> int:
+        attrition = dataclasses.replace(AttritionTruth(), org_shock_probability=0.0, **overrides)
+        world = generate_world(dataclasses.replace(preset("small", seed=8), attrition=attrition))
+        return int((world.tables["workforce_txn"]["trans_type"] == "TERM").sum())
+
+    calm = departures(calm_to_turbulent=0.0)
+    turbulent = departures(calm_to_turbulent=1.0, turbulent_to_calm=0.0)
+    # Turbulence multiplies every hazard by 1.5; headcount shrinks a little faster, hence 1.35.
+    assert turbulent > 1.35 * calm
