@@ -23,3 +23,72 @@ docs = ["mkdocs-material>=9.6"]
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.5",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle and pyflakes
+    "I",            # import sorting
+    "B",            # bugbear
+    "UP",           # pyupgrade
+    "SIM",          # simplify
+    "RUF",          # ruff-specific
+    "PT",           # pytest style
+    "NPY",          # NumPy
+    "C4",           # comprehensions
+]
+# En dashes mark ranges in prose and issue titles, such as "M0–M9".
+allowed-confusables = ["–"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests", "tools"]
+mypy_path = "src"
+explicit_package_bases = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_unreachable = true
+
+# The Model and Financial layers carry the contracts and the accounting, so they're strict.
+# The flags are listed one by one: `strict = true` in an override applies to every module.
+[[tool.mypy.overrides]]
+module = ["hcsim.model.*", "hcsim.financial.*"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+extra_checks = true
+implicit_reexport = false
+warn_return_any = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+xfail_strict = true
+filterwarnings = ["error"]
+markers = [
+    "slow: long-running tests, run in the heavy CI jobs",
+    "acceptance: statistical checks over many trajectories",
+    "e2e: end-to-end runs through every layer",
+]

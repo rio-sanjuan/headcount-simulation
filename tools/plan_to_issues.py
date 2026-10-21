@@ -22,6 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 REPO = "rio-sanjuan/headcount-simulation"
 OWNER = REPO.split("/")[0]
@@ -35,22 +36,47 @@ AREAS = ["synth", "model", "guidance", "engine", "financial", "studies", "ci", "
 
 # Looked up by epic id first, then by milestone.
 AREA_BY_ID = {
-    "M0.1": "ci", "M0.2": "ci", "M0.3": "ci", "M0.4": "docs",
-    "M1.1": "synth", "M1.2": "model", "M1.3": "model", "M1.4": "model", "M1.5": "guidance",
-    "M1.6": "engine", "M1.7": "financial", "M1.8": "studies", "M1.9": "ci",
-    "M2": "synth", "M3": "model", "M4": "engine", "M5": "guidance", "M6": "financial",
-    "M7": "engine", "M8": "studies",
-    "M9.1": "engine", "M9.2": "app", "M9.3": "docs", "M9.4": "ci",
+    "M0.1": "ci",
+    "M0.2": "ci",
+    "M0.3": "ci",
+    "M0.4": "docs",
+    "M1.1": "synth",
+    "M1.2": "model",
+    "M1.3": "model",
+    "M1.4": "model",
+    "M1.5": "guidance",
+    "M1.6": "engine",
+    "M1.7": "financial",
+    "M1.8": "studies",
+    "M1.9": "ci",
+    "M2": "synth",
+    "M3": "model",
+    "M4": "engine",
+    "M5": "guidance",
+    "M6": "financial",
+    "M7": "engine",
+    "M8": "studies",
+    "M9.1": "engine",
+    "M9.2": "app",
+    "M9.3": "docs",
+    "M9.4": "ci",
 }
 
 # Critical-path "blocked by" links between epics. Milestone-level links come from the plan's
 # mermaid graph and connect the acceptance issues.
 EPIC_DEPS = {
-    "M0.2": ["M0.1"], "M0.3": ["M0.1"], "M0.4": ["M0.1"],
-    "M1.1": ["M0.1"], "M1.2": ["M0.1"],
-    "M1.3": ["M1.2"], "M1.4": ["M1.2"], "M1.5": ["M1.1", "M1.2"],
-    "M1.6": ["M1.2", "M1.3", "M1.4"], "M1.7": ["M1.2"],
-    "M1.8": ["M1.5", "M1.6", "M1.7"], "M1.9": ["M1.8", "M0.2"],
+    "M0.2": ["M0.1"],
+    "M0.3": ["M0.1"],
+    "M0.4": ["M0.1"],
+    "M1.1": ["M0.1"],
+    "M1.2": ["M0.1"],
+    "M1.3": ["M1.2"],
+    "M1.4": ["M1.2"],
+    "M1.5": ["M1.1", "M1.2"],
+    "M1.6": ["M1.2", "M1.3", "M1.4"],
+    "M1.7": ["M1.2"],
+    "M1.8": ["M1.5", "M1.6", "M1.7"],
+    "M1.9": ["M1.8", "M0.2"],
 }
 
 # Hand-written titles for tasks whose first sentence doesn't make a good title. Keys are plan ids.
@@ -104,8 +130,7 @@ LABELS = {
 
 DONE_TASK = "**Done when:** it's merged as one PR, with tests where they apply."
 DONE_EPIC = (
-    "### Done when\n"
-    "Every task is done. The milestone's own criteria live in its acceptance issue."
+    "### Done when\nEvery task is done. The milestone's own criteria live in its acceptance issue."
 )
 
 
@@ -158,7 +183,9 @@ def section(lines: list[str], number: str) -> list[str]:
     return lines[start + 1 : end]
 
 
-def parse_plan(text: str) -> tuple[list[MilestonePlan], list[tuple[str, str]], list[str], list[dict]]:
+def parse_plan(
+    text: str,
+) -> tuple[list[MilestonePlan], list[tuple[str, str]], list[str], list[dict[str, str]]]:
     lines = text.splitlines()
     milestones: dict[str, MilestonePlan] = {}
 
@@ -181,7 +208,8 @@ def parse_plan(text: str) -> tuple[list[MilestonePlan], list[tuple[str, str]], l
             assert epic is not None, line
             epic.tasks.append(Task(m.group(1)))
         elif m := re.match(r"^  (\s*\S.*)$", line):
-            assert epic is not None and epic.tasks, line
+            assert epic is not None, line
+            assert epic.tasks, line
             epic.tasks[-1].sub.append(m.group(1))
         elif line.strip():
             if epic is not None and not epic.tasks:
@@ -240,29 +268,43 @@ def area_of(key: str) -> str:
     return AREA_BY_ID.get(key) or AREA_BY_ID[key.split(".")[0]]
 
 
+def task_title(epic_key: str, index: int, task: Task) -> str:
+    return TITLES.get(f"{epic_key}/{index}") or short_title(task.text)
+
+
 def task_markdown(task: Task, checkbox: bool) -> str:
     head = f"- [ ] {task.text}" if checkbox else task.text
     indent = "  " if checkbox else ""
     return "\n".join([head, *(indent + s for s in task.sub)])
 
 
-def build(milestones: list[MilestonePlan], edges, future, questions, detail: set[str]):
+def build(
+    milestones: list[MilestonePlan],
+    edges: list[tuple[str, str]],
+    future: list[str],
+    questions: list[dict[str, str]],
+    detail: set[str],
+) -> list[Issue]:
     issues: list[Issue] = []
     for ms in milestones:
         acc = [s for s in re.split(r"(?<=\.)\s+(?=[A-Z`])", ms.acceptance) if s]
-        issues.append(Issue(
-            key=f"{ms.key}/acceptance",
-            title=f"{ms.key} acceptance: {ms.short}",
-            body="\n\n".join([
-                f"<!-- plan-id: {ms.key}/acceptance -->",
-                f"**Outcome:** {ms.outcome}",
-                "### Criteria\n" + "\n".join(f"- [ ] {s}" for s in acc),
-                "Close this issue last in the milestone, once every criterion holds.",
-            ]),
-            labels=["acceptance"],
-            milestone=ms.key,
-            blocked_by=[f"{a}/acceptance" for a, b in edges if b == ms.key],
-        ))
+        issues.append(
+            Issue(
+                key=f"{ms.key}/acceptance",
+                title=f"{ms.key} acceptance: {ms.short}",
+                body="\n\n".join(
+                    [
+                        f"<!-- plan-id: {ms.key}/acceptance -->",
+                        f"**Outcome:** {ms.outcome}",
+                        "### Criteria\n" + "\n".join(f"- [ ] {s}" for s in acc),
+                        "Close this issue last in the milestone, once every criterion holds.",
+                    ]
+                ),
+                labels=["acceptance"],
+                milestone=ms.key,
+                blocked_by=[f"{a}/acceptance" for a, b in edges if b == ms.key],
+            )
+        )
         detailed = ms.key in detail
         for ep in ms.epics:
             parts = [f"<!-- plan-id: {ep.key} -->"]
@@ -272,61 +314,80 @@ def build(milestones: list[MilestonePlan], edges, future, questions, detail: set
                 parts.append(ep.note)
             parts.append(f"**Milestone:** [{ms.title}]({PLAN_URL}#{slug(ms.title)})")
             if detailed:
-                parts.append("### Tasks\n<!-- tasks: sub-issues -->\nTracked as sub-issues of this epic.")
+                parts.append(
+                    "### Tasks\n<!-- tasks: sub-issues -->\nTracked as sub-issues of this epic."
+                )
             else:
                 checklist = "\n".join(task_markdown(t, checkbox=True) for t in ep.tasks)
                 parts.append(
-                    "### Tasks\n<!-- tasks: checklist -->\n" + checklist
+                    "### Tasks\n<!-- tasks: checklist -->\n"
+                    + checklist
                     + "\n\nThese become sub-issues when this milestone is next."
                 )
             parts.append(DONE_EPIC)
-            issues.append(Issue(
-                key=ep.key,
-                title=f"{ep.key} {ep.name}",
-                body="\n\n".join(parts),
-                labels=["epic", f"area:{area_of(ep.key)}"],
-                milestone=ms.key,
-                blocked_by=list(EPIC_DEPS.get(ep.key, [])),
-            ))
+            issues.append(
+                Issue(
+                    key=ep.key,
+                    title=f"{ep.key} {ep.name}",
+                    body="\n\n".join(parts),
+                    labels=["epic", f"area:{area_of(ep.key)}"],
+                    milestone=ms.key,
+                    blocked_by=list(EPIC_DEPS.get(ep.key, [])),
+                )
+            )
             if detailed:
                 for i, t in enumerate(ep.tasks, 1):
-                    issues.append(Issue(
-                        key=f"{ep.key}/{i}",
-                        title=f"{ep.key} · {TITLES.get(f'{ep.key}/{i}') or short_title(t.text)}",
-                        body="\n\n".join([
-                            f"<!-- plan-id: {ep.key}/{i} -->",
-                            task_markdown(t, checkbox=False),
-                            DONE_TASK,
-                        ]),
-                        labels=["task", f"area:{area_of(ep.key)}"],
-                        milestone=ms.key,
-                        parent=ep.key,
-                    ))
+                    issues.append(
+                        Issue(
+                            key=f"{ep.key}/{i}",
+                            title=f"{ep.key} · {task_title(ep.key, i, t)}",
+                            body="\n\n".join(
+                                [
+                                    f"<!-- plan-id: {ep.key}/{i} -->",
+                                    task_markdown(t, checkbox=False),
+                                    DONE_TASK,
+                                ]
+                            ),
+                            labels=["task", f"area:{area_of(ep.key)}"],
+                            milestone=ms.key,
+                            parent=ep.key,
+                        )
+                    )
     for i, q in enumerate(questions, 1):
-        issues.append(Issue(
-            key=f"{q['epic']}/q{i}",
-            title=f"{q['epic']} · Question: {q['question']}",
-            body="\n\n".join([
-                f"<!-- plan-id: {q['epic']}/q{i} -->",
-                f"Open design question from section 7.1 of the plan: {q['question'].lower()}.",
-                f"Resolve it before {q['epic']} closes.",
-            ]),
-            labels=["question", f"area:{area_of(q['epic'])}"],
-            milestone=q["epic"].split(".")[0],
-            parent=q["epic"],
-        ))
+        issues.append(
+            Issue(
+                key=f"{q['epic']}/q{i}",
+                title=f"{q['epic']} · Question: {q['question']}",
+                body="\n\n".join(
+                    [
+                        f"<!-- plan-id: {q['epic']}/q{i} -->",
+                        "Open design question from section 7.1 of the plan: "
+                        f"{q['question'].lower()}.",
+                        f"Resolve it before {q['epic']} closes.",
+                    ]
+                ),
+                labels=["question", f"area:{area_of(q['epic'])}"],
+                milestone=q["epic"].split(".")[0],
+                parent=q["epic"],
+            )
+        )
     for i, text in enumerate(future, 1):
-        issues.append(Issue(
-            key=f"future/{i}",
-            title=short_title(text),
-            body="\n\n".join([
-                f"<!-- plan-id: future/{i} -->",
-                text,
-                "Deferred: cloud infrastructure is outside milestones M0–M9 (section 9 of the plan).",
-            ]),
-            labels=["future", "cloud"],
-            milestone=None,
-        ))
+        issues.append(
+            Issue(
+                key=f"future/{i}",
+                title=short_title(text),
+                body="\n\n".join(
+                    [
+                        f"<!-- plan-id: future/{i} -->",
+                        text,
+                        "Deferred: cloud infrastructure is outside milestones M0–M9 "
+                        "(section 9 of the plan).",
+                    ]
+                ),
+                labels=["future", "cloud"],
+                milestone=None,
+            )
+        )
     return issues
 
 
@@ -342,7 +403,9 @@ def load_denylist(path: Path) -> list[tuple[int, re.Pattern[str]]]:
     return patterns
 
 
-def scan(named_texts: list[tuple[str, str]], patterns) -> list[str]:
+def scan(
+    named_texts: list[tuple[str, str]], patterns: list[tuple[int, re.Pattern[str]]]
+) -> list[str]:
     hits = []
     for name, text in named_texts:
         for ln, line in enumerate(text.splitlines(), 1):
@@ -369,7 +432,7 @@ def gh(*args: str, stdin: str | None = None) -> str:
     sys.exit("gave up after repeated rate limiting")
 
 
-def gh_lines(*args: str) -> list[dict]:
+def gh_lines(*args: str) -> list[dict[str, Any]]:
     out = gh(*args)
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
@@ -380,31 +443,64 @@ def create(*args: str, stdin: str | None = None) -> str:
     return out
 
 
-def apply(milestones, issues: list[Issue], detail: set[str]) -> None:
-    existing_labels = {d["name"] for d in gh_lines(
-        "api", f"repos/{REPO}/labels", "--paginate", "--jq", ".[] | {name} | tojson")}
+def apply(milestones: list[MilestonePlan], issues: list[Issue], detail: set[str]) -> None:
+    existing_labels = {
+        d["name"]
+        for d in gh_lines(
+            "api", f"repos/{REPO}/labels", "--paginate", "--jq", ".[] | {name} | tojson"
+        )
+    }
     for name, (color, desc) in LABELS.items():
         if name not in existing_labels:
-            create("api", f"repos/{REPO}/labels", "--method", "POST",
-                   "-f", f"name={name}", "-f", f"color={color}", "-f", f"description={desc}")
+            create(
+                "api",
+                f"repos/{REPO}/labels",
+                "--method",
+                "POST",
+                "-f",
+                f"name={name}",
+                "-f",
+                f"color={color}",
+                "-f",
+                f"description={desc}",
+            )
             print(f"label   {name}")
 
-    ms_numbers = {d["title"]: d["number"] for d in gh_lines(
-        "api", f"repos/{REPO}/milestones?state=all", "--paginate",
-        "--jq", ".[] | {title, number} | tojson")}
+    ms_numbers = {
+        d["title"]: d["number"]
+        for d in gh_lines(
+            "api",
+            f"repos/{REPO}/milestones?state=all",
+            "--paginate",
+            "--jq",
+            ".[] | {title, number} | tojson",
+        )
+    }
     ms_by_key = {}
     for ms in milestones:
         if ms.title not in ms_numbers:
-            out = create("api", f"repos/{REPO}/milestones", "--method", "POST",
-                         "-f", f"title={ms.title}", "-f", f"description={ms.outcome}")
+            out = create(
+                "api",
+                f"repos/{REPO}/milestones",
+                "--method",
+                "POST",
+                "-f",
+                f"title={ms.title}",
+                "-f",
+                f"description={ms.outcome}",
+            )
             ms_numbers[ms.title] = json.loads(out)["number"]
             print(f"milestone {ms.title}")
         ms_by_key[ms.key] = ms_numbers[ms.title]
 
-    found: dict[str, dict] = {}
-    for d in gh_lines("api", f"repos/{REPO}/issues?state=all&per_page=100", "--paginate",
-                      "--jq", '.[] | {number, id, url: .html_url, body: (.body // ""), '
-                              'pr: has("pull_request")} | tojson'):
+    found: dict[str, dict[str, Any]] = {}
+    for d in gh_lines(
+        "api",
+        f"repos/{REPO}/issues?state=all&per_page=100",
+        "--paginate",
+        "--jq",
+        '.[] | {number, id, url: .html_url, body: (.body // ""), pr: has("pull_request")} | tojson',
+    ):
         if not d["pr"] and (m := re.search(r"<!-- plan-id: (\S+) -->", d["body"])):
             found[m.group(1)] = d
 
@@ -412,56 +508,106 @@ def apply(milestones, issues: list[Issue], detail: set[str]) -> None:
         if issue.key in found:
             body = found[issue.key]["body"]
             if "<!-- tasks: checklist -->" in body and issue.key.split(".")[0] in detail:
-                create("api", f"repos/{REPO}/issues/{found[issue.key]['number']}",
-                       "--method", "PATCH", "--input", "-",
-                       stdin=json.dumps({"body": issue.body}))
+                create(
+                    "api",
+                    f"repos/{REPO}/issues/{found[issue.key]['number']}",
+                    "--method",
+                    "PATCH",
+                    "--input",
+                    "-",
+                    stdin=json.dumps({"body": issue.body}),
+                )
                 print(f"update  #{found[issue.key]['number']} {issue.title}")
             continue
         payload = {"title": issue.title, "body": issue.body, "labels": issue.labels}
         if issue.milestone:
             payload["milestone"] = ms_by_key[issue.milestone]
-        out = json.loads(create("api", f"repos/{REPO}/issues", "--method", "POST",
-                                "--input", "-", stdin=json.dumps(payload)))
+        out = json.loads(
+            create(
+                "api",
+                f"repos/{REPO}/issues",
+                "--method",
+                "POST",
+                "--input",
+                "-",
+                stdin=json.dumps(payload),
+            )
+        )
         found[issue.key] = {"number": out["number"], "id": out["id"], "url": out["html_url"]}
         print(f"issue   #{out['number']} {issue.title}")
 
     for issue in issues:
         if issue.parent:
             parent = found[issue.parent]["number"]
-            have = {d["id"] for d in gh_lines(
-                "api", f"repos/{REPO}/issues/{parent}/sub_issues", "--paginate",
-                "--jq", ".[] | {id} | tojson")}
+            have = {
+                d["id"]
+                for d in gh_lines(
+                    "api",
+                    f"repos/{REPO}/issues/{parent}/sub_issues",
+                    "--paginate",
+                    "--jq",
+                    ".[] | {id} | tojson",
+                )
+            }
             if found[issue.key]["id"] not in have:
-                create("api", f"repos/{REPO}/issues/{parent}/sub_issues", "--method", "POST",
-                       "-F", f"sub_issue_id={found[issue.key]['id']}")
+                create(
+                    "api",
+                    f"repos/{REPO}/issues/{parent}/sub_issues",
+                    "--method",
+                    "POST",
+                    "-F",
+                    f"sub_issue_id={found[issue.key]['id']}",
+                )
                 print(f"sub     #{found[issue.key]['number']} -> #{parent}")
         if issue.blocked_by:
             number = found[issue.key]["number"]
-            have = {d["id"] for d in gh_lines(
-                "api", f"repos/{REPO}/issues/{number}/dependencies/blocked_by", "--paginate",
-                "--jq", ".[] | {id} | tojson")}
+            have = {
+                d["id"]
+                for d in gh_lines(
+                    "api",
+                    f"repos/{REPO}/issues/{number}/dependencies/blocked_by",
+                    "--paginate",
+                    "--jq",
+                    ".[] | {id} | tojson",
+                )
+            }
             for blocker in issue.blocked_by:
                 if found[blocker]["id"] not in have:
-                    create("api", f"repos/{REPO}/issues/{number}/dependencies/blocked_by",
-                           "--method", "POST", "-F", f"issue_id={found[blocker]['id']}")
+                    create(
+                        "api",
+                        f"repos/{REPO}/issues/{number}/dependencies/blocked_by",
+                        "--method",
+                        "POST",
+                        "-F",
+                        f"issue_id={found[blocker]['id']}",
+                    )
                     print(f"blocks  #{found[blocker]['number']} blocks #{number}")
 
     projects = json.loads(gh("project", "list", "--owner", OWNER, "--format", "json"))["projects"]
     project = next((p for p in projects if p["title"] == PROJECT_TITLE), None)
     if project is None:
-        project = json.loads(create("project", "create", "--owner", OWNER,
-                                    "--title", PROJECT_TITLE, "--format", "json"))
+        project = json.loads(
+            create(
+                "project", "create", "--owner", OWNER, "--title", PROJECT_TITLE, "--format", "json"
+            )
+        )
         print(f"project #{project['number']} {PROJECT_TITLE}")
     number = str(project["number"])
     # Both steps are safe to repeat, so a resumed run finishes them too.
     create("project", "edit", number, "--owner", OWNER, "--visibility", "PUBLIC")
-    p = subprocess.run(["gh", "project", "link", number, "--owner", OWNER,
-                        "--repo", REPO.split("/")[1]], capture_output=True, text=True)
+    p = subprocess.run(
+        ["gh", "project", "link", number, "--owner", OWNER, "--repo", REPO.split("/")[1]],
+        capture_output=True,
+        text=True,
+    )
     if p.returncode != 0 and "already" not in p.stderr.lower():
-        print(f"  warning: linking the project to the repo failed: {p.stderr.strip()}",
-              file=sys.stderr)
-    items = json.loads(gh("project", "item-list", number, "--owner", OWNER,
-                          "--format", "json", "--limit", "2000"))["items"]
+        print(
+            f"  warning: linking the project to the repo failed: {p.stderr.strip()}",
+            file=sys.stderr,
+        )
+    items = json.loads(
+        gh("project", "item-list", number, "--owner", OWNER, "--format", "json", "--limit", "2000")
+    )["items"]
     in_project = {(i.get("content") or {}).get("url") for i in items}
     for issue in issues:
         url = found[issue.key]["url"]
@@ -473,35 +619,52 @@ def apply(milestones, issues: list[Issue], detail: set[str]) -> None:
 # --- Main ----------------------------------------------------------------------------------------
 
 
-def preview(milestones, issues: list[Issue]) -> str:
+def preview(milestones: list[MilestonePlan], issues: list[Issue]) -> str:
     out = ["# Issue preview", ""]
     by_key = {i.key: i for i in issues}
     for ms in milestones:
         out += [f"## Milestone: {ms.title}", "", f"*Description:* {ms.outcome}", ""]
         for issue in issues:
             if issue.milestone == ms.key:
-                out += [f"### {issue.title}", "",
-                        f"*Labels:* {', '.join(issue.labels)}"]
+                out += [f"### {issue.title}", "", f"*Labels:* {', '.join(issue.labels)}"]
                 if issue.parent:
                     out.append(f"*Parent:* {by_key[issue.parent].title}")
                 if issue.blocked_by:
-                    out.append("*Blocked by:* " + "; ".join(by_key[b].title for b in issue.blocked_by))
+                    out.append(
+                        "*Blocked by:* " + "; ".join(by_key[b].title for b in issue.blocked_by)
+                    )
                 out += ["", "```markdown", issue.body, "```", ""]
     out += ["## No milestone", ""]
     for issue in issues:
         if issue.milestone is None:
-            out += [f"### {issue.title}", "", f"*Labels:* {', '.join(issue.labels)}", "",
-                    "```markdown", issue.body, "```", ""]
+            out += [
+                f"### {issue.title}",
+                "",
+                f"*Labels:* {', '.join(issue.labels)}",
+                "",
+                "```markdown",
+                issue.body,
+                "```",
+                "",
+            ]
     return "\n".join(out)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--plan", type=Path, default=DEFAULT_PLAN)
-    ap.add_argument("--denylist", type=Path,
-                    default=Path(os.environ.get("HCSIM_DENYLIST", "~/.config/hcsim/denylist.txt")).expanduser())
-    ap.add_argument("--detail", default=DEFAULT_DETAIL,
-                    help="milestones whose tasks become sub-issues (default: %(default)s)")
+    ap.add_argument(
+        "--denylist",
+        type=Path,
+        default=Path(os.environ.get("HCSIM_DENYLIST", "~/.config/hcsim/denylist.txt")).expanduser(),
+    )
+    ap.add_argument(
+        "--detail",
+        default=DEFAULT_DETAIL,
+        help="milestones whose tasks become sub-issues (default: %(default)s)",
+    )
     ap.add_argument("--preview", type=Path, help="write a Markdown preview of every issue here")
     ap.add_argument("--apply", action="store_true", help="create on GitHub (default: dry run)")
     args = ap.parse_args()
@@ -526,11 +689,15 @@ def main() -> None:
         counts[kind] = counts.get(kind, 0) + 1
     links = sum(1 for i in issues if i.parent)
     deps = sum(len(i.blocked_by) for i in issues)
-    print(f"milestones: {len(milestones)}   issues: {len(issues)}  "
-          + "  ".join(f"{k}: {v}" for k, v in counts.items()))
+    print(
+        f"milestones: {len(milestones)}   issues: {len(issues)}  "
+        + "  ".join(f"{k}: {v}" for k, v in counts.items())
+    )
     print(f"sub-issue links: {links}   blocked-by links: {deps}   labels: {len(LABELS)}")
-    print(f"content-creating calls, worst case: "
-          f"{len(LABELS) + len(milestones) + len(issues) + links + deps + 3 + len(issues)}")
+    print(
+        f"content-creating calls, worst case: "
+        f"{len(LABELS) + len(milestones) + len(issues) + links + deps + 3 + len(issues)}"
+    )
     long_titles = [i.title for i in issues if len(i.title) > 100]
     if long_titles:
         print(f"titles over 100 characters: {len(long_titles)}")
