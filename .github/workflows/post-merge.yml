@@ -1,0 +1,62 @@
+# PR checks run on Linux. This runs the suite on macOS once per merge to main. A newer merge
+# cancels an older run still in progress. A failure opens one tracking issue, or comments on the
+# one already open, and the next success closes it.
+name: post-merge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-merge
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos:
+    name: suite on macOS
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      HYPOTHESIS_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - run: make test
+      - run: make test-heavy
+
+  report:
+    name: track failures
+    needs: macos
+    if: always() && needs.macos.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.macos.result }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          open=$(gh issue list --state open --label ci-failure --json number --jq '.[0].number // empty')
+          if [ "$RESULT" = "success" ]; then
+            [ -z "$open" ] || gh issue close "$open" --comment "Passing again at $SHA: $RUN_URL"
+          elif [ -n "$open" ]; then
+            gh issue comment "$open" --body "Still failing at $SHA: $RUN_URL"
+          else
+            gh issue create --label ci-failure --title "Post-merge macOS run failing" \
+              --body "The post-merge macOS run failed at $SHA: $RUN_URL. This issue closes itself when the run passes again."
+          fi
