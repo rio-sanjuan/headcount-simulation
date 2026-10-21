@@ -8,7 +8,7 @@ HEAVY := slow or acceptance or e2e
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr sanitize-main affected
+.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr sanitize-main sanitize-text affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -53,6 +53,11 @@ sanitize-main: ## Denylist scan of the whole tree and the pushed commits (CI)
 	$(UV_RUN) python tools/sanitize_scan.py --tree
 	if [ -n "$$BEFORE" ] && ! printf '%s' "$$BEFORE" | grep -Eq '^0+$$'; then \
 		$(UV_RUN) python tools/sanitize_scan.py --range "$$BEFORE..HEAD"; fi
+
+# CI: text on stdin, reported as $NAME. Covers issue and PR text, comments, branch and tag names,
+# and release notes. The text never touches a command line.
+sanitize-text: ## Denylist scan of text on stdin, reported as NAME (CI)
+	$(UV_RUN) python tools/sanitize_scan.py --stdin "$$NAME"
 
 # CI passes the PR's base commit. With no BASE, everything runs.
 affected: ## Test paths a change since BASE can affect
