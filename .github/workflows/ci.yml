@@ -107,6 +107,26 @@ jobs:
           TESTS: ${{ needs.changes.outputs.tests }}
         run: make test TESTS="$TESTS"
 
+  sanitize:
+    name: sanitization scan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      # A missing secret fails the scan (exit 2) rather than passing it.
+      - env:
+          SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BRANCH: ${{ github.head_ref }}
+        run: make sanitize-pr
+
   pr-title:
     name: conventional PR title
     if: github.event_name == 'pull_request'
@@ -136,7 +156,7 @@ jobs:
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [changes, lint, typecheck, arch, test, pr-title]
+    needs: [changes, lint, typecheck, arch, test, sanitize, pr-title]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
