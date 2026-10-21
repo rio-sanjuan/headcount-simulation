@@ -1,0 +1,31 @@
+# This project doesn't accept pull requests from outside contributors (CONTRIBUTING.md), so
+# this closes them with a pointer to the issue tracker.
+#
+# It's the one `pull_request_target` workflow, because closing a PR from a fork needs a token
+# that can write. It never checks out or runs PR code: it reads only the event's author and
+# calls the API.
+name: close outside PRs
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  close:
+    if: >-
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+      github.event.pull_request.author_association)
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: >-
+          gh pr close "$PR_URL" --comment "Thanks for your interest! This project doesn't accept
+          pull requests. Please open an issue instead, as described in CONTRIBUTING.md."
