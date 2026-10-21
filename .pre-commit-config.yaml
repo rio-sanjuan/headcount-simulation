@@ -24,6 +24,14 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # Notebooks are committed without outputs or execution counts, so no rendered result can
+  # carry data into the repository. The sanitization scan reads notebook JSON as text.
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+        args: [--drop-empty-cells, --extra-keys, "metadata.kernelspec metadata.language_info"]
+
   # Matches the uv version the lockfile was written with. Update both together.
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.12.23
