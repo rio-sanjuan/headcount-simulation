@@ -27,6 +27,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.dates import MonthDays
 from hcsim.synth.movements import MovementProcess
 from hcsim.synth.population import draw_roles
 from hcsim.synth.programs import TerminationPrograms
@@ -37,21 +38,6 @@ from hcsim.synth.structure import cost_center_names, level_one_names
 from hcsim.synth.workforce import Workforce, tenure_months
 
 Dates = NDArray[np.datetime64]
-
-
-def month_start(month_end: pd.Timestamp) -> np.datetime64:
-    return np.datetime64(month_end.date().replace(day=1), "D")
-
-
-def random_days(
-    month_end: pd.Timestamp, n: int, rng: np.random.Generator, earliest: Dates | None = None
-) -> Dates:
-    """A day in `month_end`'s month for each of `n` events, no earlier than `earliest`."""
-    first = month_start(month_end)
-    low = np.zeros(n, dtype=np.int64)
-    if earliest is not None:
-        low = np.maximum(0, (earliest - first).astype(np.int64))
-    return first + rng.integers(low, month_end.day).astype("timedelta64[D]")
 
 
 class Shocks:
@@ -200,8 +186,9 @@ def simulate(
             workforce.column("rating")[active],
             multiplier[cost_center],
         )
+        days = MonthDays(month, config.dates)
         leavers = active[rng.random(len(active)) < h]
-        dates = random_days(month_end, len(leavers), rng)
+        dates = days.sample("exit", len(leavers), rng)
         workforce.terminate(leavers, dates)
         backfill = rng.random(len(leavers)) < reqs.backfill_probability
         book.open("backfill", workforce.roles(leavers[backfill]), dates[backfill], m)
@@ -213,13 +200,12 @@ def simulate(
         cost_centers = np.repeat(np.arange(n), rng.poisson(growth_rate))
         levels = rng.choice(growth_levels, size=len(cost_centers), p=growth_p)
         roles = draw_roles(config, cost_centers, levels, rng)
-        book.open("growth", roles, random_days(month_end, len(cost_centers), rng), m)
+        book.open("growth", roles, days.sample("business", len(cost_centers), rng), m)
 
         # 3. Fills and unfilled exits. Backfills opened by transfers wait a month.
         open_reqs = book.open_requisitions()
         h_ext = reqs.external_hazards(m - book.column("opened_month")[open_reqs])
         u = rng.random(len(open_reqs))
-        dates = random_days(month_end, len(open_reqs), rng, book.column("opened_date")[open_reqs])
         h_conv = config.movements.conversion_fill_hazard if movements is not None else 0.0
         external = u < h_ext
         transfer = ~external & (u < h_ext + reqs.transfer_fill_hazard)
@@ -230,6 +216,10 @@ def simulate(
             & ~conversion
             & (u < h_ext + reqs.transfer_fill_hazard + h_conv + reqs.unfilled_exit_hazard)
         )
+        # External hires start on the start weekday; other outcomes fall on business days.
+        opened = book.column("opened_date")[open_reqs]
+        dates = days.sample("business", len(open_reqs), rng, opened)
+        dates[external] = days.sample("start", int(external.sum()), rng, opened[external])
         hired = workforce.hire(book.roles(open_reqs[external]), dates[external])
         book.close(open_reqs[external], dates[external], "filled_external", hired)
         _transfers(config, workforce, book, open_reqs[transfer], dates[transfer], m, rng)

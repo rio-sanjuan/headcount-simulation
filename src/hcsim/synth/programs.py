@@ -18,6 +18,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.dates import MonthDays
 from hcsim.synth.structure import level_one_names
 from hcsim.synth.workforce import Workforce
 
@@ -39,6 +40,7 @@ class TerminationPrograms:
         rng: np.random.Generator,
     ) -> None:
         self.truth = config.programs
+        self._date_truth = config.dates
         self.workforce = workforce
         self.org = org_of_cost_center
         self.rng = rng
@@ -46,6 +48,9 @@ class TerminationPrograms:
         self.running: list[_Program] = []
         self.finished: list[_Program] = []
         self._weight = np.asarray(self.truth.rating_weight, dtype=np.float64)
+
+    def _days(self, month: pd.Period) -> MonthDays:
+        return MonthDays(month, self._date_truth)
 
     def _members(self, org: int) -> NDArray[np.int64]:
         active = self.workforce.active()
@@ -84,8 +89,7 @@ class TerminationPrograms:
             )
             keys = np.log(weight) + self.rng.gumbel(size=len(members))
             chosen = members[np.argsort(-keys)[:n]]
-            first = np.datetime64(month.start_time.date(), "D")
-            days = first + self.rng.integers(0, month.days_in_month, n).astype("timedelta64[D]")
+            days = self._days(month).sample("exit", n, self.rng)
             self.workforce.terminate(chosen, days, "RIF")
             program.done.append(n)
             total += n
