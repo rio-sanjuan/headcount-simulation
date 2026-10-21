@@ -205,6 +205,50 @@ class GrantTruth:
     vest_shares: tuple[float, ...] = (0.25,) + (0.0625,) * 12
 
 
+@dataclass(frozen=True)
+class RatingTruth:
+    """Performance ratings: calibration cycles, a Markov chain between cycles, and a separate
+    distribution for first ratings. Ratings are plain ordered labels, worst to best."""
+
+    scale: tuple[str, ...] = ("R1", "R2", "R3", "R4", "R5")
+    #: Calendar months whose month-end closes a calibration cycle.
+    cycle_months: tuple[int, ...] = (3,)
+    #: Employees are first rated at the first cycle after this much tenure.
+    min_tenure_months: float = 6.0
+    #: First ratings, in scale order. New people cluster in the middle.
+    entry_distribution: tuple[float, ...] = (0.04, 0.16, 0.60, 0.16, 0.04)
+    #: transitions[i][j]: the chance a rating of scale[i] becomes scale[j] at the next cycle.
+    transitions: tuple[tuple[float, ...], ...] = (
+        (0.30, 0.40, 0.25, 0.05, 0.00),
+        (0.08, 0.40, 0.42, 0.08, 0.02),
+        (0.02, 0.10, 0.70, 0.15, 0.03),
+        (0.01, 0.05, 0.34, 0.45, 0.15),
+        (0.00, 0.03, 0.22, 0.35, 0.40),
+    )
+
+    def stationary(self) -> NDArray[np.float64]:
+        """The chain's long-run distribution: the incumbents' ratings when the world starts."""
+        matrix = np.asarray(self.transitions, dtype=np.float64)
+        values, vectors = np.linalg.eig(matrix.T)
+        vector = np.real(vectors[:, np.argmin(np.abs(values - 1))])
+        return vector / vector.sum()
+
+    def problems(self) -> list[str]:
+        k = len(self.scale)
+        found = []
+        if len(set(self.scale)) != k or k < 2:
+            found.append("ratings.scale needs at least two distinct labels")
+        if not self.cycle_months or any(m not in range(1, 13) for m in self.cycle_months):
+            found.append("ratings.cycle_months must be calendar months 1-12")
+        matrix = np.asarray(self.transitions, dtype=np.float64)
+        entry = np.asarray(self.entry_distribution, dtype=np.float64)
+        if matrix.shape != (k, k) or (matrix < 0).any() or not np.allclose(matrix.sum(axis=1), 1):
+            found.append("ratings.transitions must be a square stochastic matrix over the scale")
+        if entry.shape != (k,) or (entry < 0).any() or not np.isclose(entry.sum(), 1):
+            found.append("ratings.entry_distribution must be a distribution over the scale")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -265,6 +309,7 @@ class WorldConfig:
     compensation: CompensationTruth = field(default_factory=CompensationTruth)
     prices: PriceTruth = field(default_factory=PriceTruth)
     grants: GrantTruth = field(default_factory=GrantTruth)
+    ratings: RatingTruth = field(default_factory=RatingTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -321,6 +366,7 @@ class WorldConfig:
             problems.append(f"compensation.family_factor has no value for {no_factor}")
         if extra := sorted(set(self.requisitions.growth_level_mix) - levels):
             problems.append(f"requisitions.growth_level_mix names unknown levels {extra}")
+        problems += self.ratings.problems()
         if problems:
             raise ValueError("invalid WorldConfig: " + "; ".join(problems))
 

@@ -40,9 +40,17 @@ class Workforce:
         self, ids: NDArray[np.int64], roles: Roles, hire_dates: NDArray[np.datetime64]
     ) -> None:
         self.people = Table(
-            {"employee_id": np.int64, **ROLE_DTYPES, "hire_date": "datetime64[D]", "active": bool}
+            {
+                "employee_id": np.int64,
+                **ROLE_DTYPES,
+                "hire_date": "datetime64[D]",
+                "active": bool,
+                "rating": np.int8,  # a code into the rating scale; -1 until first rated
+            }
         )
-        self.people.append(len(ids), employee_id=ids, hire_date=hire_dates, active=True, **roles)
+        self.people.append(
+            len(ids), employee_id=ids, hire_date=hire_dates, active=True, rating=-1, **roles
+        )
         self.next_id = int(ids.max()) + 1 if len(ids) else 1
         self.log = EventLog(list(TXN_DTYPES))
 
@@ -87,7 +95,9 @@ class Workforce:
         n = len(dates)
         ids = self.next_id + np.arange(n, dtype=np.int64)
         self.next_id += n
-        index = self.people.append(n, employee_id=ids, hire_date=dates, active=True, **roles)
+        index = self.people.append(
+            n, employee_id=ids, hire_date=dates, active=True, rating=-1, **roles
+        )
         self._record(index, "HIRE", +1, dates)
         return ids
 
