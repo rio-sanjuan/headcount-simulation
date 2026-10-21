@@ -312,3 +312,15 @@ def test_pre_push_without_refs_scans_all_of_head(
     monkeypatch.chdir(repo)
     rendered = {str(h) for h in scan_pre_push(parse_patterns(DENYLIST), {})}
     assert rendered == {"y.md:2: denylist line 3"}
+
+
+@pytest.mark.parametrize("make_path", ["missing", "directory"])
+def test_cli_refuses_a_path_that_isnt_a_file(
+    make_path: str, patterns_file: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / make_path
+    if make_path == "directory":
+        target.mkdir()
+    result = run_cli("--patterns", str(patterns_file), str(target))
+    assert result.returncode == 2
+    assert "not a file" in result.stderr
