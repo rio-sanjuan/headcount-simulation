@@ -3,7 +3,8 @@
 The layering is strict, so the import graph shows exactly which layers a change can reach: a
 change in a layer affects its own tests and the tests of every layer that imports it, directly
 or not. A change in `hcsim.financial`, for example, runs the financial, engine, and studies
-tests, and a change in `hcsim.model` runs everything.
+tests, and a change in `hcsim.model` runs everything. Any source change also runs the
+end-to-end tests, which pass through every layer.
 
 Prints a space-separated list of test paths for `make test TESTS=...`. Prints `tests` when
 everything must run, and nothing when the change can't affect any test, such as docs only.
@@ -76,6 +77,7 @@ def select_tests(
         selected |= {f"tests/{layer}" for layer in layers}
         selected |= {p for p in existing if p.startswith("tests/test_")}  # top-level smoke tests
         selected.add("tests/tools")  # the tools inspect the real package, such as its graph
+        selected.add("tests/e2e")  # the end-to-end run passes through every layer
     return sorted(p for p in selected if p in existing)
 
 

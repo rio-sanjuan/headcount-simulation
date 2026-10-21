@@ -57,6 +57,14 @@ def test_a_layer_without_a_test_directory_still_runs_the_smoke_tests() -> None:
     assert select("src/hcsim/synth/world.py") == ["tests/test_package.py", "tests/tools"]
 
 
+def test_a_source_change_runs_the_end_to_end_tests_when_they_exist() -> None:
+    existing = EXISTING | {"tests/e2e"}
+    assert "tests/e2e" in select_tests(
+        ["src/hcsim/synth/world.py"], IMPORTERS.__getitem__, existing
+    )
+    assert "tests/e2e" not in select_tests(["tools/licenses.py"], IMPORTERS.__getitem__, existing)
+
+
 def test_docs_only_changes_run_nothing() -> None:
     assert select("docs/design/overview.md", "README.md") == []
 

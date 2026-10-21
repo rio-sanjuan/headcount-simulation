@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -70,6 +70,11 @@ memory: ## Peak-memory limits (pytest-memray)
 # pytest exits 5 when it selects no tests, which is expected until the first heavy test lands.
 test-heavy: ## Slow, acceptance, and e2e tests
 	$(UV_RUN) pytest -n auto -m "$(HEAVY)" $(TESTS) || [ $$? -eq 5 ]
+
+# The e2e tests compare each scorecard with a committed baseline. After an intentional change,
+# regenerate the baselines and commit them in the same PR.
+baselines: ## Regenerate the committed metric baselines
+	HCSIM_UPDATE_BASELINES=1 $(UV_RUN) pytest -m e2e tests/e2e
 
 sanitize: ## Denylist scan of every tracked file
 	$(UV_RUN) python tools/sanitize_scan.py --tree

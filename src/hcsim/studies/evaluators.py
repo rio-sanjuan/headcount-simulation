@@ -1,7 +1,8 @@
 """Evaluators: score a run and report metrics with their thresholds.
 
-This is the walking skeleton's one evaluator, `invariants`. Each of its checks holds by
-construction, so any failure is a defect, never noise:
+The walking skeleton has two evaluators. `summary` reports the run's outcomes without gating
+them; the metric baselines compare them. Each of the `invariants` checks holds by construction,
+so any failure is a defect, never noise:
 
 - **Quota.** Every guided draw realizes exactly `min(quota, eligible)` in every group.
 - **Headcount identity.** `H(t+1) = H(t) + F_ext - A`, exactly, per cost center.
@@ -86,4 +87,50 @@ def invariants(result: SimulationResult) -> list[Metric]:
                 f"{tranches} tranches checked",
             )
         )
+    return metrics
+
+
+def summary(result: SimulationResult) -> list[Metric]:
+    """The run's outcomes, as means over trajectories. Reported, never gated."""
+    name = "summary"
+    months = result.config.simulation_months
+    headcount = result.headcount.sum(axis=2)  # (trajectories, months + 1)
+    end = headcount[:, -1]
+
+    def flow_total(symbol: str) -> float:
+        return float(result.flow(symbol).sum(axis=(1, 2)).mean())
+
+    metrics = [
+        Metric(name, "headcount_start", float(headcount[0, 0]), None),
+        Metric(name, "headcount_end_mean", float(end.mean()), None),
+        Metric(name, "headcount_end_sd", float(end.std(ddof=1)) if len(end) > 1 else 0.0, None),
+        Metric(
+            name,
+            "open_openings_end_mean",
+            float(result.open_openings.sum(axis=2)[:, -1].mean()),
+            None,
+        ),
+        Metric(name, "attrition_mean", flow_total("A"), None, "A over the run"),
+        Metric(name, "external_fills_mean", flow_total("F_ext"), None, "F_ext over the run"),
+        Metric(name, "backfills_opened_mean", flow_total("B_att"), None, "B_att over the run"),
+        Metric(name, "growth_opened_mean", flow_total("G"), None, "G over the run"),
+        Metric(name, "unfilled_exits_mean", flow_total("U"), None, "U over the run"),
+    ]
+    if result.config.computes_sbc:
+        recognized = [
+            float(t.sbc.loc[t.sbc["month"] < months, "recognized"].sum())
+            for t in result.trajectories
+            if t.sbc is not None
+        ]
+        tranches = [len(t.tranches) for t in result.trajectories if t.tranches is not None]
+        metrics += [
+            Metric(
+                name,
+                "sbc_recognized_mean",
+                float(np.mean(recognized)),
+                None,
+                "recognized inside the run's months",
+            ),
+            Metric(name, "tranches_mean", float(np.mean(tranches)), None),
+        ]
     return metrics

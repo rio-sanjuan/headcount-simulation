@@ -7,12 +7,15 @@ instead. The versioned schema and rankings arrive in M8.8.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Final
 
+import numpy as np
 import pandas as pd
 
+from hcsim.engine.loop import SimulationResult
 from hcsim.studies.harness import StudyRun
 
 SCORECARD_VERSION: Final = 1
@@ -34,6 +37,7 @@ PROVENANCE_COLUMNS: Final = [
     "hcsim_version",
 ]
 COLUMNS: Final = ["scorecard_version", *METRIC_COLUMNS, *PROVENANCE_COLUMNS]
+FLOAT_FORMAT: Final = "%.10g"
 
 
 def scorecard(run: StudyRun) -> pd.DataFrame:
@@ -53,6 +57,22 @@ def scorecard(run: StudyRun) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
+def results_digest(result: SimulationResult) -> str:
+    """`rd1-` and 16 hex characters of a SHA-256 over every trajectory's raw results: stocks,
+    flows, quota records, prices, and SBC. Equal digests mean bit-identical results."""
+    digest = hashlib.sha256()
+    for t in result.trajectories:
+        arrays = [t.headcount, t.open_openings, t.prices, *(t.flows[k] for k in sorted(t.flows))]
+        for q in t.quotas:
+            digest.update(f"{q.step}|{q.domain}|{q.category}".encode())
+            arrays += [q.record.quota, q.record.eligible, q.record.realized]
+        if t.sbc is not None:
+            arrays.append(t.sbc.to_numpy(dtype=np.float64))
+        for array in arrays:
+            digest.update(np.ascontiguousarray(array).tobytes())
+    return "rd1-" + digest.hexdigest()[:16]
+
+
 def run_record(run: StudyRun, seconds: float) -> dict[str, Any]:
     """Everything about the run that isn't a metric."""
     seed = run.seed
@@ -61,6 +81,7 @@ def run_record(run: StudyRun, seconds: float) -> dict[str, Any]:
         "profile": run.profile.model_dump(mode="json"),
         "provenance": run.provenance,
         "passed": run.passed,
+        "results_digest": results_digest(run.result),
         "seed": {
             "snapshot_date": seed.snapshot_date.isoformat(),
             "employees": seed.employees_seeded,
@@ -79,7 +100,7 @@ def write(run: StudyRun, directory: Path, seconds: float) -> Path:
     """Write the scorecard and the run record, returning the scorecard's path."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / SCORECARD_FILE
-    scorecard(run).to_csv(path, index=False, float_format="%.10g")
+    scorecard(run).to_csv(path, index=False, float_format=FLOAT_FORMAT)
     record = json.dumps(run_record(run, seconds), indent=2, sort_keys=True)
     (directory / RUN_RECORD_FILE).write_text(record + "\n")
     return path

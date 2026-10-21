@@ -160,6 +160,26 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: make diff-coverage
 
+  # Slow, acceptance, and e2e tests. They skip draft PRs and run again when the PR is ready.
+  heavy:
+    name: heavy tests
+    needs: changes
+    if: needs.changes.outputs.tests != '' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HYPOTHESIS_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - env:
+          TESTS: ${{ needs.changes.outputs.tests }}
+        run: make test-heavy TESTS="$TESTS"
+
   memory:
     name: peak memory
     needs: changes
@@ -242,7 +262,7 @@ jobs:
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [changes, lint, typecheck, arch, workflows, deps, test, memory, sanitize, secrets, pr-title]
+    needs: [changes, lint, typecheck, arch, workflows, deps, test, heavy, memory, sanitize, secrets, pr-title]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
