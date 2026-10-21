@@ -43,7 +43,8 @@ class Applied:
     recorded_tranches: int
 
 
-def _per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
+def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
+    """Rows per cost center, or the sum of the `weights` column per cost center."""
     w = None if weights is None else rows[:, weights]
     counts = np.bincount(rows[:, column].astype(np.int64), weights=w, minlength=n)
     return counts.astype(np.int64)
@@ -117,15 +118,15 @@ def apply(
     if len(dropped) and result.forfeit and state.ledger is not None:
         slots = dropped[:, EmployeeColumn.VEST_INDEX].astype(np.int64)
         forfeited = state.ledger.forfeit(slots, step)
-    state.headcount -= _per_cost_center(dropped, ecc, n)
+    state.headcount -= per_cost_center(dropped, ecc, n)
     state.n_employees = _drop(state.employees, state.n_employees, e.drop)
 
     # 2. Write employee rows in place.
     if len(e.write_index):
         index = _after_drops(e.write_index, e.drop)
-        state.headcount -= _per_cost_center(state.employees[index], ecc, n)
+        state.headcount -= per_cost_center(state.employees[index], ecc, n)
         state.employees[index] = e.write_rows
-        state.headcount += _per_cost_center(e.write_rows, ecc, n)
+        state.headcount += per_cost_center(e.write_rows, ecc, n)
 
     # 3. Append employees, with new ids and vest slots.
     appended = e.append.copy()
@@ -138,23 +139,23 @@ def apply(
         start = state.n_employees
         state.employees[start : start + len(appended)] = appended
         state.n_employees += len(appended)
-        state.headcount += _per_cost_center(appended, ecc, n)
+        state.headcount += per_cost_center(appended, ecc, n)
 
     # 4. Drop requisitions.
     dropped_reqs = state.live_openings[o.drop].copy()
-    state.open_openings -= _per_cost_center(dropped_reqs, occ, n, num)
-    state.open_rows -= _per_cost_center(dropped_reqs, occ, n)
+    state.open_openings -= per_cost_center(dropped_reqs, occ, n, num)
+    state.open_rows -= per_cost_center(dropped_reqs, occ, n)
     state.n_openings = _drop(state.openings, state.n_openings, o.drop)
 
     # 5. Write requisition rows in place.
     if len(o.write_index):
         index = _after_drops(o.write_index, o.drop)
         before = state.openings[index]
-        state.open_openings -= _per_cost_center(before, occ, n, num)
-        state.open_rows -= _per_cost_center(before, occ, n)
+        state.open_openings -= per_cost_center(before, occ, n, num)
+        state.open_rows -= per_cost_center(before, occ, n)
         state.openings[index] = o.write_rows
-        state.open_openings += _per_cost_center(o.write_rows, occ, n, num)
-        state.open_rows += _per_cost_center(o.write_rows, occ, n)
+        state.open_openings += per_cost_center(o.write_rows, occ, n, num)
+        state.open_rows += per_cost_center(o.write_rows, occ, n)
 
     # 6. Append requisitions, with new ids.
     appended_reqs = o.append.copy()
@@ -165,8 +166,8 @@ def apply(
         start = state.n_openings
         state.openings[start : start + len(appended_reqs)] = appended_reqs
         state.n_openings += len(appended_reqs)
-        state.open_openings += _per_cost_center(appended_reqs, occ, n, num)
-        state.open_rows += _per_cost_center(appended_reqs, occ, n)
+        state.open_openings += per_cost_center(appended_reqs, occ, n, num)
+        state.open_rows += per_cost_center(appended_reqs, occ, n)
 
     # 7. Size and record grants for the appended employees.
     recorded = 0
