@@ -1,0 +1,25 @@
+[project]
+name = "hcsim"
+version = "0.1.0.dev0"
+description = "Employee-level Monte Carlo headcount forecast, aggregate guidance forecasting, and stock-based compensation (ASC 718) expense simulation on fully synthetic data."
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.2",
+    "numpy>=2.2",
+    # statsforecast requires pandas below 3.0, so the whole project stays on pandas 2.x.
+    "pandas>=2.2,<3",
+]
+
+[project.optional-dependencies]
+darts = ["darts>=0.36"]
+darts-deep = ["darts[torch]>=0.36"]
+sktime = ["sktime>=0.38"]
+prophet = ["prophet>=1.1.6"]
+docs = ["mkdocs-material>=9.6"]
+# The `app` extra arrives with the explorer in M9, once its stack is chosen.
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
