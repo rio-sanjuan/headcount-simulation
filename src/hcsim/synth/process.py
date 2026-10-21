@@ -3,7 +3,8 @@
 Each month, in order:
 
 0. In a cycle month, a calibration rates everyone eligible (see `ratings`), and then a
-   promotion cycle promotes everyone ready (see `promotions`).
+   promotion cycle promotes everyone ready (see `promotions`). Then come reclassification and
+   reorganization batches (see `movements`) and termination programs (see `programs`).
 1. Every active employee may leave, with the true departure hazard. A departure may open a
    backfill requisition for the same role.
 2. Each cost center opens growth requisitions at its own Poisson rate.
@@ -28,6 +29,7 @@ from numpy.typing import NDArray
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.movements import MovementProcess
 from hcsim.synth.population import draw_roles
+from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RatingProcess
 from hcsim.synth.requisitions import RequisitionBook
@@ -148,6 +150,7 @@ def simulate(
     org_of_cost_center: NDArray[np.int64] | None = None,
     promotions: PromotionProcess | None = None,
     movements: MovementProcess | None = None,
+    programs: TerminationPrograms | None = None,
 ) -> dict[str, Any]:
     """Run the world over `month_ends`. The first month-end is the initial stock. Returns the
     random effects the run drew, for the truth manifest."""
@@ -182,6 +185,9 @@ def simulate(
         if movements is not None:
             movements.reclassify(month)
             movements.reorganize(month)
+        # 0d. Termination programs, known events, come before sampled departures.
+        if programs is not None:
+            programs.run(month)
         # 1. Departures, and the backfill each may open.
         multiplier = shocks.step(m, rng)
         active = workforce.active()
@@ -238,6 +244,7 @@ def simulate(
     tops = level_one_names(config.org_level1_nodes)
     return {
         "movements": movements.manifest() if movements is not None else {},
+        "programs": programs.manifest() if programs is not None else [],
         "attrition": {
             "cost_center_effect": dict(zip(names, cc_effect.round(6).tolist(), strict=True)),
             "turbulent_months": [mo for mo, on in zip(months, shocks.regime, strict=True) if on],

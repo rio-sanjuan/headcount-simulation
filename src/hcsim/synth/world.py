@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.movements import MovementProcess
+from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
 from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
@@ -179,7 +180,7 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(8)
+    streams = np.random.SeedSequence(config.seed).spawn(9)
     (
         population_rng,
         process_rng,
@@ -189,6 +190,7 @@ def generate_world(config: WorldConfig) -> World:
         rating_rng,
         promotion_rng,
         movement_rng,
+        program_rng,
     ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
@@ -219,6 +221,7 @@ def generate_world(config: WorldConfig) -> World:
         org_of_cost_center,
         promotions,
         movements,
+        TerminationPrograms(config, workforce, org_of_cost_center, program_rng),
     )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
