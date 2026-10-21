@@ -28,6 +28,7 @@ FLOW_SIGN = {
     "CTG_END": -1,
     "PROMO": 0,
     "RECLASS": 0,
+    "RIF": -1,
 }
 
 
@@ -106,7 +107,7 @@ def test_hires_get_fresh_ids_and_their_hire_date(world: World) -> None:
 
 def test_the_truth_manifest_records_every_process(world: World) -> None:
     processes = world.truth["processes"]
-    assert set(processes) == {"attrition", "requisitions", "equity", "movements"}
+    assert set(processes) == {"attrition", "requisitions", "equity", "movements", "programs"}
     assert len(processes["attrition"]["cost_center_effect"]) == 10
 
 

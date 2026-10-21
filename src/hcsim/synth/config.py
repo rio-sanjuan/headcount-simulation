@@ -402,6 +402,39 @@ class MovementTruth:
         return found
 
 
+@dataclass(frozen=True)
+class ProgramTruth:
+    """Termination programs: planned reductions in one level-1 org over a multi-month window.
+
+    A program starts in a month with `start_probability`, in an org that isn't already in
+    one. It removes a share of the org's regular headcount at the start, spread evenly over
+    its window, choosing people with weights by rating. Program terminations are their own
+    transaction (`RIF`), run before the month's sampled departures, and are never backfilled.
+    Invented, round values.
+    """
+
+    start_probability: float = 0.025
+    window_months: tuple[int, int] = (2, 4)
+    share: tuple[float, float] = (0.05, 0.15)
+    #: Selection weights by rating, worst to best, and for the unrated.
+    rating_weight: tuple[float, ...] = (4.0, 2.0, 1.0, 0.6, 0.3)
+    unrated_weight: float = 1.0
+
+    def problems(self, rating_levels: int) -> list[str]:
+        found = []
+        if not 0 <= self.start_probability <= 1:
+            found.append("programs.start_probability must lie in [0, 1]")
+        low, high = self.window_months
+        if not 1 <= low <= high:
+            found.append("programs.window_months must be a range of at least one month")
+        low_s, high_s = self.share
+        if not 0 < low_s <= high_s <= 1:
+            found.append("programs.share must be a range inside (0, 1]")
+        if len(self.rating_weight) != rating_levels or min(self.rating_weight) <= 0:
+            found.append("programs.rating_weight needs one positive weight per rating")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -465,6 +498,7 @@ class WorldConfig:
     ratings: RatingTruth = field(default_factory=RatingTruth)
     promotions: PromotionTruth = field(default_factory=PromotionTruth)
     movements: MovementTruth = field(default_factory=MovementTruth)
+    programs: ProgramTruth = field(default_factory=ProgramTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -525,6 +559,7 @@ class WorldConfig:
         problems += self.attrition.problems(len(self.ratings.scale))
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
         problems += self.movements.problems()
+        problems += self.programs.problems(len(self.ratings.scale))
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:

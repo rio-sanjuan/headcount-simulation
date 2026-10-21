@@ -4,7 +4,7 @@
 integer-coded columns, with an active flag and a contingent flag. Every change goes through it,
 and each change appends transaction rows that the data contract carries:
 
-- `HIRE` (+1) and `TERM` (-1) for regular employees.
+- `HIRE` (+1) and `TERM` (-1) for regular employees, and `RIF` (-1) for a termination program.
 - Two legs for a move between roles, `XFER_OUT` (-1) then `XFER_IN` (+1), and for a
   reorganization, `REORG_OUT` (-1) then `REORG_IN` (+1).
 - `PROMO` (0) and `RECLASS` (0), which change the job in place.
@@ -40,6 +40,7 @@ TRANS_TYPES: Final = (
     "CONV_OUT",
     "CTG_START",
     "CTG_END",
+    "RIF",
 )
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
@@ -130,8 +131,10 @@ class Workforce:
         self._record(index, "HIRE", +1, dates)
         return ids
 
-    def terminate(self, index: Index, dates: NDArray[np.datetime64]) -> None:
-        self._record(index, "TERM", -1, dates)
+    def terminate(
+        self, index: Index, dates: NDArray[np.datetime64], trans_type: str = "TERM"
+    ) -> None:
+        self._record(index, trans_type, -1, dates)
         self.people.column("active")[index] = False
 
     def reassign(self, index: Index, roles: Roles, dates: NDArray[np.datetime64]) -> Roles:
