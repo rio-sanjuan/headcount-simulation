@@ -16,26 +16,12 @@ from hcsim.engine.config import ForecastScope
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeding import schema_from_world
 from hcsim.financial.expense import ExpenseResult
-from hcsim.guidance.pipeline import PipelineConfig
-from hcsim.guidance.pipeline import run as fit_guidance
 from hcsim.studies.evaluators import invariants
 from hcsim.studies.harness import StudyError, StudyRun, run_study
 from hcsim.studies.inputs import InputError, fit_models
 from hcsim.studies.profile import Mode, ProfileError, StudyProfile
-from hcsim.synth.config import preset
-from hcsim.synth.world import generate_world, write_world
 
 RUN = dt.date(2026, 1, 1)
-
-
-@pytest.fixture(scope="module")
-def inputs(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
-    root = tmp_path_factory.mktemp("study")
-    world = root / "world.duckdb"
-    write_world(generate_world(preset("tiny", seed=5)), world)
-    with duckdb.connect(str(world), read_only=True) as con:
-        fit_guidance(con, PipelineConfig()).artifact.save(root / "guidance")
-    return world, root / "guidance"
 
 
 def profile(**fields: object) -> StudyProfile:
