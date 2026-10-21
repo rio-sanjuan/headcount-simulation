@@ -16,7 +16,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from hcsim.synth import population, structure, workforce
+from hcsim.synth import population, process, structure
 from hcsim.synth.config import WorldConfig
 
 GENERATOR_VERSION = 1
@@ -73,7 +73,7 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["dim_company"] = structure.company_dimension(config)
     world.tables["dim_account"] = structure.account_dimension()
     people = population.initial_population(config, rng)
-    txn, process_truth = workforce.simulate_workforce(
+    txn, reqs, process_truth = process.simulate(
         people,
         month_ends(config),
         structure.cost_center_names(config),
@@ -82,6 +82,8 @@ def generate_world(config: WorldConfig) -> World:
         lambda cc, level, r: population.draw_role(config, cc, level, r),
     )
     world.tables["workforce_txn"] = txn[TXN_COLUMNS].reset_index(drop=True)
+    world.tables["req_interval"] = reqs
+    world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in month_ends(config)]})
     world.truth = {
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
@@ -99,5 +101,19 @@ def write_world(world: World, path: Path) -> None:
             con.register("frame", frame)
             con.execute(f"CREATE TABLE {name} AS SELECT * FROM frame")
             con.unregister("frame")
+        # Month-end snapshots of every open requisition. A requisition opened and closed
+        # inside one month never appears, as with real snapshot data.
+        con.execute(
+            """
+            CREATE VIEW req_snapshot AS
+            SELECT c.month_end AS snapshot_date, r.req_id, r.req_type, r.cost_center,
+                   r.job_code, r.location, r.company, r.is_manager, r.openings,
+                   'open' AS state, r.opened_date
+            FROM calendar c
+            JOIN req_interval r
+              ON r.opened_date <= c.month_end
+             AND (r.closed_date IS NULL OR r.closed_date > c.month_end)
+            """
+        )
         con.execute("CREATE TABLE truth_manifest (manifest JSON)")
         con.execute("INSERT INTO truth_manifest VALUES (?)", [json.dumps(world.truth)])

@@ -90,7 +90,7 @@ def test_hires_get_fresh_ids_and_their_hire_date(world: World) -> None:
 
 def test_the_truth_manifest_records_every_process(world: World) -> None:
     processes = world.truth["processes"]
-    assert set(processes) == {"attrition", "movement", "direct_hiring"}
+    assert set(processes) == {"attrition", "requisitions"}
     assert len(processes["attrition"]["cost_center_effect"]) == 10
 
 
