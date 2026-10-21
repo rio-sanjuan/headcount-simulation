@@ -13,8 +13,8 @@ center. Every parameter is invented, and the truth manifest records them all.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -54,24 +54,6 @@ class AttritionTruth:
         tenure = self.first_year_factor if tenure_months < 12 else 1.0
         h = self.base_monthly_hazard * self.level_factor[level] * tenure * season
         return float(min(1.0, h * cost_center_effect))
-
-
-@dataclass(frozen=True)
-class MovementTruth:
-    """Moves between cost centers. In M1 these are direct; #38 routes them through requisitions."""
-
-    monthly_move_hazard: float = 0.004
-
-
-@dataclass(frozen=True)
-class DirectHiringTruth:
-    """Hiring until requisitions exist (#38): departures are replaced after a lag, and growth
-    hires arrive per cost center at a Poisson rate."""
-
-    replacement_probability: float = 0.8
-    replacement_lag_months: tuple[int, int] = (1, 3)
-    growth_hires_per_month: float = 0.2
-    growth_sigma: float = 0.3
 
 
 def month_days(month_end: pd.Timestamp) -> int:
@@ -144,11 +126,13 @@ class Workforce:
         self._record(person, "TERM", -1, date)
         return person
 
-    def move(self, employee_id: int, cost_center: str, date: dt.date) -> None:
+    def reassign(self, employee_id: int, role: dict[str, Any], date: dt.date) -> dict[str, Any]:
+        """Move an employee into `role`: a transfer, recorded as XFER_OUT then XFER_IN."""
         before = dict(self.people[employee_id])
         self._record(before, "XFER_OUT", -1, date)
-        self.people[employee_id]["cost_center"] = cost_center
+        self.people[employee_id].update({k: role[k] for k in ROLE_FIELDS})
         self._record(self.people[employee_id], "XFER_IN", +1, date, previous=before)
+        return before
 
     def snapshot(self, month_end: pd.Timestamp) -> None:
         for person in self.people.values():
@@ -157,69 +141,3 @@ class Workforce:
 
 def tenure_months(person: dict[str, Any], month_end: pd.Timestamp) -> float:
     return (month_end.date() - person["hire_date"]).days / 30.4
-
-
-def simulate_workforce(
-    initial: pd.DataFrame,
-    month_ends: list[pd.Timestamp],
-    cost_centers: list[str],
-    next_id: int,
-    rng: np.random.Generator,
-    draw_role: Callable[[int, int, np.random.Generator], dict[str, Any]],
-    attrition: AttritionTruth | None = None,
-    movement: MovementTruth | None = None,
-    hiring: DirectHiringTruth | None = None,
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Run the monthly process over `month_ends`. The first month-end is the initial stock.
-
-    Returns the transaction fact and the truth that drove it, including the per-cost-center
-    effects drawn here.
-    """
-    attrition = attrition or AttritionTruth()
-    movement = movement or MovementTruth()
-    hiring = hiring or DirectHiringTruth()
-    workforce = Workforce(initial, next_id)
-    workforce.snapshot(month_ends[0])
-    cc_effect = np.exp(rng.normal(0, attrition.cost_center_sigma, len(cost_centers)))
-    growth_rate = hiring.growth_hires_per_month * np.exp(
-        rng.normal(0, hiring.growth_sigma, len(cost_centers))
-    )
-    cc_index = {cc: i for i, cc in enumerate(cost_centers)}
-    pending: list[tuple[int, dict[str, Any]]] = []  # (month index due, role) replacements
-
-    for m, month_end in enumerate(month_ends[1:], start=1):
-        for employee_id, person in workforce:
-            h = attrition.hazard(
-                int(person["job_level"]),
-                tenure_months(person, month_end),
-                month_end.month,
-                float(cc_effect[cc_index[person["cost_center"]]]),
-            )
-            if rng.random() < h:
-                departed = workforce.terminate(employee_id, random_day(month_end, rng))
-                if rng.random() < hiring.replacement_probability:
-                    lo, hi = hiring.replacement_lag_months
-                    pending.append((m + int(rng.integers(lo, hi + 1)), departed))
-            elif rng.random() < movement.monthly_move_hazard:
-                others = [cc for cc in cost_centers if cc != person["cost_center"]]
-                workforce.move(
-                    employee_id, others[int(rng.integers(len(others)))], random_day(month_end, rng)
-                )
-        due = [role for when, role in pending if when == m]
-        pending = [(when, role) for when, role in pending if when != m]
-        for role in due:
-            workforce.hire(role, random_day(month_end, rng))
-        for i, n in enumerate(rng.poisson(growth_rate)):
-            for _ in range(int(n)):
-                level = int(rng.choice([1, 2, 3], p=[0.5, 0.3, 0.2]))  # growth hires skew junior
-                workforce.hire(draw_role(i, level, rng), random_day(month_end, rng))
-        workforce.snapshot(month_end)
-
-    truth = {
-        "attrition": asdict(attrition)
-        | {"cost_center_effect": dict(zip(cost_centers, cc_effect.round(6).tolist(), strict=True))},
-        "movement": asdict(movement),
-        "direct_hiring": asdict(hiring)
-        | {"growth_rate": dict(zip(cost_centers, growth_rate.round(6).tolist(), strict=True))},
-    }
-    return pd.DataFrame(workforce.rows), truth
