@@ -403,9 +403,10 @@ def scan(named_texts: list[tuple[str, str]], patterns: list[Pattern]) -> list[st
 
 
 # --- GitHub --------------------------------------------------------------------------------------
+# These call GitHub, so they're excluded from coverage. The dry run exercises everything else.
 
 
-def gh(*args: str, stdin: str | None = None) -> str:
+def gh(*args: str, stdin: str | None = None) -> str:  # pragma: no cover
     for attempt in range(1, 7):
         p = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True)
         if p.returncode == 0:
@@ -419,18 +420,20 @@ def gh(*args: str, stdin: str | None = None) -> str:
     sys.exit("gave up after repeated rate limiting")
 
 
-def gh_lines(*args: str) -> list[dict[str, Any]]:
+def gh_lines(*args: str) -> list[dict[str, Any]]:  # pragma: no cover
     out = gh(*args)
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
-def create(*args: str, stdin: str | None = None) -> str:
+def create(*args: str, stdin: str | None = None) -> str:  # pragma: no cover
     out = gh(*args, stdin=stdin)
     time.sleep(PACE_SECONDS)
     return out
 
 
-def apply(milestones: list[MilestonePlan], issues: list[Issue], detail: set[str]) -> None:
+def apply(
+    milestones: list[MilestonePlan], issues: list[Issue], detail: set[str]
+) -> None:  # pragma: no cover
     existing_labels = {
         d["name"]
         for d in gh_lines(
@@ -637,7 +640,7 @@ def preview(milestones: list[MilestonePlan], issues: list[Issue]) -> str:
     return "\n".join(out)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -654,7 +657,7 @@ def main() -> None:
     )
     ap.add_argument("--preview", type=Path, help="write a Markdown preview of every issue here")
     ap.add_argument("--apply", action="store_true", help="create on GitHub (default: dry run)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     detail = {s.strip() for s in args.detail.split(",") if s.strip()}
     milestones, edges, future, questions = parse_plan(args.plan.read_text())
@@ -698,7 +701,7 @@ def main() -> None:
             print(f"  {h}")
         sys.exit(1)
     print("denylist: clean")
-    if args.apply:
+    if args.apply:  # pragma: no cover
         apply(milestones, issues, detail)
     else:
         print("dry run: nothing created (pass --apply to create)")

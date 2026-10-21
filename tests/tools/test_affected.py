@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tools import affected
 from tools.affected import ALL, importers_from_graph, select_tests
 
 # A toy layer graph with the real shape: model is the leaf, financial imports model, and so on.
@@ -84,3 +85,24 @@ def test_test_and_tool_changes_run_their_own_tests() -> None:
 def test_the_real_graph_has_no_importers_of_an_empty_layer() -> None:
     # Every layer is still empty in M0, so no layer imports another yet.
     assert importers_from_graph("model") == set()
+
+
+def test_main_without_a_base_runs_everything(capsys: pytest.CaptureFixture[str]) -> None:
+    assert affected.main([]) == 0
+    assert capsys.readouterr().out.strip() == "tests"
+
+
+def test_main_with_a_base_selects_from_the_diff(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(affected, "changed_paths", lambda base, head: ["tools/licenses.py"])
+    assert affected.main(["--base", "abc123"]) == 0
+    assert capsys.readouterr().out.strip() == "tests/tools"
+
+
+def test_the_real_repository_has_these_test_paths() -> None:
+    assert {"tests", "tests/tools", "tests/support"} <= affected.existing_test_paths()
+
+
+def test_a_diff_of_head_against_itself_is_empty() -> None:
+    assert affected.changed_paths("HEAD", "HEAD") == []

@@ -7,11 +7,12 @@ HEAVY := slow or acceptance or e2e
 # The official image, pinned by digest. Used when no local gitleaks binary is installed.
 GITLEAKS_IMAGE := ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
 REQUIREMENTS := .cache/requirements-all.txt
+COVERAGE_XML := .cache/coverage.xml
 # CI narrows TESTS to the test directories a change can affect (tools/affected.py).
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -49,6 +50,22 @@ deps: ## Lockfile freshness, known vulnerabilities, and dependency licenses
 
 test: ## Fast tests, in parallel
 	$(UV_RUN) pytest -n auto -m "$(FAST)" $(TESTS)
+
+test-cov: ## Fast tests with coverage, for the diff-coverage gate
+	$(UV_RUN) pytest -n auto -m "$(FAST)" --cov --cov-report=xml:$(COVERAGE_XML) \
+		--cov-report=term $(TESTS)
+
+# CI: coverage of the lines a PR changes since $BASE. hcsim.financial carries the accounting, so
+# its bar is higher. Run after test-cov.
+diff-coverage: ## Changed-line coverage: 90%, and 95% in hcsim.financial
+	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=90
+	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=95 \
+		--include 'src/hcsim/financial/*'
+
+# Peak-memory limits on tests marked @pytest.mark.limit_memory("…"). Memory is the engine's
+# binding constraint, and unlike timing on shared runners it's nearly deterministic.
+memory: ## Peak-memory limits (pytest-memray)
+	$(UV_RUN) pytest --memray -m limit_memory $(TESTS) || [ $$? -eq 5 ]
 
 # pytest exits 5 when it selects no tests, which is expected until the first heavy test lands.
 test-heavy: ## Slow, acceptance, and e2e tests

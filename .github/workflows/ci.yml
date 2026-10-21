@@ -115,12 +115,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.14"]
+        include:
+          - python: "3.12"
+            coverage: true
+          - python: "3.14"
+            coverage: false
     env:
       HYPOTHESIS_PROFILE: ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -132,9 +137,36 @@ jobs:
           path: .hypothesis
           key: hypothesis-${{ matrix.python }}-${{ github.run_id }}
           restore-keys: hypothesis-${{ matrix.python }}-
-      - env:
+      - if: ${{ !matrix.coverage }}
+        env:
           TESTS: ${{ needs.changes.outputs.tests }}
         run: make test TESTS="$TESTS"
+      - if: ${{ matrix.coverage }}
+        env:
+          TESTS: ${{ needs.changes.outputs.tests }}
+        run: make test-cov TESTS="$TESTS"
+      # At least 90% of the lines a PR changes must be tested, and 95% in hcsim.financial.
+      - if: ${{ matrix.coverage && github.event_name == 'pull_request' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: make diff-coverage
+
+  memory:
+    name: peak memory
+    needs: changes
+    if: needs.changes.outputs.tests != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - env:
+          TESTS: ${{ needs.changes.outputs.tests }}
+        run: make memory TESTS="$TESTS"
 
   sanitize:
     name: sanitization scan
@@ -201,7 +233,7 @@ jobs:
   ci-pass:
     name: ci-pass
     if: always()
-    needs: [changes, lint, typecheck, arch, workflows, deps, test, sanitize, secrets, pr-title]
+    needs: [changes, lint, typecheck, arch, workflows, deps, test, memory, sanitize, secrets, pr-title]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
