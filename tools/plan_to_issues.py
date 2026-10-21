@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -23,6 +22,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+if __package__ in (None, ""):  # run as a script: make the repo root importable
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tools.sanitize_scan import Pattern, load_patterns, scan_text
 
 REPO = "rio-sanjuan/headcount-simulation"
 OWNER = REPO.split("/")[0]
@@ -394,25 +398,8 @@ def build(
 # --- Sanitization --------------------------------------------------------------------------------
 
 
-def load_denylist(path: Path) -> list[tuple[int, re.Pattern[str]]]:
-    patterns = []
-    for n, raw in enumerate(path.read_text().splitlines(), 1):
-        line = re.sub(r"\s+#.*$", "", raw).strip()
-        if line and not line.startswith("#"):
-            patterns.append((n, re.compile(line, re.IGNORECASE)))
-    return patterns
-
-
-def scan(
-    named_texts: list[tuple[str, str]], patterns: list[tuple[int, re.Pattern[str]]]
-) -> list[str]:
-    hits = []
-    for name, text in named_texts:
-        for ln, line in enumerate(text.splitlines(), 1):
-            for n, pat in patterns:
-                if pat.search(line):
-                    hits.append(f"{name}, line {ln}: denylist line {n}")
-    return hits
+def scan(named_texts: list[tuple[str, str]], patterns: list[Pattern]) -> list[str]:
+    return [str(hit) for name, text in named_texts for hit in scan_text(text, name, patterns)]
 
 
 # --- GitHub --------------------------------------------------------------------------------------
@@ -658,7 +645,7 @@ def main() -> None:
     ap.add_argument(
         "--denylist",
         type=Path,
-        default=Path(os.environ.get("HCSIM_DENYLIST", "~/.config/hcsim/denylist.txt")).expanduser(),
+        help="denylist file (default: the scanner's lookup order, see tools/sanitize_scan.py)",
     )
     ap.add_argument(
         "--detail",
@@ -681,7 +668,7 @@ def main() -> None:
     texts += [(f"milestone {m.key}", f"{m.title}\n{m.outcome}") for m in milestones]
     texts += [(f"{i.key} title", i.title) for i in issues]
     texts += [(f"{i.key} body", i.body) for i in issues]
-    hits = scan(texts, load_denylist(args.denylist))
+    hits = scan(texts, load_patterns(args.denylist))
 
     counts: dict[str, int] = {}
     for i in issues:
