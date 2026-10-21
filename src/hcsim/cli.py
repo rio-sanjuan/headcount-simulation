@@ -12,6 +12,7 @@ from collections.abc import Sequence
 COMMANDS: dict[str, tuple[str, str]] = {
     "synth": ("hcsim.synth.cli", "generate a synthetic world"),
     "guidance": ("hcsim.guidance.cli", "fit the guidance forecast"),
+    "study": ("hcsim.studies.cli", "run a study and write its scorecard"),
 }
 
 USAGE = "usage: hcsim <command> [options]\n\ncommands:\n" + "\n".join(
