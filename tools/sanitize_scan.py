@@ -271,7 +271,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.pre_push:
             hits = scan_pre_push(patterns, dict(os.environ))
         else:
-            hits = [h for path in args.paths if path.is_file() for h in scan_file(path, patterns)]
+            # A path that isn't a regular file would otherwise pass unscanned, so refuse it.
+            for path in args.paths:
+                if not path.is_file():
+                    raise DenylistError(f"not a file, so it can't be scanned: {path}")
+            hits = [h for path in args.paths for h in scan_file(path, patterns)]
     except DenylistError as error:
         print(f"sanitize-scan: {error}", file=sys.stderr)
         return 2
