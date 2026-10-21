@@ -75,6 +75,7 @@ def select_tests(
     if layers:
         selected |= {f"tests/{layer}" for layer in layers}
         selected |= {p for p in existing if p.startswith("tests/test_")}  # top-level smoke tests
+        selected.add("tests/tools")  # the tools inspect the real package, such as its graph
     return sorted(p for p in selected if p in existing)
 
 

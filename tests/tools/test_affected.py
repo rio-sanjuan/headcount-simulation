@@ -38,6 +38,7 @@ def test_a_financial_change_runs_financial_and_its_importers() -> None:
         "tests/financial",
         "tests/studies",
         "tests/test_package.py",
+        "tests/tools",  # the tools inspect the real package
     ]
 
 
@@ -48,11 +49,12 @@ def test_a_model_change_runs_every_layer_with_tests() -> None:
         "tests/model",
         "tests/studies",
         "tests/test_package.py",
+        "tests/tools",
     ]
 
 
 def test_a_layer_without_a_test_directory_still_runs_the_smoke_tests() -> None:
-    assert select("src/hcsim/synth/world.py") == ["tests/test_package.py"]
+    assert select("src/hcsim/synth/world.py") == ["tests/test_package.py", "tests/tools"]
 
 
 def test_docs_only_changes_run_nothing() -> None:
@@ -82,9 +84,19 @@ def test_test_and_tool_changes_run_their_own_tests() -> None:
     ]
 
 
-def test_the_real_graph_has_no_importers_of_an_empty_layer() -> None:
-    # Every layer is still empty in M0, so no layer imports another yet.
-    assert importers_from_graph("model") == set()
+LAYERS = {"model", "guidance", "financial", "engine", "studies", "synth", "bench"}
+
+
+def test_the_real_graph_respects_the_layer_rules() -> None:
+    """Invariants that hold however the layers grow, unlike a snapshot of today's imports."""
+    for layer in LAYERS:
+        importers = importers_from_graph(layer)
+        assert importers <= LAYERS - {layer}
+        # The Model Layer imports nothing else, so it can never be an importer.
+        assert "model" not in importers
+    # Only the scale harness may import the synthetic world, and nothing imports the harness.
+    assert importers_from_graph("synth") <= {"bench"}
+    assert importers_from_graph("bench") == set()
 
 
 def test_main_without_a_base_runs_everything(capsys: pytest.CaptureFixture[str]) -> None:
