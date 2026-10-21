@@ -118,7 +118,8 @@ def test_another_seed_moves_the_results(world: tuple[Path, Path], tmp_path: Path
     assert not (a.result.headcount == b.result.headcount).all()
 
 
-@pytest.mark.limit_memory("48 MB")  # 15.7 MiB measured on macOS
+# 60 MiB measured on the Linux runner, where the memory job runs, and 16 MiB on macOS.
+@pytest.mark.limit_memory("96 MB")
 def test_the_skeleton_run_stays_within_its_memory(world: tuple[Path, Path]) -> None:
     profile = StudyProfile.from_mapping(
         {"name": "skeleton", "seed": 2026, "trajectories": 20, "months": 12}
