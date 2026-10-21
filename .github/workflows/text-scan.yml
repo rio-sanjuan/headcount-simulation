@@ -1,0 +1,71 @@
+# Scans the text people publish around the code: issue and PR titles and bodies, comments, branch
+# and tag names, and release notes. A match fails the run and labels the issue or PR
+# `needs-sanitization`. Reports name a location only.
+#
+# Issue text is public input. It reaches the scanner only through env and stdin, never a command
+# line, and the workflow runs code from the default branch.
+name: text scan
+
+on:
+  issues:
+    types: [opened, edited]
+  # Anyone can comment, but comment text only ever reaches the scanner through env and stdin.
+  issue_comment: # zizmor: ignore[dangerous-triggers]
+    types: [created, edited]
+  pull_request:
+    types: [opened, edited, reopened]
+  create:
+  release:
+    types: [published, edited]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: anyone can trigger this workflow, so it mustn't write the shared uv cache.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - env:
+          SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
+          EVENT: ${{ github.event_name }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REF_TYPE: ${{ github.event.ref_type }}
+          REF_NAME: ${{ github.event.ref }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          case "$EVENT" in
+            issues)        name="issue #$NUMBER";      text="$ISSUE_TITLE"$'\n'"$ISSUE_BODY" ;;
+            pull_request)  name="PR #$NUMBER";         text="$PR_TITLE"$'\n'"$PR_BODY" ;;
+            issue_comment) name="comment on #$NUMBER"; text="$COMMENT_BODY" ;;
+            create)        name="$REF_TYPE name";      text="$REF_NAME" ;;
+            release)       name="release";             text="$RELEASE_NAME"$'\n'"$RELEASE_BODY" ;;
+            *) echo "unexpected event: $EVENT"; exit 1 ;;
+          esac
+          printf '%s\n' "$text" | NAME="$name" make -s sanitize-text
+      - if: failure() && env.NUMBER != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh api --method POST "repos/$GH_REPO/issues/$NUMBER/labels" -f "labels[]=needs-sanitization"
