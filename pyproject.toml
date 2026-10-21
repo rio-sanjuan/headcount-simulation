@@ -54,6 +54,9 @@ select = [
 # En dashes mark ranges in prose and issue titles, such as "M0–M9".
 allowed-confusables = ["–"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["hcsim", "tests", "tools"]
+
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "tests", "tools"]
