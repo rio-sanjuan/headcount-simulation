@@ -13,6 +13,9 @@ dependencies = [
     "pandas>=2.2,<3",
 ]
 
+[project.scripts]
+hcsim = "hcsim.cli:main"
+
 [project.optional-dependencies]
 darts = ["darts>=0.36"]
 darts-deep = ["darts[torch]>=0.36"]
