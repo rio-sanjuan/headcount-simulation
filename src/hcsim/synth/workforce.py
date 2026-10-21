@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterator
-from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -30,30 +29,6 @@ ROLE_FIELDS = (
     "account",
     "is_manager",
 )
-
-
-@dataclass(frozen=True)
-class AttritionTruth:
-    """The true monthly departure hazard. Invented, round values."""
-
-    base_monthly_hazard: float = 0.008
-    level_factor: dict[int, float] = field(
-        default_factory=lambda: {1: 1.25, 2: 1.0, 3: 0.9, 4: 0.8, 5: 0.7}
-    )
-    first_year_factor: float = 1.5
-    seasonal_amplitude: float = 0.2
-    seasonal_peak_month: int = 3
-    cost_center_sigma: float = 0.2
-
-    def hazard(
-        self, level: int, tenure_months: float, month_of_year: int, cost_center_effect: float
-    ) -> float:
-        season = 1 + self.seasonal_amplitude * np.cos(
-            2 * np.pi * (month_of_year - self.seasonal_peak_month) / 12
-        )
-        tenure = self.first_year_factor if tenure_months < 12 else 1.0
-        h = self.base_monthly_hazard * self.level_factor[level] * tenure * season
-        return float(min(1.0, h * cost_center_effect))
 
 
 def month_days(month_end: pd.Timestamp) -> int:

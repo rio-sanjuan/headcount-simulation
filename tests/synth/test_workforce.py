@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcsim.synth.config import preset
-from hcsim.synth.workforce import AttritionTruth
+from hcsim.synth.config import AttritionTruth, preset
 from hcsim.synth.world import World, generate_world
 from tests.support.stat_check import stat_check
 
