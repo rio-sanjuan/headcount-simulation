@@ -303,3 +303,12 @@ def test_cli_scans_a_commit_message_file(patterns_file: Path, tmp_path: Path) ->
 def test_cli_requires_files_or_exactly_one_mode(patterns_file: Path) -> None:
     assert run_cli("--patterns", str(patterns_file)).returncode == 2
     assert run_cli("--patterns", str(patterns_file), "--tree", "README.md").returncode == 2
+
+
+def test_pre_push_without_refs_scans_all_of_head(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit_file(repo, "y.md", "fine\nquokka\n", "add y")
+    monkeypatch.chdir(repo)
+    rendered = {str(h) for h in scan_pre_push(parse_patterns(DENYLIST), {})}
+    assert rendered == {"y.md:2: denylist line 3"}

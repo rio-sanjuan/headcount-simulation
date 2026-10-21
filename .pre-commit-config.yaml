@@ -29,3 +29,24 @@ repos:
     rev: 0.12.23
     hooks:
       - id: uv-lock
+
+  # The sanitization scan. The denylist is private: see tools/sanitize_scan.py for where it's read.
+  - repo: local
+    hooks:
+      - id: sanitize-files
+        name: sanitization scan (staged files)
+        entry: uv run --frozen --quiet python tools/sanitize_scan.py
+        language: system
+        stages: [pre-commit]
+      - id: sanitize-commit-msg
+        name: sanitization scan (commit message)
+        entry: uv run --frozen --quiet python tools/sanitize_scan.py --commit-msg
+        language: system
+        stages: [commit-msg]
+      - id: sanitize-push
+        name: sanitization scan (what this push sends)
+        entry: uv run --frozen --quiet python tools/sanitize_scan.py --pre-push
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
