@@ -53,19 +53,23 @@ def test_a_study_run_writes_its_scorecard_and_record(
     card = pd.read_csv(tmp_path / "out" / "scorecard.csv")
     assert list(card.columns) == COLUMNS
     assert (card["scorecard_version"] == SCORECARD_VERSION).all()
-    assert set(card["metric"]) == {
+    assert set(card.loc[card["evaluator"] == "invariants", "metric"]) == {
         "quota_violations",
         "quota_shortfall",
         "headcount_identity_max_gap",
         "opening_identity_max_gap",
         "accounting_identity_max_residual",
     }
+    summary = card[card["evaluator"] == "summary"].set_index("metric")["value"]
+    assert {"headcount_end_mean", "sbc_recognized_mean", "tranches_mean"} <= set(summary.index)
+    assert card.loc[card["evaluator"] == "summary", "threshold"].isna().all()
     assert card["passed"].all()
     assert card[PROVENANCE_COLUMNS].notna().all().all()
     assert (card["guidance_fingerprint"].str.startswith("gf1-")).all()
 
     record = json.loads((tmp_path / "out" / "run.json").read_text())
     assert record["passed"] is True
+    assert record["results_digest"].startswith("rd1-")
     assert record["profile"]["seed"] == 4
     assert record["seed"]["snapshot_date"] == "2025-12-31"
     assert record["wall_clock_seconds"] > 0
