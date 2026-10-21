@@ -1,11 +1,14 @@
 # Weekly, grouped updates. PR titles follow Conventional Commits, so they pass the title check.
-# Dependabot PRs read the denylist from the Dependabot secret of the same name.
+# Dependabot PRs read the denylist from the Dependabot secret of the same name. A release must be
+# a week old before it's proposed, so a compromised release has time to be caught and yanked.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
       include: scope
@@ -17,6 +20,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: build
       include: scope

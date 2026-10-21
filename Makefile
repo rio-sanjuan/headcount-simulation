@@ -6,18 +6,19 @@ FAST := not slow and not acceptance and not e2e
 HEAVY := slow or acceptance or e2e
 # The official image, pinned by digest. Used when no local gitleaks binary is installed.
 GITLEAKS_IMAGE := ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+REQUIREMENTS := .cache/requirements-all.txt
 # CI narrows TESTS to the test directories a change can affect (tools/affected.py).
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch test test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-heavy sanitize sanitize-pr sanitize-main sanitize-text secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
-check: lint typecheck arch test sanitize ## Fast checks, as on every PR
+check: lint typecheck arch workflows test sanitize ## Fast checks, as on every PR
 
-check-all: check test-heavy ## Fast and heavy checks
+check-all: check test-heavy deps ## Fast and heavy checks, and the dependency audit
 
 lint: ## Ruff lint and format check
 	$(UV_RUN) ruff check .
@@ -32,6 +33,19 @@ typecheck: ## mypy
 
 arch: ## Layer contracts (import-linter)
 	$(UV_RUN) lint-imports
+
+workflows: ## Lint the GitHub workflows (actionlint, zizmor)
+	$(UV_RUN) actionlint
+	$(UV_RUN) zizmor .github
+
+# Needs the network: pip-audit queries vulnerability databases, and the license check reads PyPI.
+deps: ## Lockfile freshness, known vulnerabilities, and dependency licenses
+	uv lock --check
+	@mkdir -p .cache
+	uv export --frozen --all-extras --all-groups --format requirements-txt --no-emit-project \
+		--quiet > $(REQUIREMENTS)
+	$(UV_RUN) pip-audit --disable-pip --require-hashes -r $(REQUIREMENTS)
+	$(UV_RUN) python tools/licenses.py $(REQUIREMENTS)
 
 test: ## Fast tests, in parallel
 	$(UV_RUN) pytest -n auto -m "$(FAST)" $(TESTS)

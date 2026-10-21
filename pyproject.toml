@@ -26,13 +26,16 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "actionlint-py>=1.7.12.25",
     "hypothesis>=6.170.5",
     "import-linter>=2.15",
     "mypy>=2.4.0",
+    "pip-audit>=2.10.1",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.1",
+    "zizmor>=1.31.1",
 ]
 
 [tool.ruff]
