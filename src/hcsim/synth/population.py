@@ -25,8 +25,6 @@ ROLE_DTYPES: Final[dict[str, type]] = {
     "account": np.int16,
     "is_manager": np.bool_,
 }
-#: The one account every role books to, until the account catalog arrives (M2.1).
-ACCOUNTS: Final = ("ACCT-100",)
 
 
 def draw_roles(
@@ -46,13 +44,18 @@ def draw_roles(
     manager = (np.asarray(levels) >= config.manager_min_level) & (
         rng.random(n) < config.manager_share
     )
+    # The primary company holds most roles; the subsidiaries share the rest evenly.
+    companies = len(config.companies)
+    primary = (rng.random(n) < config.primary_company_share) | (companies == 1)
+    company = np.where(primary, 0, 1 + rng.integers(0, max(companies - 1, 1), n))
+    regular = [group for _, group in config.accounts].index("regular")
     return {
         "cost_center": np.asarray(cost_centers, dtype=np.int32),
         "family": family.astype(np.int16),
         "level": np.asarray(levels, dtype=np.int16),
         "location": rng.integers(len(config.locations), size=n).astype(np.int16),
-        "company": rng.integers(len(config.companies), size=n).astype(np.int16),
-        "account": np.zeros(n, dtype=np.int16),
+        "company": company.astype(np.int16),
+        "account": np.full(n, regular, dtype=np.int16),
         "is_manager": manager,
     }
 

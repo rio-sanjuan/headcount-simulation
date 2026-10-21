@@ -8,8 +8,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcsim.synth.config import WorldConfig, preset
-from hcsim.synth.structure import level_one_names, org_dimension, org_levels
+from hcsim.synth.config import FAMILIES, FAMILY_CODES, WorldConfig, preset
+from hcsim.synth.population import draw_roles
+from hcsim.synth.structure import (
+    account_dimension,
+    company_dimension,
+    job_dimension,
+    level_one_names,
+    location_dimension,
+    org_dimension,
+    org_levels,
+)
 
 
 def org(name: str = "small", seed: int = 1, **overrides: object) -> pd.DataFrame:
@@ -107,3 +116,85 @@ def test_the_same_seed_gives_the_same_hierarchy() -> None:
 def test_bad_hierarchy_settings_are_refused(field: str, value: object, message: str) -> None:
     with pytest.raises(ValueError, match=message.replace("[", r"\[").replace("]", r"\]")):
         WorldConfig(**{field: value})  # type: ignore[arg-type]
+
+
+# --- the job, location, company, and account catalogs ------------------------------------------
+
+
+def test_the_job_catalog_marks_manager_titles_and_executive_levels() -> None:
+    config = preset("medium")
+    jobs = job_dimension(config)
+    assert jobs["job_code"].is_unique
+    assert set(jobs["job_family"]) == set(config.families)
+    assert sorted(jobs["job_level"].unique()) == list(config.levels)
+    managers = jobs[jobs["manager_title"]]
+    assert (managers["job_level"] >= config.manager_min_level).all()
+    assert managers["job_title"].str.contains(" Manager ").all()
+    assert managers["job_code"].str.endswith("M").all()
+    assert not jobs.loc[~jobs["manager_title"], "job_title"].str.contains("Manager").any()
+    assert (jobs["is_executive"] == (jobs["job_level"] >= 7)).all()
+    assert (jobs["level_name"] == "L" + jobs["job_level"].astype(str)).all()
+    eng = jobs[(jobs["job_family"] == "Engineering") & (jobs["job_level"] == 4)]
+    assert eng[["job_code", "job_title"]].values.tolist() == [
+        ["ENG-4", "Engineering IV"],
+        ["ENG-4M", "Engineering Manager IV"],
+    ]
+
+
+def test_family_codes_are_unique_and_every_family_has_a_tech_indicator() -> None:
+    assert len(set(FAMILY_CODES.values())) == len(FAMILY_CODES)
+    assert set(FAMILY_CODES) == set(FAMILIES)
+    assert set(FAMILIES.values()) == {"software_engineering", "other_technical", "non_technical"}
+
+
+def test_locations_form_a_region_tree() -> None:
+    frame = location_dimension(preset("large"))
+    assert len(frame) == 20
+    assert (frame.groupby("location")["country"].nunique() == 1).all()
+    assert (frame.groupby("country")["region"].nunique() == 1).all()
+    assert frame.groupby("country").size().max() == 3
+    assert frame["country"].nunique() == 7
+    assert frame["region"].nunique() == 3
+
+
+def test_companies_roll_up_with_offline_subsidiaries_apart() -> None:
+    frame = company_dimension(preset("large"))
+    assert frame["company"].tolist() == [f"CO-{i}" for i in range(1, 7)]
+    assert frame["is_primary"].tolist() == [True] + [False] * 5
+    assert frame["is_offline"].tolist() == [False] * 4 + [True] * 2
+    assert set(frame.loc[~frame["is_offline"], "planning_company"]) == {"PCO-1"}
+    assert set(frame.loc[frame["is_offline"], "planning_company"]) == {"PCO-2"}
+
+
+def test_accounts_cover_every_group() -> None:
+    frame = account_dimension(WorldConfig())
+    assert dict(zip(frame["account"], frame["account_group"], strict=True)) == {
+        "ACCT-100": "regular",
+        "ACCT-200": "contingent",
+        "ACCT-300": "temporary",
+    }
+
+
+def test_roles_book_to_the_primary_company_and_a_regular_account() -> None:
+    config = preset("medium")
+    roles = draw_roles(
+        config, np.zeros(20_000, int), np.ones(20_000, int), np.random.default_rng(6)
+    )
+    shares = np.bincount(roles["company"], minlength=4) / 20_000
+    assert shares[0] == pytest.approx(config.primary_company_share, abs=0.02)
+    assert shares[1:] == pytest.approx([(1 - config.primary_company_share) / 3] * 3, abs=0.02)
+    assert (roles["account"] == 0).all()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"offline_subsidiaries": 1}, "offline_subsidiaries must leave the primary company online"),
+        ({"accounts": (("A", "contingent"),)}, "accounts need a regular account"),
+        ({"accounts": (("A", "regular"), ("A", "temporary"))}, "account names must be unique"),
+        ({"locations_per_country": 0}, "locations_per_country and countries_per_region"),
+    ],
+)
+def test_bad_catalog_settings_are_refused(overrides: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(**overrides)  # type: ignore[arg-type]

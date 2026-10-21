@@ -28,7 +28,7 @@ def test_the_tiny_preset_has_the_planned_shape() -> None:
     assert sorted(org["org_level1"].unique()) == ["ORG-A", "ORG-B"]
     assert (org["org_level2"] == org["cost_center"]).all()  # the leaf pads the deepest level
     jobs = world.tables["dim_job"]
-    assert len(jobs) == 4 * 5
+    assert len(jobs) == 4 * 5 + 4 * 2  # every family and level, plus manager titles at 4-5
     assert jobs["job_code"].is_unique
     assert len(world.tables["dim_location"]) == len(world.tables["dim_company"]) == 1
 

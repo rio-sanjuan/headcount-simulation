@@ -92,7 +92,9 @@ def test_the_ledger_recognizes_exactly_the_vested_value(world: World) -> None:
     )
     recognized = ledger.groupby("award_id")["recognized"].sum()
     for award_id in closed:
-        assert recognized.get(award_id, 0.0) == pytest.approx(vested_value.get(award_id, 0.0))
+        # A fully forfeited award nets to zero up to float residue, hence an absolute tolerance.
+        expected = vested_value.get(award_id, 0.0)
+        assert recognized.get(award_id, 0.0) == pytest.approx(expected, abs=1e-6)
 
 
 def test_ledger_signs(world: World) -> None:

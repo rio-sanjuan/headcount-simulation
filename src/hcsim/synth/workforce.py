@@ -30,6 +30,7 @@ TXN_DTYPES: Final[dict[str, DTypeLike]] = {
     "cost_center_previous": np.int32,
     "family_previous": np.int16,
     "level_previous": np.int16,
+    "is_manager_previous": np.bool_,
     "hire_date": "datetime64[D]",
 }
 
@@ -76,6 +77,7 @@ class Workforce:
             cost_center_previous=before["cost_center"],
             family_previous=before["family"],
             level_previous=before["level"],
+            is_manager_previous=before["is_manager"],
             hire_date=self.people.column("hire_date")[index],
             **now,
         )
