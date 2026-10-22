@@ -148,9 +148,48 @@ def test_the_ledger_recognizes_exactly_the_vested_value(world: World) -> None:
 def test_ledger_signs(world: World) -> None:
     ledger = world.tables["equity_expense"]
     assert (ledger["gross"] >= 0).all()
-    assert (ledger["trueup_attrition"] <= 0).all()
-    assert (ledger["net"] == ledger["gross"]).all()  # the world books no forfeiture estimate
+    assert (ledger["net"] <= ledger["gross"] + 1e-9).all()  # net of the forfeiture estimate
+    assert (ledger["trueup_attrition"] <= 1e-9).all()
     assert ledger["trueup_attrition"].lt(0).any()
+    total = ledger[["net", "trueup_attrition", "trueup_rate", "trueup_vesting"]].sum(axis=1)
+    assert np.allclose(total, ledger["recognized"])
+
+
+def _estimates(world: World) -> pd.DataFrame:
+    return world.tables["equity_forfeiture_estimate"].assign(
+        month=lambda f: pd.to_datetime(f["effective_date"]).dt.to_period("M")
+    )
+
+
+def test_net_is_gross_less_the_cohort_s_estimate_in_effect(world: World) -> None:
+    ledger = world.tables["equity_expense"]
+    awards = world.tables["equity_award"].set_index("award_id")
+    rows = ledger[ledger["gross"] > 0].assign(
+        cohort=lambda f: pd.to_datetime(f["award_id"].map(awards["award_date"])).dt.year,
+        month=lambda f: pd.to_datetime(f["period"]).dt.to_period("M"),
+    )
+    estimates = _estimates(world)
+    for (cohort, month), group in list(rows.groupby(["cohort", "month"]))[:200]:
+        applicable = estimates[(estimates["cohort"] == cohort) & (estimates["month"] <= month)]
+        e = applicable.sort_values("month")["estimate"].iloc[-1]
+        assert np.allclose(group["net"], group["gross"] * (1 - e))
+
+
+def test_rate_true_ups_fall_only_on_january_revisions(world: World) -> None:
+    ledger = world.tables["equity_expense"]
+    moved = ledger[ledger["trueup_rate"].abs() > 1e-9]
+    assert len(moved) > 0
+    assert set(pd.to_datetime(moved["period"]).dt.month) == {1}
+
+
+def test_estimates_start_at_the_prior_and_blend_toward_what_s_observed(world: World) -> None:
+    grants = world.config.grants
+    estimates = _estimates(world)
+    first = estimates.groupby("cohort").first()
+    assert (first["estimate"] == grants.forfeiture_prior).all()
+    assert (pd.to_datetime(first["effective_date"]).dt.month == 1).all()
+    assert estimates["estimate"].between(0, grants.forfeiture_cap).all()
+    assert estimates.groupby("cohort")["estimate"].nunique().max() > 1  # revisions move it
 
 
 def test_add_months_clamps_to_short_months() -> None:
@@ -169,3 +208,34 @@ def test_add_months_clamps_to_short_months() -> None:
 def test_bad_price_settings_are_refused(prices: PriceTruth, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         WorldConfig(prices=prices)
+
+
+def test_every_settled_tranche_ties_out_in_a_larger_world(small_world: World) -> None:
+    """The accounting identity on a small world: every award whose tranches have all settled
+    inside the window recognizes exactly its vested value, rate true-ups and all."""
+    awards, vests = small_world.tables["equity_award"], small_world.tables["equity_vest"]
+    ledger = small_world.tables["equity_expense"]
+    settled = (
+        vests.assign(
+            done=(vests["status"] == "forfeited")
+            | (pd.to_datetime(vests["vest_date"]) <= pd.Timestamp(WORLD_END))
+        )
+        .groupby("award_id")["done"]
+        .all()
+    )
+    started = pd.to_datetime(awards.set_index("award_id")["award_date"]) >= pd.Timestamp(
+        "2021-01-01"
+    )
+    closed = settled[settled & started.reindex(settled.index)].index
+    value = (
+        vests[vests["status"] == "vested"]
+        .merge(awards[["award_id", "fair_value"]], on="award_id")
+        .assign(value=lambda f: f["shares"] * f["fair_value"])
+        .groupby("award_id")["value"]
+        .sum()
+    )
+    recognized = ledger.groupby("award_id")["recognized"].sum()
+    gap = (recognized.reindex(closed, fill_value=0.0) - value.reindex(closed, fill_value=0.0)).abs()
+    assert len(closed) > 1_000
+    assert gap.max() < 1e-6
+    assert ledger["trueup_rate"].abs().sum() > 0

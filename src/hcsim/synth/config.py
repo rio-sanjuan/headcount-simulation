@@ -399,6 +399,13 @@ class GrantTruth:
     #: Offline subsidiaries grant under their own plan, at an appraised value: the month-end
     #: close times this discount, remeasured at each quarter-end until the award settles.
     offline_appraisal_discount: float = 0.7
+    #: Forfeiture estimates for the reference ledger, per cohort (award year): the prior
+    #: holds until the first January revision; each revision then blends in the share of the
+    #: cohort's shares forfeited so far, with weight rising to one over
+    #: `forfeiture_credibility_years`, capped at `forfeiture_cap`.
+    forfeiture_prior: float = 0.10
+    forfeiture_credibility_years: float = 4.0
+    forfeiture_cap: float = 0.6
 
     TYPES: ClassVar[tuple[str, ...]] = (
         "new_hire",
@@ -419,6 +426,10 @@ class GrantTruth:
             sum(self.executive_vest_shares), 1
         ):
             found.append("grants executive vest shares must sum to 1, one per month")
+        if not 0 <= self.forfeiture_prior <= self.forfeiture_cap < 1:
+            found.append("grants forfeiture estimates need 0 <= prior <= cap < 1")
+        if self.forfeiture_credibility_years <= 0:
+            found.append("grants.forfeiture_credibility_years must be positive")
         if not 0 < self.offline_appraisal_discount <= 1:
             found.append("grants.offline_appraisal_discount must lie in (0, 1]")
         if self.annual_month not in range(1, 13):

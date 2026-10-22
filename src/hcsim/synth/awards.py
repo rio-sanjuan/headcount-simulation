@@ -21,6 +21,7 @@ engine's calculator can be scored against it: a loop per award, straight-line pe
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Final
 
 import numpy as np
@@ -35,6 +36,7 @@ LEDGER_COLUMNS: Final = [
     "gross",
     "net",
     "trueup_attrition",
+    "trueup_rate",
     "trueup_vesting",
     "recognized",
 ]
@@ -467,70 +469,143 @@ def _vests(config: WorldConfig, awards: pd.DataFrame, history: _History) -> pd.D
     )
 
 
-def reference_ledger(
-    awards: pd.DataFrame, vests: pd.DataFrame, month_ends: list[pd.Timestamp]
+def forfeiture_estimates(
+    config: WorldConfig, awards: pd.DataFrame, vests: pd.DataFrame
 ) -> pd.DataFrame:
-    """Monthly recognized expense per award, from a plain loop per award.
+    """`equity_forfeiture_estimate`: each cohort's estimate, revised every January.
 
-    A tranche expenses an equal share of its value each month from its award month through its
-    vest month. A forfeited tranche accrues through its forfeiture month, which then reverses
-    everything recognized. The world books no forfeiture estimate, so net equals gross. Only
-    months inside the world's window are recorded.
+    A cohort is an award year. Its estimate is the prior until the first January after the
+    cohort starts. Each revision blends in the share of the cohort's shares forfeited so far,
+    with a weight that rises to one over the credibility years, capped at the cap.
+    """
+    g = config.grants
+    cohort = pd.to_datetime(awards.set_index("award_id")["award_date"]).dt.year
+    tranche = vests.assign(cohort=vests["award_id"].map(cohort))
+    first, last = int(cohort.min()), config_last_year(config)
+    rows = []
+    for c in range(first, last + 1):
+        mine = tranche[tranche["cohort"] == c]
+        total = float(mine["shares"].sum())
+        rows.append(
+            {"cohort": c, "effective_date": dt.date(c, 1, 1), "estimate": g.forfeiture_prior}
+        )
+        for year in range(c + 1, last + 1):
+            revision = pd.Timestamp(year, 1, 1)
+            lost = float(mine.loc[pd.to_datetime(mine["forfeit_date"]) < revision, "shares"].sum())
+            observed = lost / total if total else 0.0
+            weight = min(1.0, (year - c) / g.forfeiture_credibility_years)
+            estimate = min(g.forfeiture_cap, (1 - weight) * g.forfeiture_prior + weight * observed)
+            rows.append(
+                {"cohort": c, "effective_date": revision.date(), "estimate": round(estimate, 6)}
+            )
+    return pd.DataFrame(rows)
+
+
+def config_last_year(config: WorldConfig) -> int:
+    return int((pd.Period(config.start_month, freq="M") + config.months - 1).year)
+
+
+def reference_ledger(
+    config: WorldConfig,
+    awards: pd.DataFrame,
+    vests: pd.DataFrame,
+    estimates: pd.DataFrame,
+    month_ends: list[pd.Timestamp],
+) -> pd.DataFrame:
+    """Monthly ASC 718 expense per award, from a plain loop per award.
+
+    For each tranche, worth its shares times the award's grant value per share:
+
+    - gross accrues straight-line from the award month through the vest month;
+    - net is gross times one less the cohort's forfeiture estimate in effect that month;
+    - a January revision books a rate true-up: the gross accrued so far, times the drop in the
+      estimate, for every tranche still accruing;
+    - a forfeiture reverses everything recognized for the tranche, as the attrition true-up;
+    - a vest books the vesting true-up: the tranche's value less everything recognized, so
+      cumulative net plus true-ups equals the vested value for every settled tranche.
+
+    Only months inside the world's window are recorded. It stays independent of the engine's
+    calculator, so that calculator can be scored against it.
     """
     first = pd.Period(month_ends[0], freq="M")
     window = len(month_ends)
-    month_of = lambda d: (pd.DatetimeIndex(d).to_period("M") - first).map(lambda x: x.n).to_numpy()  # noqa: E731
-    fair_value = dict(zip(awards["award_id"], awards["fair_value"], strict=True))
+
+    def month_of(values: pd.Series) -> NDArray[np.int64]:
+        months = pd.DatetimeIndex(pd.to_datetime(values)).to_period("M")
+        result: NDArray[np.int64] = np.array([(m - first).n for m in months], dtype=np.int64)
+        return result
+
     award_month = dict(zip(awards["award_id"], month_of(awards["award_date"]), strict=True))
+    grant_value = dict(zip(awards["award_id"], awards["fair_value"], strict=True))
+    years = pd.to_datetime(awards["award_date"]).dt.year
+    cohort_of = {int(a): int(y) for a, y in zip(awards["award_id"], years, strict=True)}
+    # The estimate in effect for each cohort and month index.
+    horizon = int(month_of(vests["vest_date"]).max(initial=0)) + 1
+    rate: dict[int, NDArray[np.float64]] = {}
+    for c, rows in estimates.groupby("cohort"):
+        series = np.full(max(horizon, window) + 1, float(rows["estimate"].iloc[0]))
+        for effective, estimate in zip(
+            month_of(rows["effective_date"]), rows["estimate"], strict=True
+        ):
+            series[max(int(effective), 0) :] = float(estimate)
+        rate[int(str(c))] = series
+    forfeit = vests["forfeit_date"]
     vests = vests.assign(
         vest_month=month_of(vests["vest_date"]),
         forfeit_month=np.where(
-            vests["forfeit_date"].isna(),
-            -1,
-            month_of(vests["forfeit_date"].fillna(pd.Timestamp("2000-01-01"))),
+            forfeit.isna(), -1, month_of(forfeit.fillna(pd.Timestamp(month_ends[0])))
         ),
     )
+    parts: dict[str, list[NDArray[np.float64]]] = {
+        k: [] for k in ("gross", "net", "trueup_attrition", "trueup_rate", "trueup_vesting")
+    }
     ids: list[NDArray[np.int64]] = []
     months: list[NDArray[np.int64]] = []
-    grosses: list[NDArray[np.float64]] = []
-    reversals: list[NDArray[np.float64]] = []
     for award_id, tranches in vests.groupby("award_id", sort=True):
         a = int(award_month[award_id])
-        value = tranches["shares"].to_numpy() * float(fair_value[award_id])
+        value = tranches["shares"].to_numpy() * float(grant_value[award_id])
         vest = tranches["vest_month"].to_numpy()
-        forfeit = tranches["forfeit_month"].to_numpy()
-        lost = forfeit >= 0
-        last = np.where(lost, forfeit, vest)
+        lost_at = tranches["forfeit_month"].to_numpy()
+        lost = lost_at >= 0
+        last = np.where(lost, lost_at, vest)
+        span = np.arange(a, int(max(last.max(), vest.max())) + 1)
+        e = rate[cohort_of[int(str(award_id))]][np.clip(span, 0, None)]
+        accrues = (span[None, :] <= last[:, None]).astype(np.float64)
         per_month = value / (vest - a + 1)
-        span = np.arange(a, int(last.max()) + 1)
-        accrues = span[None, :] <= last[:, None]
-        gross = (accrues * per_month[:, None]).sum(axis=0)
-        reversal = np.zeros(len(span))
-        np.add.at(reversal, last[lost] - a, -per_month[lost] * (last[lost] - a + 1))
+        gross = accrues * per_month[:, None]
+        net = gross * (1 - e)[None, :]
+        cum_gross_before = np.cumsum(gross, axis=1) - gross
+        drop = np.r_[0.0, e[:-1] - e[1:]]  # the estimate's fall at each month
+        rate_up = cum_gross_before * drop[None, :] * accrues
+        booked = np.cumsum(net + rate_up, axis=1)
+        column = last - a
+        at = np.arange(len(value))
+        attrition = np.zeros_like(gross)
+        attrition[at[lost], column[lost]] = -booked[at[lost], column[lost]]
+        vesting = np.zeros_like(gross)
+        vesting[at[~lost], column[~lost]] = value[~lost] - booked[at[~lost], column[~lost]]
         inside = (span >= 0) & (span < window)
         ids.append(np.full(int(inside.sum()), award_id, dtype=np.int64))
         months.append(span[inside])
-        grosses.append(gross[inside])
-        reversals.append(reversal[inside])
+        for name, matrix in (
+            ("gross", gross),
+            ("net", net),
+            ("trueup_attrition", attrition),
+            ("trueup_rate", rate_up),
+            ("trueup_vesting", vesting),
+        ):
+            parts[name].append(matrix.sum(axis=0)[inside])
+    if not ids:
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+    period = np.array([d.date() for d in month_ends], dtype="datetime64[D]")
     frame = pd.DataFrame(
         {
-            "award_id": np.concatenate(ids) if ids else np.zeros(0, dtype=np.int64),
-            "month": np.concatenate(months) if months else np.zeros(0, dtype=np.int64),
-            "gross": np.concatenate(grosses) if grosses else np.zeros(0),
-            "trueup_attrition": np.concatenate(reversals) if reversals else np.zeros(0),
+            "award_id": np.concatenate(ids),
+            "period": period[np.concatenate(months)].astype("datetime64[s]"),
+            **{name: np.concatenate(values) for name, values in parts.items()},
         }
     )
-    return pd.DataFrame(
-        {
-            "award_id": frame["award_id"],
-            "period": np.array([d.date() for d in month_ends], dtype="datetime64[D]")[
-                frame["month"].to_numpy()
-            ].astype("datetime64[s]"),
-            "gross": frame["gross"],
-            "net": frame["gross"],
-            "trueup_attrition": frame["trueup_attrition"],
-            "trueup_vesting": 0.0,
-            "recognized": frame["gross"] + frame["trueup_attrition"],
-        },
-        columns=LEDGER_COLUMNS,
+    frame["recognized"] = (
+        frame["net"] + frame["trueup_attrition"] + frame["trueup_rate"] + frame["trueup_vesting"]
     )
+    return frame[LEDGER_COLUMNS]
