@@ -131,10 +131,15 @@ class Forecast:
         forecasts: Forecasts = {}
         scores: dict[str, dict[str, Any]] = {}
         skipped: list[dict[str, str]] = []
-        for group, category in series.keys:
+        keys = series.keys
+        for group, category in keys:  # each group's anchor first, as its flows' exposure
             values = series.values(group, category).to_numpy()
+            exposure = future = None
+            if category is not ANCHOR and (group, ANCHOR) in keys:
+                exposure = series.values(group, ANCHOR).to_numpy()
+                future = forecasts.get((group, ANCHOR))
             try:
-                result = forecast(values, config.horizon, config.selection)
+                result = forecast(values, config.horizon, config.selection, exposure, future)
             except ForecastError as error:
                 skipped.append({"group": group, "category": category.value, "reason": str(error)})
                 continue
