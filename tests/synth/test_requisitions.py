@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
+from numpy.typing import NDArray
 
 from hcsim.synth.config import preset
+from hcsim.synth.population import ROLE_DTYPES, Roles
+from hcsim.synth.requisitions import CLOSE_REASONS, INTERVAL_DTYPES, RequisitionBook
 from hcsim.synth.world import World, generate_world, write_world
 
 
@@ -122,3 +126,25 @@ def test_a_requisition_filled_within_its_month_never_appears_in_a_snapshot(
     ]
     assert len(same_month) > 0
     assert not set(same_month.index) & seen
+
+
+def test_no_shows_give_openings_back_in_date_order() -> None:
+    """Two no-shows on one requisition in a month, handed over out of order: each interval
+    still ends on or after it starts."""
+    book = RequisitionBook()
+    roles: Roles = {name: np.zeros(1, dtype=dtype) for name, dtype in ROLE_DTYPES.items()}
+
+    def day(text: str) -> NDArray[np.datetime64]:
+        return np.array([text], dtype="datetime64[D]")
+
+    j = book.open("growth", roles, day("2024-01-02"), 0)
+    book.fill(j, day("2024-01-05"), np.array([CLOSE_REASONS.index("filled_external")]), np.r_[7])
+    book.reopen(np.r_[j, j], np.r_[day("2024-01-31"), day("2024-01-24")])
+    ended = book.intervals.collect(INTERVAL_DTYPES)
+    assert (ended["interval_end"] >= ended["interval_start"]).all()
+    assert ended["end_reason"].tolist() == [
+        CLOSE_REASONS.index("filled_external"),
+        CLOSE_REASONS.index("reopened"),
+    ]
+    assert int(book.column("remaining")[j][0]) == 2
+    assert book.column("interval_start")[j][0] == day("2024-01-31")[0]
