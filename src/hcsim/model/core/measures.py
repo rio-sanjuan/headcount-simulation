@@ -14,7 +14,7 @@ requisitions, which belong to the opening identity rather than the headcount one
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
@@ -117,6 +117,58 @@ class TemplateMeasure:
 
 
 Measure = TransTypeMeasure | TemplateMeasure
+
+
+def _identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def consolidated_sql(measures: Sequence[Measure], columns: Mapping[str, str] | None = None) -> str:
+    """One query for every measure, yielding `(month, cost_center, measure, value)`.
+
+    The transaction measures share one pass over the aggregate fact, a column each, unpivoted
+    to rows; each template measure runs its own SQL beside them. `columns` names each table's
+    cost-center column, as the data contract resolves it; a table it leaves out uses
+    `cost_center`.
+    """
+    resolved = dict(columns or {})
+    names = [m.name for m in measures]
+    repeated = sorted({n for n in names if names.count(n) > 1})
+    if repeated:
+        raise MeasureError(f"each measure is counted once; {repeated} repeat")
+    if not measures:
+        raise MeasureError("no measures to count")
+    flows = [m for m in measures if isinstance(m, TransTypeMeasure)]
+    parts = []
+    if flows:
+        codes = ", ".join(literal(c.value) for c in sorted(set().union(*(m.codes for m in flows))))
+        sums = ",\n".join(f"sum({m.expression()}) AS {_identifier(m.name)}" for m in flows)
+        cost_center = resolved.get("workforce_agg", "cost_center")
+        parts.append(
+            f"""
+            SELECT month, cost_center, measure, CAST(value AS DOUBLE) AS value
+            FROM (
+                UNPIVOT (
+                    SELECT date_trunc('month', CAST(period AS DATE)) AS month,
+                           {cost_center} AS cost_center, {sums}
+                    FROM workforce_agg
+                    WHERE trans_type IN ({codes}) AND account IN ({REGULAR_ACCOUNTS})
+                    GROUP BY ALL
+                )
+                ON {", ".join(_identifier(m.name) for m in flows)}
+                INTO NAME measure VALUE value
+            )
+            """
+        )
+    for m in measures:
+        if isinstance(m, TemplateMeasure):
+            parts.append(
+                f"SELECT month, cost_center, {literal(m.name)} AS measure, "
+                f"CAST(value AS DOUBLE) AS value "
+                f"FROM ({m.sql(resolved.get(m.table, 'cost_center'))})"
+            )
+    return "\nUNION ALL\n".join(parts)
+
 
 _HIRE = {TransType.HIRE: 1, TransType.HIRE_REV: -1}
 

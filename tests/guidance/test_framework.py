@@ -121,7 +121,9 @@ def test_the_lite_pipeline_s_steps() -> None:
 
 
 def test_the_lite_pipeline_validates_its_source_before_reading_it() -> None:
-    with pytest.raises(PipelineError, match="must be a DuckDB connection, not str") as error:
+    with pytest.raises(
+        PipelineError, match="a source is a DuckDB connection, a path, or a Source, not str"
+    ) as error:
         pipeline(GuidanceConfig()).run(Context({"source": "warehouse", "config": GuidanceConfig()}))
     assert error.value.step == "ingest"
 
