@@ -1,5 +1,5 @@
 evaluator,metric,value,threshold,passed,world_generator,world_preset,world_seed,profile,mode,scope,seed,run_date,schema_fingerprint
-invariants,accounting_identity_max_residual,7.275957614e-12,0.01,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
+invariants,accounting_identity_max_residual,2.910383046e-11,0.01,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 invariants,headcount_identity_max_gap,0,0,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 invariants,opening_identity_max_gap,0,0,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 invariants,quota_shortfall,0,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
@@ -12,6 +12,6 @@ summary,headcount_end_mean,301,,True,1,tiny,1,reference_unguided,unguided,hcf+sb
 summary,headcount_end_sd,4.472135955,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 summary,headcount_start,287,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 summary,open_openings_end_mean,22.95,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
-summary,sbc_recognized_mean,1033777.414,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
+summary,sbc_recognized_mean,914887.0627,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 summary,tranches_mean,709.15,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a
 summary,unfilled_exits_mean,7.25,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-aca813c841b5398a

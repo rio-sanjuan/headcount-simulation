@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from hcsim.financial.calculator import RatingTable
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.ranges import RangeError, RangeTable
-from hcsim.financial.sizing import NewHireGapFill, SizingError
+from hcsim.financial.sizing import NewHireGapFill
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, VestTemplate, VestTemplateError
 from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn
@@ -201,10 +202,15 @@ def test_existing_vests_reduce_the_gap_and_the_gap_never_goes_negative() -> None
     assert batch.shares_per_year.tolist() == [[300, 0, 256, 205]]  # 50,000 - 12,500; then clipped
 
 
-def test_range_position_must_lie_in_the_unit_interval() -> None:
-    strategy = NewHireGapFill(RangeTable.from_frame(range_frame(), SCHEMA), range_position=1.5)
-    with pytest.raises(SizingError, match=r"\[0, 1\]"):
-        strategy.size(recipients(), AnnualGrowthPrice(100.0))
+def test_a_rated_recipient_sits_where_the_rating_table_puts_them() -> None:
+    rated = recipients(2)
+    rated[1, EmployeeColumn.PERF_RATING] = 5
+    table = RatingTable({1: 0.0, 5: 1.0}, unrated=0.5)
+    strategy = NewHireGapFill(RangeTable.from_frame(range_frame(), SCHEMA), ratings=table)
+    batch = strategy.size(rated, AnnualGrowthPrice(100.0, growth_rate=1.25))
+    # At the top of the range: base 120,000 and target 180,000, a 60,000 gap: 480 at 125.
+    assert batch.base_salary.tolist() == [100_000.0, 120_000.0]
+    assert batch.shares_per_year[:, 0].tolist() == [400, 480]
 
 
 # --- holder ledger ------------------------------------------------------------------------------
