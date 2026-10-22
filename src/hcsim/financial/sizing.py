@@ -1,27 +1,25 @@
-"""Award sizing. The calculator is pure: it reads the award configuration, never the simulation's.
+"""Award sizing strategies. Each reads the award configuration, never the simulation's, and
+sizes grants through the award calculator (see `calculator`).
 
-Handlers emit grants, and the apply step sizes them here. In the walking skeleton the one
-strategy is the new-hire gap fill: each forward year's grant fills that year's gap between
-target total compensation and base salary, at that year's projected price, net of any shares
-the recipient already vests that year.
+Handlers emit grants, and the apply step sizes them here. The new-hire gap fill sizes each
+forward year's grant to fill that year's gap between target total compensation and base pay,
+at that year's projected price, net of any shares the recipient already vests that year.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.financial.calculator import RatingTable, Recipients, SizingError, size
 from hcsim.financial.prices import StockPriceModel
-from hcsim.financial.ranges import RangeField, RangeTable
+from hcsim.financial.ranges import RangeTable
 from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, VestTemplate
-from hcsim.model.core.layouts import EMPLOYEE, Buffer
-from hcsim.model.core.schema import JOB_FAMILY, JOB_LEVEL, LOCATION
+from hcsim.model.core.layouts import Buffer
 
-
-class SizingError(ValueError):
-    """A grant that can't be sized."""
+__all__ = ["AwardBatch", "NewHireGapFill", "SizingError"]
 
 
 @dataclass(frozen=True)
@@ -43,8 +41,9 @@ class AwardBatch:
 class NewHireGapFill:
     ranges: RangeTable
     template: VestTemplate = NEW_HIRE_TEMPLATE
-    #: Where a new hire sits within the range. Synthetic default: the midpoint.
-    range_position: float = 0.5
+    #: Where each recipient sits in the range, by rating. A new hire is unrated, so takes the
+    #: default: the midpoint, a synthetic choice.
+    ratings: RatingTable = field(default_factory=RatingTable.flat)
     award_type: str = "new_hire"
 
     def size(
@@ -54,32 +53,15 @@ class NewHireGapFill:
         existing_vests_per_year: NDArray[np.float64] | None = None,
     ) -> AwardBatch:
         """Size one grant per employee row."""
-        if not 0.0 <= self.range_position <= 1.0:
-            raise SizingError("range_position must lie in [0, 1]")
-        codes = [
-            rows[:, EMPLOYEE.column(name)].astype(np.int64)
-            for name in (JOB_FAMILY, JOB_LEVEL, LOCATION)
-        ]
-        r = self.ranges.lookup(*codes)
-        target = r[:, RangeField.MIN_TARGET] + self.range_position * (
-            r[:, RangeField.MAX_TARGET] - r[:, RangeField.MIN_TARGET]
-        )
-        base = (r[:, RangeField.MIN_BASE] + r[:, RangeField.MAX_BASE]) / 2
-        years = self.template.n_years
-        price = np.array([prices.projection(y) for y in range(1, years + 1)])
-        if not (price > 0).all():
+        projected = np.array([prices.projection(y) for y in range(1, self.template.n_years + 1)])
+        if not (np.isfinite(projected) & (projected > 0)).all():
             raise SizingError("projected prices must be positive")
-        existing = (
-            np.zeros((len(rows), years))
-            if existing_vests_per_year is None
-            else np.asarray(existing_vests_per_year, dtype=np.float64)
+        sized = size(
+            Recipients.from_rows(rows),
+            self.ranges,
+            self.ratings,
+            projected,
+            self.template,
+            existing_vests_per_year,
         )
-        gap = np.maximum(0.0, target[:, None] - base[:, None] - existing * price[None, :])
-        shares_float = gap / price[None, :]
-        if not np.isfinite(shares_float).all():
-            raise SizingError(
-                f"{int((~np.isfinite(shares_float)).any(axis=1).sum())} recipients "
-                "got a non-finite grant"
-            )
-        shares = np.rint(shares_float).astype(np.int64)
-        return AwardBatch(self.award_type, base, shares, self.template.expand(shares))
+        return AwardBatch(self.award_type, sized.base, sized.shares, sized.schedule)
