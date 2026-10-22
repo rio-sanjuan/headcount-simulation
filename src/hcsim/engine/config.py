@@ -146,11 +146,13 @@ class DomainModels:
     attrition: EntityModel  # scores employee rows
     external_fill: EntityModel  # scores opening rows: a monthly fill hazard
     cancellation: EntityModel  # scores opening rows: a monthly unfilled-exit hazard
-    backfill: GroupRateModel  # a rate per departure, by cost center code
+    backfill: GroupRateModel | EntityModel  # a rate per cost center, or a classifier
     growth: GroupRateModel  # mean growth requisitions per month, by cost center code
     attributes: EmpiricalAttributeGenerator  # attributes of generated requisitions
     #: Rating transitions and first ratings. Without it, ratings stay as seeded.
     performance: MarkovModel | None = None
+    #: Backfill for transfers out. Without it, the departure backfill model serves both.
+    backfill_transfer: GroupRateModel | EntityModel | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -180,9 +182,10 @@ MODEL_FIELDS: Final = (
     "growth",
     "attributes",
     "performance",
+    "backfill_transfer",
 )
 #: The model fields a run may leave empty.
-OPTIONAL_MODELS: Final = frozenset({"performance"})
+OPTIONAL_MODELS: Final = frozenset({"performance", "backfill_transfer"})
 #: The artifact domain a model field loads from, where it isn't the field's own name.
 ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
 
@@ -366,6 +369,10 @@ class SimulationConfig:
                 ),
             ),
             (
+                ("backfill_source",),
+                lambda: self._check_backfill_models(),
+            ),
+            (
                 ("seeding_max_openings",),
                 lambda: _when(
                     self.seeding_max_openings < 1, "seeding_max_openings must be at least 1"
@@ -427,6 +434,20 @@ class SimulationConfig:
         for needs, check in checks:
             if set(needs) <= typed:
                 problems += check()
+        return problems
+
+    def _check_backfill_models(self) -> list[str]:
+        """Each backfill model must serve the configured source: a rate per cost center, or a
+        classifier per departure."""
+        problems = []
+        wanted = GroupRateModel if self.backfill_source is BackfillSource.RATE else EntityModel
+        for name in ("backfill", "backfill_transfer"):
+            model = getattr(self.models, name)
+            if model is not None and not isinstance(model, wanted):
+                problems.append(
+                    f"backfill_source {self.backfill_source} needs a {wanted.__name__} as "
+                    f"the {name} model, not a {type(model).__name__}"
+                )
         return problems
 
     def _executive_rule(self) -> list[EligibilityRule]:
