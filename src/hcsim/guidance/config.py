@@ -110,6 +110,13 @@ class Uncertainty(_Strict):
     seed: int = Field(default=0, ge=0)
 
 
+class Coherence(_Strict):
+    """How the forecasts of a fill-tree parent and its children are made to agree after
+    generation (see `coherence`). The later passes always run bottom up."""
+
+    method: Literal["bottom_up", "top_down", "ols"] = "bottom_up"
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
@@ -125,6 +132,7 @@ class GuidanceConfig(_Strict):
     validation: Validation = Validation()
     tuning: Tuning = Tuning()
     uncertainty: Uncertainty = Uncertainty()
+    coherence: Coherence = Coherence()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")

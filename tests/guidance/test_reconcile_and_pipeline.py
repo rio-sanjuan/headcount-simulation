@@ -129,7 +129,9 @@ def test_the_report_records_the_partial_identity_and_clamping(result: PipelineRe
         "validate",
         "select",
         "generate",
+        "cohere_generated",
         "reconcile",
+        "cohere_reconciled",
         "format",
     ]
 

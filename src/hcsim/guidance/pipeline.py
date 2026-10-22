@@ -9,11 +9,13 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
 3. **select** scores each series' suite by rolling-origin evaluation and weighs the best (see
    `selection`), for every series long enough;
 4. **generate** refits the selected models, reweights them, and forecasts (see `generation`);
-5. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
+5. **cohere** makes each carried fill-tree parent its children's sum, by the configured
+   method (see `coherence`), as it does again after reconciling and, bottom up, when writing;
+6. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
    headcount anchor, over the identity's terms: the deepest carried cover of the fill tree and
    the other flows the run forecasts. Moves out of a group have no category, so the identity
    is partial wherever people move between groups, and the report names every missing term;
-6. **format** writes the artifact. Negative cells are clamped to zero there, and the report
+7. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
@@ -33,6 +35,8 @@ import pandas as pd
 
 from hcsim.guidance import ingest as ingestion
 from hcsim.guidance import validation
+from hcsim.guidance.coherence import PASSES, cohere
+from hcsim.guidance.coherence import Method as CoherenceMethod
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
@@ -219,6 +223,31 @@ class Generate:
 
 
 @dataclass(frozen=True)
+class Cohere:
+    """A fill-tree coherence pass (see `coherence`): the configured method after generation,
+    and bottom up after any stage that adjusts the identity's terms."""
+
+    stage: str = "generated"
+    needs: tuple[str, ...] = ("forecasts", "config")
+    gives: tuple[str, ...] = ("forecasts",)
+
+    @property
+    def name(self) -> str:
+        return f"cohere_{self.stage}"
+
+    def validate(self, ctx: Context) -> list[str]:
+        return [] if self.stage in PASSES else [f"no coherence pass {self.stage!r}"]
+
+    def execute(self, ctx: Context) -> Mapping[str, Any]:
+        method: CoherenceMethod = (
+            ctx["config"].coherence.method if self.stage == "generated" else "bottom_up"
+        )
+        forecasts, closed = cohere(ctx["forecasts"], method)
+        ctx.note(self.name, method=method, closed=closed)
+        return {"forecasts": forecasts}
+
+
+@dataclass(frozen=True)
 class Reconcile:
     """Reconcile each group's flows to its anchor, rewriting the forecasts."""
 
@@ -296,7 +325,12 @@ class Format:
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
-        forecasts: Forecasts = ctx["forecasts"]
+        raw: Forecasts = ctx["forecasts"]
+        negative_cells = int(sum(int((v < 0).sum()) for v in raw.values()))
+        # Writers clamp, and the final coherence pass rebuilds each parent from its clamped
+        # children, which leaves nothing negative.
+        clamped = {key: np.maximum(v, 0.0) for key, v in raw.items()}
+        forecasts, closed = cohere(clamped, "bottom_up")
         drawn: Forecasts = ctx["paths"]
         levels = config.uncertainty.quantiles
         with_quantiles = bool(drawn) and set(drawn) == set(forecasts)
@@ -324,8 +358,6 @@ class Format:
         if with_quantiles:
             columns += [f"q{q}" for q in levels]
         frame = pd.DataFrame(rows, columns=columns)
-        negative = frame["value"] < 0
-        frame.loc[negative, "value"] = 0.0  # writers clamp; the loader refuses negatives
         keys = [key for key in forecasts if key in drawn]
         clamped_paths = int(sum(int((drawn[k] < 0).sum()) for k in keys))
         paths = np.stack([np.maximum(drawn[k], 0.0) for k in keys]) if keys else None
@@ -340,7 +372,8 @@ class Format:
         )
         ctx.note(
             self.name,
-            clamped_negative_cells=int(negative.sum()),
+            clamped_negative_cells=negative_cells,
+            coherence_closed=closed,
             clamped_path_values=clamped_paths,
             series_with_paths=len(keys),
             quantiles=list(levels) if with_quantiles else [],
@@ -350,8 +383,10 @@ class Format:
 
 def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
-    middle = (Reconcile(),) if config.reconcile else ()
-    return Pipeline((Ingest(), Validate(), Select(), Generate(), *middle, Format()))
+    middle = (Reconcile(), Cohere("reconciled")) if config.reconcile else ()
+    return Pipeline(
+        (Ingest(), Validate(), Select(), Generate(), Cohere("generated"), *middle, Format())
+    )
 
 
 def run(
@@ -373,6 +408,17 @@ def run(
             *sections["generate"]["series_skipped"],
         ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
+        "coherence": {
+            "method": config.coherence.method,
+            "closed": {
+                **{
+                    stage: sections[f"cohere_{stage}"]["closed"]
+                    for stage in PASSES
+                    if f"cohere_{stage}" in sections
+                },
+                "final": sections["format"]["coherence_closed"],
+            },
+        },
         "uncertainty": {
             "enabled": config.uncertainty.enabled,
             "series_with_paths": sections["format"]["series_with_paths"],

@@ -223,7 +223,7 @@ def _projected(problem: Problem, weighting: str) -> Reconciled:
             method = "ols"
     w = np.kron(covariance, np.eye(horizon)).astype(np.float64)
     w += 1e-9 * np.eye(len(w))  # keeps W A' invertible when a series never erred
-    x = _nonnegative_projection(base, w, a, b)
+    x = nonnegative_projection(base, w, a, b)
     values = {name: x[s * horizon : (s + 1) * horizon] for s, name in enumerate(series)}
     anchor = None if problem.anchor_fixed else values.pop(ANCHOR_KEY)
     flows = {name: np.maximum(values[name], 0.0) for name in names}
@@ -232,7 +232,7 @@ def _projected(problem: Problem, weighting: str) -> Reconciled:
     return Reconciled(flows, residual, anchor, method)
 
 
-def _nonnegative_projection(base: Floats, w: Floats, a: Floats, b: Floats) -> Floats:
+def nonnegative_projection(base: Floats, w: Floats, a: Floats, b: Floats) -> Floats:
     """The projection of `base` onto `a x = b` in the metric `w⁻¹`, with no value below zero.
     A value the projection drives negative is fixed at zero, and the rest are projected again
     onto what the identity then asks of them, until none is negative. A month whose values are
