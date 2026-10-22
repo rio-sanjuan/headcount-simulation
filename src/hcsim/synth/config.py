@@ -8,7 +8,7 @@ scale; the processes' parameters are the same at every scale unless a preset ove
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -295,25 +295,132 @@ class PriceTruth:
     averaging_days: int = 20
 
 
+#: New-hire grant values by level. The other award types scale them.
+NEW_HIRE_VALUES: dict[int, float] = {
+    1: 5_000,
+    2: 15_000,
+    3: 40_000,
+    4: 90_000,
+    5: 200_000,
+    6: 400_000,
+    7: 800_000,
+    8: 1_500_000,
+}
+
+
+def _scaled(factor: float) -> dict[int, float]:
+    return {level: round(value * factor) for level, value in NEW_HIRE_VALUES.items()}
+
+
+@dataclass(frozen=True)
+class AwardTypeTruth:
+    """One award type's sizing and vesting: a value by level with lognormal noise, a lag from
+    its trigger to the award, and a vest template of months after the award and the share of
+    the award vesting at each."""
+
+    value_by_level: dict[int, float]
+    vest_months: tuple[int, ...]
+    vest_shares: tuple[float, ...]
+    value_sigma: float = 0.15
+    lag_days: tuple[int, int] = (0, 0)
+
+    def problems(self, name: str, levels: tuple[int, ...]) -> list[str]:
+        found = []
+        if missing := sorted(set(levels) - set(self.value_by_level)):
+            found.append(f"grants.{name}.value_by_level has no value for levels {missing}")
+        if len(self.vest_months) != len(self.vest_shares) or not self.vest_months:
+            found.append(f"grants.{name} needs one share per vest month")
+        elif not np.isclose(sum(self.vest_shares), 1) or list(self.vest_months) != sorted(
+            set(self.vest_months)
+        ):
+            found.append(f"grants.{name} vest shares must sum to 1 over increasing months")
+        if not 0 <= self.lag_days[0] <= self.lag_days[1]:
+            found.append(f"grants.{name}.lag_days must be a range of days from 0")
+        return found
+
+
+def _quarterly(start: int, end: int) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    months = tuple(range(start, end + 1, 3))
+    return months, (1 / len(months),) * len(months)
+
+
 @dataclass(frozen=True)
 class GrantTruth:
-    new_hire_value_by_level: dict[int, float] = field(
-        default_factory=lambda: {
-            1: 5_000,
-            2: 15_000,
-            3: 40_000,
-            4: 90_000,
-            5: 200_000,
-            6: 400_000,
-            7: 800_000,
-            8: 1_500_000,
-        }
+    """The world's compensation policy: six award types, each with its own sizing and vest
+    template. Invented, round values.
+
+    - `new_hire`: every hire, after a lag, if still employed.
+    - `annual`: a refresh in `annual_month` for everyone with enough tenure, scaled by rating.
+    - `promotion`: every promotion, sized at the new level.
+    - `transfer`: a share of transfers.
+    - `retention`: a monthly chance for the top two ratings.
+    - `off_cycle`: a small monthly chance for anyone.
+    """
+
+    new_hire: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(
+            dict(NEW_HIRE_VALUES),
+            vest_months=(12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48),
+            vest_shares=(0.25,) + (0.0625,) * 12,
+            lag_days=(30, 60),
+        )
     )
-    value_sigma: float = 0.15
-    award_lag_days: tuple[int, int] = (30, 60)
-    #: Vest schedule: months after the award, and the share of the award vesting at each.
-    vest_months: tuple[int, ...] = (12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48)
-    vest_shares: tuple[float, ...] = (0.25,) + (0.0625,) * 12
+    annual: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(_scaled(0.4), *_quarterly(3, 48))
+    )
+    promotion: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(
+            _scaled(0.25), (6, 12, 18, 24), (0.25,) * 4, lag_days=(14, 45)
+        )
+    )
+    transfer: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(
+            _scaled(0.15), (12, 24), (0.5, 0.5), lag_days=(14, 45)
+        )
+    )
+    retention: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(_scaled(0.5), (24,), (1.0,), lag_days=(0, 30))
+    )
+    off_cycle: AwardTypeTruth = field(
+        default_factory=lambda: AwardTypeTruth(
+            _scaled(0.2), (6, 12, 18, 24), (0.25,) * 4, lag_days=(0, 30)
+        )
+    )
+    annual_month: int = 4
+    annual_min_tenure_months: float = 6.0
+    #: The annual refresh's factor by rating, worst to best. The unrated get none.
+    annual_rating_factor: tuple[float, ...] = (0.0, 0.5, 1.0, 1.4, 2.0)
+    transfer_award_probability: float = 0.25
+    retention_monthly_rate: float = 0.003
+    off_cycle_monthly_rate: float = 0.001
+
+    TYPES: ClassVar[tuple[str, ...]] = (
+        "new_hire",
+        "annual",
+        "promotion",
+        "transfer",
+        "retention",
+        "off_cycle",
+    )
+
+    def award_type(self, name: str) -> AwardTypeTruth:
+        result: AwardTypeTruth = getattr(self, name)
+        return result
+
+    def problems(self, levels: tuple[int, ...], ratings: int) -> list[str]:
+        found = [p for name in self.TYPES for p in self.award_type(name).problems(name, levels)]
+        if self.annual_month not in range(1, 13):
+            found.append("grants.annual_month must be a calendar month 1-12")
+        if len(self.annual_rating_factor) != ratings:
+            found.append("grants.annual_rating_factor needs one factor per rating")
+        for name in (
+            "transfer_award_probability",
+            "retention_monthly_rate",
+            "off_cycle_monthly_rate",
+        ):
+            if not 0 <= getattr(self, name) <= 1:
+                found.append(f"grants.{name} must lie in [0, 1]")
+        return found
 
 
 @dataclass(frozen=True)
@@ -893,7 +1000,6 @@ class WorldConfig:
             ("attrition.level_factor", self.attrition.level_factor),
             ("compensation.base_midpoint_by_level", self.compensation.base_midpoint_by_level),
             ("compensation.equity_share_by_level", self.compensation.equity_share_by_level),
-            ("grants.new_hire_value_by_level", self.grants.new_hire_value_by_level),
         ):
             if missing := sorted(levels - set(by_level)):
                 problems.append(f"{name} has no value for levels {missing}")
@@ -910,6 +1016,7 @@ class WorldConfig:
         if self.prices.trading_days_per_month < 1 or self.prices.averaging_days < 1:
             problems.append("prices need positive trading and averaging days")
         problems += self.ratings.problems()
+        problems += self.grants.problems(self.levels, len(self.ratings.scale))
         problems += self.attrition.problems(len(self.ratings.scale))
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
         problems += self.movements.problems()
