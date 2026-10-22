@@ -49,6 +49,7 @@ TRANS_TYPES: Final = (
     "HIRE_REV",
     "TERM_REV",
     "HIRE_PENDING",
+    "SYS_ADJ",
 )
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 

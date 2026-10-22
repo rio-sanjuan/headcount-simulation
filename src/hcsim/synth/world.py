@@ -374,7 +374,9 @@ def generate_world(config: WorldConfig) -> World:
     clean = _transactions(workforce, labels, reporting_rng)
     txn = quirks.apply(config, clean, offers, quirk_rng)
     world.tables["workforce_txn"] = txn
-    world.tables["workforce_agg"] = _aggregate(txn, world.tables["dim_job"])
+    world.tables["workforce_agg"] = quirks.aggregate_only(
+        config, _aggregate(txn, world.tables["dim_job"]), quirk_rng
+    )
     world.tables["dim_rating"] = _rating_dimension(config)
     world.tables["req_interval"] = _requisitions(book, labels)
     world.tables["pending_start"] = _pending_starts(offers, book, labels)

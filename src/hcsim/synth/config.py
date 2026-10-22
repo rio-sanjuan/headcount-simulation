@@ -922,10 +922,18 @@ class QuirkTruth:
     #: Record every accepted offer as `HIRE_PENDING`: reported on the offer's day, and dated
     #: on the future start.
     pending_hire_rows: bool = False
+    #: Add system-adjustment rows (`SYS_ADJ`, ignored) to the aggregate fact only, at this
+    #: share of its cost-center months. They never appear among the transactions.
+    aggregate_only_share: float = 0.0
 
     def problems(self) -> list[str]:
         found = []
-        for name in ("backdated_share", "correction_share", "no_show_pair_share"):
+        for name in (
+            "backdated_share",
+            "correction_share",
+            "no_show_pair_share",
+            "aggregate_only_share",
+        ):
             if not 0 <= getattr(self, name) <= 1:
                 found.append(f"quirks.{name} must lie in [0, 1]")
         return found
