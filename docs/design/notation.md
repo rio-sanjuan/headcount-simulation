@@ -68,7 +68,7 @@ Flows that change headcount:
 | `F_camp` | Campus fill | Yes |
 | `F_tr` | Transfer fill | Yes |
 | `F_pend` | Pending starts | Yes |
-| `F_bdy` | Boundary fill, injected in replay only | No |
+| `F_bdy` | Boundary fill: a start whose opening the run never holds, such as an offer accepted before the run | No |
 | `V_tr` | Transfers out | — |
 | `V_conv` | Conversions out | — |
 | `R⁺`, `R⁻` | Reorganizations in and out | No |

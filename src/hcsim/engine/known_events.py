@@ -6,8 +6,8 @@ events fire first, and sampling runs on the rows left. They come from five sourc
 - **history**: what the warehouse already records at the snapshot for a later date. A notice
   of departure (`TERM_PENDING`) reported by the snapshot becomes a termination in the month the
   person leaves;
-- **pending starts**: offers accepted by the snapshot, which start in a later month and fill
-  their requisition;
+- **pending starts**: offers accepted by the snapshot, which start in a later month. Each
+  filled its requisition on the day it was accepted, so it takes none of the run's openings;
 - **declared movements**: reorganizations and conversions out, entered for named employees in
   a month, with a destination in raw labels;
 - **termination programs**: planned terminations of named employees over a window of months,
@@ -78,7 +78,8 @@ class KnownEvent:
     step: int
     source: Source
     employee_id: int | None = None
-    #: The requisition a pending start fills.
+    #: The requisition a pending start fills in the run: none for an offer accepted before the
+    #: run, whose opening history closed before the seed's snapshot.
     req_id: int | None = None
     #: Where a movement or start puts the person, in raw labels.
     destination: Mapping[str, str] = field(default_factory=dict)
@@ -190,17 +191,23 @@ def from_pending_starts(
 ) -> list[KnownEvent]:
     """Offers accepted by the last snapshot before the run, starting on or after it. An offer
     whose start date passed less than `staleness_days` before the run is still expected, and
-    starts in the run's first month; an older one is stale and left out."""
+    starts in the run's first month; an older one is stale and left out.
+
+    Every one of them was accepted before the run, and history closed its opening that day, so
+    the seed never holds it. Its start carries no requisition: it joins as a boundary fill (see
+    `pending`), in the role its offer names, with its requisition's manager flag."""
     cost_center = role_column(con, "pending_start")
     starts = con.execute(
-        f"SELECT employee_id, req_id, {cost_center} AS cost_center, job_code, location, company, "
-        "start_date FROM pending_start "
-        "WHERE snapshot_date = (SELECT max(snapshot_date) FROM pending_start "
-        "                       WHERE snapshot_date < $run) "
-        "AND start_date >= $earliest ORDER BY employee_id",
+        f"SELECT p.employee_id, p.{cost_center} AS cost_center, p.job_code, p.location, "
+        "p.company, coalesce(r.is_manager, false) AS is_manager, p.start_date "
+        "FROM pending_start p "
+        "LEFT JOIN req_interval r ON r.req_id = p.req_id AND r.interval_number = 1 "
+        "WHERE p.snapshot_date = (SELECT max(snapshot_date) FROM pending_start "
+        "                         WHERE snapshot_date < $run) "
+        "AND p.start_date >= $earliest ORDER BY p.employee_id",
         {"run": run_date, "earliest": run_date - dt.timedelta(days=staleness_days)},
     ).df()
-    columns = ["employee_id", "req_id", "cost_center", "job_code", "location", "company"]
+    columns = ["employee_id", "cost_center", "job_code", "location", "company", "is_manager"]
     rows = zip(*(starts[c] for c in columns), starts["start_date"], strict=True)
     return [
         KnownEvent(
@@ -208,16 +215,16 @@ def from_pending_starts(
             max(0, step_of(run_date, start)),
             Source.PENDING_START,
             employee_id=int(employee),
-            req_id=int(req),
             destination={
                 "cost_center": str(cc),
                 "job_code": str(job),
                 "location": str(location),
                 "company": str(company),
+                "is_manager": str(bool(manager)).lower(),
             },
             reason="accepted offer",
         )
-        for employee, req, cc, job, location, company, start in rows
+        for employee, cc, job, location, company, manager, start in rows
     ]
 
 
