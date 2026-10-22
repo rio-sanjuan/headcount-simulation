@@ -1,4 +1,13 @@
-"""Benchmark forecasters. Both implement TimeSeriesModel and emit point forecasts only."""
+"""The native benchmark forecasters: simple rules any richer model has to beat.
+
+- **last observed** repeats the last month;
+- **seasonal naive** repeats the last season, in phase;
+- **historical average** forecasts the mean of the history;
+- **drift** extends the line from the first month through the last, as a random walk with
+  drift forecasts it.
+
+Each implements `TimeSeriesModel` and emits point forecasts only.
+"""
 
 from __future__ import annotations
 
@@ -64,12 +73,63 @@ class HistoricalAverage:
         return np.full(horizon, self._mean)
 
 
-Forecaster = SeasonalNaive | HistoricalAverage
+class LastObserved:
+    """Every forecast month repeats the last observed month."""
+
+    NAME: ClassVar[str] = "last_observed"
+    OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
+
+    def __init__(self) -> None:
+        self._last: float | None = None
+
+    def fit(self, history: Floats) -> Self:
+        values = np.asarray(history, dtype=np.float64)
+        if len(values) == 0:
+            raise ForecastError(f"{self.NAME} needs at least one month")
+        self._last = float(values[-1])
+        return self
+
+    def predict(self, horizon: int) -> Floats:
+        if self._last is None:
+            raise ForecastError("fit before predicting")
+        return np.full(horizon, self._last)
+
+
+class Drift:
+    """The last month plus the history's average change, once per month ahead."""
+
+    NAME: ClassVar[str] = "drift"
+    OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
+
+    def __init__(self) -> None:
+        self._last: float | None = None
+        self._slope = 0.0
+
+    def fit(self, history: Floats) -> Self:
+        values = np.asarray(history, dtype=np.float64)
+        if len(values) < 2:
+            raise ForecastError(f"{self.NAME} needs at least two months")
+        self._last = float(values[-1])
+        self._slope = float(values[-1] - values[0]) / (len(values) - 1)
+        return self
+
+    def predict(self, horizon: int) -> Floats:
+        if self._last is None:
+            raise ForecastError("fit before predicting")
+        return self._last + self._slope * np.arange(1, horizon + 1, dtype=np.float64)
+
+
+Forecaster = LastObserved | SeasonalNaive | HistoricalAverage | Drift
 
 #: The registered suite. A configuration names models from here.
 MODELS: Registry[Forecaster] = Registry(
     "model",
-    (Entry(SeasonalNaive.NAME, SeasonalNaive), Entry(HistoricalAverage.NAME, HistoricalAverage)),
+    (
+        Entry(LastObserved.NAME, LastObserved),
+        Entry(SeasonalNaive.NAME, SeasonalNaive),
+        Entry(HistoricalAverage.NAME, HistoricalAverage),
+        Entry(Drift.NAME, Drift),
+    ),
 )
 
 
