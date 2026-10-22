@@ -11,6 +11,7 @@ from hcsim.model.ml.sampling import (
     QuotaSampling,
     SamplingError,
     apportion,
+    assign,
     bernoulli,
     quota_select,
 )
@@ -127,3 +128,71 @@ def test_both_strategies_conform_to_the_protocol() -> None:
     with pytest.raises(SamplingError, match="needs groups and a quota"):
         QuotaSampling().select(np.full(4, 0.5), rng())
     assert BernoulliSampling().select(np.ones(3), rng()).all()
+
+
+# --- capacity-constrained assignment -------------------------------------------------------------
+
+
+def test_each_column_gets_its_quota_and_no_row_its_capacity_over() -> None:
+    weights = rng(1).uniform(0.1, 1.0, size=(40, 3))
+    capacity = rng(2).integers(1, 4, size=40)
+    result = assign(weights, np.array([10, 5, 7]), rng(3), capacity=capacity)
+    assert result.realized.tolist() == [10, 5, 7]
+    assert result.shortfall.tolist() == [0, 0, 0]
+    assert (result.counts.sum(axis=1) <= capacity).all()
+    assert result.counts.shape == (40, 3)
+
+
+def test_a_zero_weight_never_assigns_and_supply_can_bind() -> None:
+    weights = np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 0.0]])
+    result = assign(weights, np.array([5, 1]), rng(4))
+    assert result.counts.tolist() == [[1, 0], [1, 0], [0, 0]]
+    assert result.shortfall.tolist() == [3, 1]
+    assert assign(np.zeros((0, 2)), np.array([1, 1]), rng(5)).shortfall.tolist() == [1, 1]
+
+
+def test_a_row_with_several_openings_can_fill_several_times() -> None:
+    result = assign(np.array([[1.0], [1e-9]]), np.array([3]), rng(6), capacity=np.array([3, 3]))
+    assert result.counts[:, 0].tolist() == [3, 0]
+
+
+def test_rows_lean_to_the_column_they_weigh_most_in() -> None:
+    weights = np.tile([[9.0, 1.0]], (200, 1))
+    weights[100:] = [1.0, 9.0]
+    result = assign(weights, np.array([100, 100]), rng(7))
+    first = int(result.counts[:100, 0].sum())
+    assert first > 70  # mostly the rows that favor column 0
+    assert result.realized.tolist() == [100, 100]
+
+
+def test_one_column_is_successive_sampling() -> None:
+    """With one column and unit capacities, assignment and quota sampling are the same draw:
+    a Gumbel-top-k on log-weights. Their inclusion rates agree."""
+    p = np.array([0.9, 0.5, 0.5, 0.2, 0.1, 0.05])
+    runs = 4000
+    assigned = np.zeros(len(p))
+    sampled = np.zeros(len(p))
+    for seed in range(runs):
+        assigned += assign(p[:, None], np.array([2]), rng(seed)).counts[:, 0]
+        sampled += quota_select(p, np.zeros(len(p), np.int64), np.array([2]), rng(seed + runs)).mask
+    for i in range(len(p)):
+        rate = sampled[i] / runs
+        se = np.sqrt(2 * max(rate * (1 - rate), 1e-6) / runs)
+        stat_check(assigned[i] / runs, rate, se, label=f"row {i}")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"weights": np.ones(3)}, "weights must be \\(rows, columns\\)"),
+        ({"weights": -np.ones((2, 1))}, "finite and non-negative"),
+        ({"quota": np.array([1, 1])}, "one non-negative integer per column"),
+        ({"quota": np.array([1.5])}, "one non-negative integer per column"),
+        ({"capacity": np.array([1])}, "one non-negative integer per row"),
+        ({"capacity": np.array([-1, 1])}, "one non-negative integer per row"),
+    ],
+)
+def test_bad_assignment_inputs_are_refused(kwargs: dict[str, object], message: str) -> None:
+    args: dict[str, object] = {"weights": np.ones((2, 1)), "quota": np.array([1])} | kwargs
+    with pytest.raises(SamplingError, match=message):
+        assign(args["weights"], args["quota"], rng(), capacity=args.get("capacity"))  # type: ignore[arg-type]
