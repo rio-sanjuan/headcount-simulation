@@ -8,12 +8,17 @@ import pytest
 from hcsim.model.interface import SamplingStrategy
 from hcsim.model.ml.sampling import (
     BernoulliSampling,
+    CandidatePool,
     QuotaSampling,
     SamplingError,
+    SeedBasis,
     apportion,
     assign,
     bernoulli,
     quota_select,
+    rake_quota,
+    seed_base,
+    sequential,
 )
 from tests.support.stat_check import bernoulli_sum_se, stat_check
 
@@ -196,3 +201,63 @@ def test_bad_assignment_inputs_are_refused(kwargs: dict[str, object], message: s
     args: dict[str, object] = {"weights": np.ones((2, 1)), "quota": np.array([1])} | kwargs
     with pytest.raises(SamplingError, match=message):
         assign(args["weights"], args["quota"], rng(), capacity=args.get("capacity"))  # type: ignore[arg-type]
+
+
+# --- pools, sequential draws, seed bases, and raked quotas ------------------------------------
+
+
+def test_sequential_draws_never_select_a_row_twice() -> None:
+    n = 50
+    groups = np.repeat([0, 1], 25)
+    p = np.full(n, 0.5)
+    first, second = sequential(
+        [(p, groups, np.array([20, 20])), (p, groups, np.array([10, 10]))], rng(8)
+    )
+    assert first.realized.tolist() == [20, 20]
+    assert second.realized.tolist() == [5, 5]  # only what the first left
+    assert second.shortfall.tolist() == [5, 5]
+    assert not (first.mask & second.mask).any()
+    assert sequential([], rng()) == []
+
+
+def test_a_pool_starts_from_its_eligible_rows_and_refuses_double_takes() -> None:
+    pool = CandidatePool([True, True, False, True])
+    assert len(pool) == 3
+    picked = pool.select(np.ones(4), np.zeros(4, np.int64), np.array([5]), rng(9))
+    assert picked.mask.tolist() == [True, True, False, True]
+    assert len(pool) == 0
+    with pytest.raises(SamplingError, match="no longer has"):
+        pool.take(np.array([True, False, False, False]))
+    with pytest.raises(SamplingError, match="one entry per pooled row"):
+        pool.take(np.array([True]))
+    (only,) = sequential(
+        [(np.ones(3), np.zeros(3, np.int64), np.array([3]))], rng(1), eligible=[True, False, True]
+    )
+    assert only.mask.tolist() == [True, False, True]
+
+
+def test_seed_bases_count_rows_probability_or_presence() -> None:
+    a, b = np.array([0, 0, 1, 1, -1]), np.array([0, 1, 1, 1, 0])
+    p = np.array([0.5, 0.25, 0.1, 0.2, 0.9])
+    assert seed_base(SeedBasis.ROWS, a, b, (2, 2)).tolist() == [[1, 1], [0, 2]]
+    np.testing.assert_allclose(
+        seed_base(SeedBasis.PROBABILITY, a, b, (2, 2), p), [[0.5, 0.25], [0.0, 0.3]]
+    )
+    assert seed_base(SeedBasis.UNIFORM, a, b, (2, 2)).tolist() == [[1, 1], [0, 1]]
+    with pytest.raises(SamplingError, match="needs the probabilities"):
+        seed_base(SeedBasis.PROBABILITY, a, b, (2, 2))
+    with pytest.raises(SamplingError, match="inside the table's shape"):
+        seed_base(SeedBasis.ROWS, a, b, (1, 2))
+    with pytest.raises(SamplingError, match="one group in each grouping"):
+        seed_base(SeedBasis.ROWS, a, b[:2], (2, 2))
+
+
+def test_raked_quotas_meet_the_rows_exactly_and_the_columns_within_rounding() -> None:
+    seed = np.array([[4.0, 1.0, 1.0], [1.0, 2.0, 3.0]])
+    table = rake_quota(seed, [10, 20], [9, 8, 13])
+    assert table.dtype == np.int64
+    assert table.sum(axis=1).tolist() == [10, 20]
+    assert np.abs(table.sum(axis=0) - np.array([9, 8, 13])).max() <= 1
+    with pytest.raises(SamplingError, match="disagree on the total"):
+        rake_quota(seed, [10, 20], [1, 1, 1])
+    assert rake_quota(np.zeros((0, 2)), [], [0, 0]).shape == (0, 2)
