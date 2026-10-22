@@ -9,6 +9,7 @@ from pathlib import Path
 
 import duckdb
 
+from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
 from hcsim.guidance.pipeline import PipelineConfig, run
 
@@ -28,7 +29,7 @@ def main(argv: Sequence[str]) -> int:
     with duckdb.connect(str(args.world), read_only=True) as con:
         try:
             result = run(con, PipelineConfig(horizon=args.horizon, grouping=args.grouping))
-        except IngestionError as error:
+        except (IngestionError, PipelineError) as error:
             parser.error(str(error))
     result.artifact.save(args.out)
     (args.out / "report.json").write_text(json.dumps(result.report, indent=2, default=str))

@@ -96,7 +96,9 @@ def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
     return column.expression
 
 
-def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
+def problems(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> list[str]:
+    """Everything that keeps the warehouse from yielding series grouped by `grouping`."""
+    found = []
     try:
         catalog = TransTypeCatalog.from_warehouse(con)
         used = con.execute("SELECT DISTINCT trans_type FROM workforce_agg").fetchall()
@@ -104,7 +106,18 @@ def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Ser
         for measure in MEASURES.values():
             measure.check(catalog)
     except (TransTypeError, MeasureError) as error:
-        raise IngestionError(str(error)) from None
+        found.append(str(error))
+    try:
+        _group_expression(con, grouping)
+    except IngestionError as error:
+        found.append(str(error))
+    return found
+
+
+def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
+    found = problems(con, grouping)
+    if found:
+        raise IngestionError("; ".join(found))
     group = _group_expression(con, grouping)
     parts = []
     for category, measure in MEASURES.items():
