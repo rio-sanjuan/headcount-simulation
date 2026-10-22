@@ -50,6 +50,7 @@ from hcsim.engine.known_domains import (
     other_movement,
     reorganization,
 )
+from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
 from hcsim.engine.modes import RunMode
 from hcsim.engine.performance import PERFORMANCE, performance
@@ -91,6 +92,8 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (PERFORMANCE, performance),
     *DOMAINS,
 )
+#: The known-event kind each domain fires.
+FIRES: Final[Mapping[str, EventKind]] = {**KINDS, ATTRITION: EventKind.TERMINATION}
 #: Gates every run has: other movement comes only from replayed history.
 DEFAULT_GATES: Final = (
     RegistrationGate(OTHER_MOVEMENT, modes=(RunMode.REPLAY,), reason="replay only"),
@@ -216,6 +219,7 @@ def run_trajectory(
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
             if len(result.departures):
                 ctx.departures.append(result.departures)
+                ctx.anticipated.append(result.anticipated)
             if result.flows:
                 for symbol, counts in result.flows.items():
                     flows[symbol][step] = counts
@@ -226,7 +230,7 @@ def run_trajectory(
 
     known_fired: dict[str, int] = {}
     if known is not None:
-        kinds = [KINDS[d] for d in registered.domains if d in KINDS]
+        kinds = [FIRES[d] for d in registered.domains if d in FIRES]
         check_fired(known, fired, kinds)
         for e in known.events:
             if e.event.key in fired.fired:

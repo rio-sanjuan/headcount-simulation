@@ -37,7 +37,7 @@ from hcsim.financial.sizing import NewHireGapFill
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
-from hcsim.model.core.schema import COST_CENTER, SchemaError, SimulationSchema
+from hcsim.model.core.schema import COST_CENTER, JOB_LEVEL, SchemaError, SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.generative import EmpiricalAttributeGenerator
 from hcsim.model.ml.markov import MarkovModel
@@ -238,6 +238,12 @@ class SimulationConfig:
     performance_first_rating_min_tenure_months: int = setting(
         "performance", 6, "the tenure an employee needs at a cycle to receive a first rating"
     )
+    # attrition
+    attrition_executive_min_level: int | None = setting(
+        "attrition",
+        None,
+        "the lowest executive level; executives leave only by known events, never by sampling",
+    )
     # backfill
     backfill_source: BackfillSource = setting(
         "backfill", BackfillSource.RATE, "a rate per cost center, or a classifier per departure"
@@ -286,7 +292,8 @@ class SimulationConfig:
         object.__setattr__(self, "gates", tuple(self.gates))
         problems += [f"gates: {p}" for p in check_gates(self.gates)]
         try:
-            object.__setattr__(self, "resolved_eligibility", resolve(self.eligibility, self.schema))
+            rules = (*self.eligibility, *self._executive_rule())
+            object.__setattr__(self, "resolved_eligibility", resolve(rules, self.schema))
         except EligibilityError as error:
             problems += [f"eligibility: {p}" for p in error.problems]
         if problems:
@@ -421,6 +428,18 @@ class SimulationConfig:
             if set(needs) <= typed:
                 problems += check()
         return problems
+
+    def _executive_rule(self) -> list[EligibilityRule]:
+        """Keep executives out of sampled attrition: every level from the lowest executive
+        one up, as the schema's level vocabulary has them."""
+        floor = self.attrition_executive_min_level
+        if not isinstance(floor, int) or JOB_LEVEL not in self.schema.vocabularies:
+            return []
+        levels = [v for v in self.schema.vocabulary(JOB_LEVEL).labels if float(v) >= floor]
+        if not levels:
+            return []
+        reason = "executives leave only by known events"
+        return [EligibilityRule.of("attrition", job_level=levels, reason=reason)]
 
     def _check_guidance(self, guidance: GuidanceForecast) -> list[str]:
         problems = []

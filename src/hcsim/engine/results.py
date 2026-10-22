@@ -93,6 +93,8 @@ class DomainResult:
     forfeit: bool = True
     #: Pre-departure rows of employees who left a role this step, for backfill to read.
     departures: Buffer = field(default_factory=lambda: EMPLOYEE.empty(0))
+    #: For each departure, whether a known event anticipated it. Empty means none was.
+    anticipated: NDArray[np.bool_] = field(default_factory=lambda: np.zeros(0, dtype=bool))
     #: Shared guidance quota this result used, by category, per group.
     ledger: Mapping[str, Ints] = field(default_factory=dict)
     #: Accounting for guided draws, by category.
@@ -106,3 +108,7 @@ class DomainResult:
             raise ValueError("employees and openings changes must use their own layouts")
         if self.departures.ndim != 2 or self.departures.shape[1] != EMPLOYEE.width:
             raise ValueError("departures must use the employee layout")
+        if not len(self.anticipated):
+            object.__setattr__(self, "anticipated", np.zeros(len(self.departures), dtype=bool))
+        elif self.anticipated.shape != (len(self.departures),):
+            raise ValueError("one anticipated flag per departure")

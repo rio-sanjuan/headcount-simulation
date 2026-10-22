@@ -372,6 +372,14 @@ def seed_for(
     )
 
 
+def executive_min_level(con: duckdb.DuckDBPyConnection) -> int | None:
+    """The lowest level the warehouse's jobs mark as executive, if any are."""
+    (level,) = con.execute("SELECT min(job_level) FROM dim_job WHERE is_executive").fetchone() or (
+        None,
+    )
+    return None if level is None else int(level)
+
+
 def range_table_from_world(con: duckdb.DuckDBPyConnection, schema: SimulationSchema) -> RangeTable:
     return RangeTable.from_frame(con.execute("SELECT * FROM comp_range").df(), schema)
 
