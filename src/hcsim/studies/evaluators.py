@@ -51,7 +51,7 @@ def invariants(result: SimulationResult) -> list[Metric]:
         int((r.record.realized != np.minimum(r.record.quota, r.record.eligible)).sum())
         for r in rows
     )
-    shortfall = sum(int((r.record.quota - r.record.realized).sum()) for r in rows)
+    shortfall = sum(int(r.record.shortfall.sum()) for r in rows)
     metrics = [
         Metric(name, "quota_violations", violations, 0, f"{len(rows)} guided draws checked"),
         Metric(name, "quota_shortfall", shortfall, None, "quota that eligibility couldn't supply"),
