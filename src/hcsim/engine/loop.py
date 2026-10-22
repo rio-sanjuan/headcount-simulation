@@ -13,7 +13,7 @@ Histories are per cost center: stocks at the start of every month plus the end o
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
     H(t+1) = H(t) + F_ext - A - V_conv + R_in - R_out + W_in - W_out
-    O(t+1) = O(t) + G + B_att - U - F_ext
+    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext
 """
 
 from __future__ import annotations
@@ -33,10 +33,12 @@ from hcsim.engine.config import SimulationConfig
 from hcsim.engine.domains import (
     ATTRITION,
     BACKFILL,
+    BACKFILL_TRANSFER,
     CANCELLATION,
     DOMAINS,
     EXTERNAL_FILL,
     GROWTH,
+    Departures,
     Handler,
     StepContext,
 )
@@ -67,6 +69,7 @@ Ints = NDArray[np.int64]
 FLOWS: Final[Mapping[str, str]] = {
     ATTRITION: "A",
     BACKFILL: "B_att",
+    BACKFILL_TRANSFER: "B_tr",
     EXTERNAL_FILL: "F_ext",
     CANCELLATION: "U",
     GROWTH: "G",
@@ -83,7 +86,13 @@ HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "W_in": +1,
     "W_out": -1,
 }
-OPENING_IDENTITY: Final[Mapping[str, int]] = {"G": +1, "B_att": +1, "U": -1, "F_ext": -1}
+OPENING_IDENTITY: Final[Mapping[str, int]] = {
+    "G": +1,
+    "B_att": +1,
+    "B_tr": +1,
+    "U": -1,
+    "F_ext": -1,
+}
 #: Every domain, in step order: the known-event domains, then the sampled ones.
 STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (CONVERSION_OUT, conversion_out),
@@ -218,8 +227,7 @@ def run_trajectory(
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
             if len(result.departures):
-                ctx.departures.append(result.departures)
-                ctx.anticipated.append(result.anticipated)
+                ctx.departures.append(Departures(domain, result.departures, result.anticipated))
             if result.flows:
                 for symbol, counts in result.flows.items():
                     flows[symbol][step] = counts

@@ -294,14 +294,15 @@ def production_config(**kwargs: Any) -> SimulationConfig:
 
 
 #: What each model field must be, to serve its domain.
-_SERVES: Final[Mapping[str, type]] = {
+_SERVES: Final[Mapping[str, type | tuple[type, ...]]] = {
     "attrition": EntityModel,
     "external_fill": EntityModel,
     "cancellation": EntityModel,
-    "backfill": GroupRateModel,
+    "backfill": (GroupRateModel, EntityModel),
     "growth": GroupRateModel,
     "attributes": EmpiricalAttributeGenerator,
     "performance": MarkovModel,
+    "backfill_transfer": (GroupRateModel, EntityModel),
 }
 
 

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from hcsim.engine.config import SimulationConfig
+from hcsim.engine.config import BackfillSource, SimulationConfig
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
@@ -39,7 +39,7 @@ from hcsim.model.core.layouts import (
     copy_role,
 )
 from hcsim.model.core.schema import REQ_TYPE, UNATTRIBUTED
-from hcsim.model.interface import GroupRateModel, Mask, Probabilities
+from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabilities
 from hcsim.model.ml.generative import ATTRIBUTES
 from hcsim.model.ml.sampling import apportion, bernoulli, quota_select
 
@@ -47,11 +47,23 @@ Ints = NDArray[np.int64]
 
 ATTRITION: Final = "attrition"
 BACKFILL: Final = "backfill"
+BACKFILL_TRANSFER: Final = "backfill_transfer"
+TRANSFERS: Final = "transfers"
 EXTERNAL_FILL: Final = "external_fill"
 CANCELLATION: Final = "cancellation"
 GROWTH: Final = "growth"
 
 _OPENED = GuidanceCategory.REQUISITIONS_OPENED
+
+
+@dataclass(frozen=True)
+class Departures:
+    """Employees who left a role this step: the domain they left by, their rows as they were,
+    and whether a known event anticipated each departure."""
+
+    domain: str
+    rows: Buffer
+    anticipated: Mask
 
 
 @dataclass
@@ -63,9 +75,7 @@ class StepContext:
     step: int
     trajectory: int
     seeds: SeedManager
-    departures: list[Buffer] = field(default_factory=list)
-    #: For each departure, whether a known event anticipated it.
-    anticipated: list[Mask] = field(default_factory=list)
+    departures: list[Departures] = field(default_factory=list)
     #: The run's known events, resolved, and the log of those fired.
     known: ResolvedPlan | None = None
     fired: FiringLog = field(default_factory=FiringLog)
@@ -78,6 +88,13 @@ class StepContext:
     def month(self) -> int:
         """The calendar month, 1-12, of this step."""
         return (self.config.run_date.month - 1 + self.step) % 12 + 1
+
+    def departed(self, *domains: str) -> tuple[Buffer, Mask]:
+        """This step's departures by `domains`, and their anticipated flags."""
+        chosen = [d for d in self.departures if d.domain in domains]
+        rows = np.concatenate([EMPLOYEE.empty(0), *(d.rows for d in chosen)])
+        flags = np.concatenate([np.zeros(0, dtype=bool), *(d.anticipated for d in chosen)])
+        return rows, flags
 
     def known_at(self, kind: EventKind) -> list[ResolvedEvent]:
         """This step's known events of `kind`."""
@@ -209,16 +226,31 @@ def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
 # --- backfill ---------------------------------------------------------------------------------
 
 
-def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """Each departure opens a backfill requisition for the same role with its cost center's
-    rate. Where guidance covers the cost center, the count is capped at the quota's headroom."""
-    departed = np.concatenate([EMPLOYEE.empty(0), *ctx.departures])
+def _backfill_probability(
+    departed: Buffer, ctx: StepContext, model: object, n: int
+) -> Probabilities:
+    """Each departure's chance of a backfill: its cost center's rate, or a classifier's score
+    of the departure's row, as `backfill_source` says."""
+    if ctx.config.backfill_source is BackfillSource.CLASSIFIER:
+        return cast(EntityModel, model).compute_probability(departed)
+    rates = _per_cost_center_rates(cast(GroupRateModel, model), n)
+    result: Probabilities = rates[departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)]
+    return result
+
+
+def _backfill(
+    state: SimulationState, ctx: StepContext, domain: str, source: str, model: object
+) -> DomainResult:
+    """Each departure by `source` opens a backfill for the same role with its probability, as
+    a binomial draw over the departures. Where guidance covers the cost center, the count is
+    capped at the requisitions-opened quota's headroom."""
+    departed, _ = ctx.departed(source)
     if not len(departed):
-        return DomainResult(BACKFILL)
+        return DomainResult(domain)
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
-    rates = _per_cost_center_rates(ctx.config.models.backfill, state.n_cost_centers)
-    rng = ctx.rng(BACKFILL)
-    p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, rates[cost_centers])
+    p = _backfill_probability(departed, ctx, model, state.n_cost_centers)
+    p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, p)
+    rng = ctx.rng(domain)
     opened = bernoulli(p, rng)
     ledger: dict[str, Ints] = {}
     if ctx.guided(_OPENED):
@@ -231,9 +263,21 @@ def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
     roles = departed[opened]
     code = ctx.config.schema.vocabulary(REQ_TYPE).code(BACKFILL)
     rows = _requisitions(len(roles), cost_centers[opened], code, ctx.step)
-    for source, target in FILL_COLUMN_MAP.items():
-        rows[:, source] = roles[:, target]
-    return DomainResult(BACKFILL, openings=RowChange(OPENING, append=rows), ledger=ledger)
+    for source_column, target in FILL_COLUMN_MAP.items():
+        rows[:, source_column] = roles[:, target]
+    return DomainResult(domain, openings=RowChange(OPENING, append=rows), ledger=ledger)
+
+
+def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
+    """Backfill for departures (`B_att`)."""
+    return _backfill(state, ctx, BACKFILL, ATTRITION, ctx.config.models.backfill)
+
+
+def backfill_transfer(state: SimulationState, ctx: StepContext) -> DomainResult:
+    """Backfill for transfers out (`B_tr`), at the transfer rate where the run has one."""
+    models = ctx.config.models
+    model = models.backfill if models.backfill_transfer is None else models.backfill_transfer
+    return _backfill(state, ctx, BACKFILL_TRANSFER, TRANSFERS, model)
 
 
 # --- external fill ----------------------------------------------------------------------------
@@ -322,12 +366,15 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
     )
 
 
-#: The step's domains, in order. The order is behavior: backfill reads this step's departures,
-#: fills can fill this step's backfills, and growth needs the settled ledger.
+#: The step's sampled domains, in order. The order is behavior: backfill reads this step's
+#: departures, fills can fill this step's backfills, and growth needs the settled ledger.
+#: Backfill registers twice: for departures, and for transfers out, which transfer matching
+#: (M4.12) records.
 DOMAINS: Final[tuple[tuple[str, Handler], ...]] = (
     (ATTRITION, attrition),
     (BACKFILL, backfill),
     (EXTERNAL_FILL, external_fill),
     (CANCELLATION, cancellation),
+    (BACKFILL_TRANSFER, backfill_transfer),
     (GROWTH, growth),
 )

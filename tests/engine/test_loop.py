@@ -14,6 +14,7 @@ from hcsim.engine.apply import apply
 from hcsim.engine.config import AwardSettings, DomainModels, ForecastScope, SimulationConfig
 from hcsim.engine.domains import (
     ATTRITION,
+    Departures,
     StepContext,
     backfill,
     cancellation,
@@ -216,7 +217,8 @@ def test_backfill_copies_the_departed_role_and_respects_the_headroom() -> None:
         guidance=guidance({"requisitions_opened": {"CC-01": 2.0}}),
     )
     ctx = context(state, cfg)
-    ctx.departures.append(state.live_employees[[0, 1, 2, 3, 30, 31]].copy())
+    departed = state.live_employees[[0, 1, 2, 3, 30, 31]].copy()
+    ctx.departures.append(Departures(ATTRITION, departed, np.zeros(6, dtype=bool)))
     state.category_ledger = {"requisitions_opened": np.array([1])}  # one of two already used
     result = backfill(state, ctx)
     rows = result.openings.append
