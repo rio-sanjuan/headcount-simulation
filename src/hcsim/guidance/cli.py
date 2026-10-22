@@ -16,6 +16,7 @@ from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.divergence import against_measures
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
+from hcsim.guidance.ladder import BLOCK, DRAWS, MARGIN, LadderError, markdown, run_ladder, score
 from hcsim.guidance.pipeline import run
 from hcsim.guidance.realized import RealizedError, realized
 from hcsim.guidance.report import write_report
@@ -53,12 +54,29 @@ def main(argv: Sequence[str]) -> int:
         help="write the artifact even where it diverges from the guidance measures beyond "
         "what's declared",
     )
+    study = commands.add_parser(
+        "ladder", help="fit the ladder's arms through a cutoff, and score them on the year after"
+    )
+    study.add_argument("--world", type=Path, required=True, help="the world's DuckDB file")
+    study.add_argument("--out", type=Path, required=True, help="the directory to write")
+    study.add_argument(
+        "--cutoff", help="the last month the arms see, YYYY-MM; by default a year before the end"
+    )
+    study.add_argument("--grouping", default="org_level1", help=f"one of {', '.join(GROUPINGS)}")
+    study.add_argument(
+        "--margin", type=float, default=MARGIN, help="the share a richer arm's WAPE must fall by"
+    )
+    study.add_argument("--block", type=int, default=BLOCK, help="the bootstrap's block, in months")
+    study.add_argument("--draws", type=int, default=DRAWS, help="the bootstrap's draws")
+    study.add_argument("--seed", type=int, default=0, help="the bootstrap's seed")
     args = parser.parse_args(list(argv))
 
     if not args.world.is_file():
         parser.error(f"no world at {args.world}")
     if args.command == "realized":
         return _realized(parser, args)
+    if args.command == "ladder":
+        return _ladder(parser, args)
     try:
         base = GuidanceConfig.load(args.config) if args.config else GuidanceConfig()
         overrides = {"horizon": args.horizon, "grouping": args.grouping}
@@ -117,5 +135,32 @@ def _realized(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         f"{report['groups']} groups, "
         + ("within" if comparison.within else "outside")
         + " the declared divergences"
+    )
+    return 0
+
+
+def _ladder(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    cutoff = None
+    if args.cutoff is not None:
+        try:
+            cutoff = pd.Period(dt.datetime.strptime(args.cutoff, "%Y-%m"), "M")
+        except ValueError:
+            parser.error(f"--cutoff must be a month, YYYY-MM, not {args.cutoff!r}")
+    with duckdb.connect(str(args.world), read_only=True) as con:
+        try:
+            ladder = run_ladder(con, cutoff, args.grouping)
+            card = score(ladder, args.margin, args.block, args.draws, seed=args.seed)
+        except (LadderError, IngestionError, PipelineError) as error:
+            parser.error(str(error))
+    args.out.mkdir(parents=True, exist_ok=True)
+    ladder.frame().astype({"month": str}).to_csv(args.out / "forecasts.csv", index=False)
+    card.frame().to_csv(args.out / "scores.csv", index=False)
+    (args.out / "ladder.md").write_text(markdown(ladder, card))
+    selected = {s.value: arm for s, arm in card.selected.items()}
+    report = {"cutoff": str(ladder.cutoff), "grouping": ladder.grouping, "selected": selected}
+    (args.out / "report.json").write_text(json.dumps(report, indent=2))
+    print(
+        f"scored {len(ladder.runs)} arms through {ladder.cutoff}: "
+        + ", ".join(f"{s} {a}" for s, a in selected.items())
     )
     return 0
