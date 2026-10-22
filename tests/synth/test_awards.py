@@ -262,3 +262,15 @@ def test_holder_links_follow_the_holder_from_grant_to_settlement(small_world: Wo
 def test_bad_executive_and_offline_settings_are_refused(grants: GrantTruth, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         WorldConfig(grants=grants)
+
+
+@pytest.mark.parametrize(
+    ("grants", "message"),
+    [
+        (GrantTruth(forfeiture_prior=0.7), "forfeiture estimates need"),
+        (GrantTruth(forfeiture_credibility_years=0.0), "forfeiture_credibility_years"),
+    ],
+)
+def test_bad_forfeiture_settings_are_refused(grants: GrantTruth, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(grants=grants)

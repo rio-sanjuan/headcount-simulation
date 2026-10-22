@@ -404,8 +404,12 @@ def generate_world(config: WorldConfig) -> World:
         grant_rng,
     )
     world.tables.update(equity_tables)
+    estimates = awards.forfeiture_estimates(
+        config, equity_tables["equity_award"], equity_tables["equity_vest"]
+    )
+    world.tables["equity_forfeiture_estimate"] = estimates
     world.tables["equity_expense"] = awards.reference_ledger(
-        equity_tables["equity_award"], equity_tables["equity_vest"], ends
+        config, equity_tables["equity_award"], equity_tables["equity_vest"], estimates, ends
     )
     world.truth = {
         "generator_version": GENERATOR_VERSION,
