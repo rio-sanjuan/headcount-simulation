@@ -10,7 +10,7 @@ import numpy as np
 from hcsim.model.ml.arms import DEFAULT_MATRIX
 from hcsim.model.ml.classifiers import LevelOnlyModel
 from hcsim.model.ml.entity import ConstantModel
-from hcsim.model.ml.generative import ConditionalCategorical
+from hcsim.model.ml.generative import ConditionalCategorical, EmpiricalAttributeGenerator
 from hcsim.model.ml.group import NegativeBinomialGrowthModel
 from hcsim.model.ml.loader import Probe, conformance, load_models, probe
 from hcsim.model.ml.persistence import save_model
@@ -139,3 +139,28 @@ def test_probes_check_shape_and_range() -> None:
     contexts = Probe(contexts=np.zeros((2, 1), np.int64), n_categories=3)
     assert probe(BadDraws(np.zeros(1)), "generator", contexts) == ["drew (1,) for 2 contexts"]
     assert probe(BadDraws(np.array([0, 5])), "generator", contexts) == ["outcomes must lie in 0..2"]
+
+
+def test_a_generator_of_whole_roles_draws_one_per_cost_center() -> None:
+    roles = np.array([[0, 1, 2, 0, 0, 1], [1, 0, 1, 1, 1, 0]], dtype=np.int64)
+    generator = EmpiricalAttributeGenerator(min_rows=1).fit(np.array([0, 1]), roles)
+    contexts = np.array([[0, 5], [1, 5], [7, 5]])
+    assert probe(generator, "generator", Probe(contexts=contexts, n_categories=3)) == []
+    # Its job family must lie within the probe's categories.
+    assert probe(generator, "generator", Probe(contexts=contexts, n_categories=2)) == [
+        "roles must carry codes, with a job family in 0..1"
+    ]
+    np.testing.assert_allclose(generator.distribution(0, 2, 3), [0, 0, 1])
+    np.testing.assert_allclose(generator.distribution(7, 2, 3), [0, 0.5, 0.5])
+
+
+def test_a_generator_of_roles_of_the_wrong_width_fails_its_probe() -> None:
+    class Narrow(EmpiricalAttributeGenerator):
+        def sample(self, cost_center: int, n: int, rng: np.random.Generator) -> np.ndarray:
+            return np.zeros((n, 2), dtype=np.int64)
+
+    narrow = Narrow().fit(np.zeros(1, np.int64), np.zeros((1, 6), np.int64))
+    contexts = np.array([[0], [0]])
+    assert probe(narrow, "generator", Probe(contexts=contexts, n_categories=3)) == [
+        "drew (2, 2) for 2 contexts"
+    ]

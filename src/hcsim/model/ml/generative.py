@@ -69,6 +69,18 @@ class EmpiricalAttributeGenerator:
         source = self._by_group.get(int(cost_center), self._pooled)
         return source[rng.integers(len(source), size=n)]
 
+    def distribution(
+        self, cost_center: int, attribute: int, n_categories: int
+    ) -> NDArray[np.float64]:
+        """The share of each code of one attribute, `attribute` an index into ATTRIBUTES,
+        among the rows a requisition in `cost_center` draws from."""
+        if self._pooled is None:
+            raise ModelNotFittedError("fit the generator first")
+        source = self._by_group.get(int(cost_center), self._pooled)
+        counts = np.bincount(source[:, attribute], minlength=n_categories).astype(np.float64)
+        result: NDArray[np.float64] = counts / counts.sum()
+        return result
+
     def covers(self, cost_center: int) -> bool:
         """Whether `cost_center` draws from its own rows rather than the pooled ones."""
         return int(cost_center) in self._by_group
@@ -112,6 +124,12 @@ class ConditionalCategorical:
                 cells[int(code)] = np.bincount(rows, minlength=self.n_categories).astype(np.float64)
             self._levels.append(cells)
         return self
+
+    @property
+    def n_levels(self) -> int:
+        """How many context levels the generator was fitted with."""
+        self._require()
+        return len(self._levels)
 
     def _require(self) -> NDArray[np.float64]:
         if self._global is None:
