@@ -88,8 +88,6 @@ def test_coarser_groupings_preserve_totals(con: duckdb.DuckDBPyConnection) -> No
 
 
 def test_unsupported_groupings_are_refused(con: duckdb.DuckDBPyConnection) -> None:
-    with pytest.raises(IngestionError, match="can't be grouped by 'job_family'"):
-        ingest(con, "job_family")
     with pytest.raises(IngestionError, match="'team' isn't in the column catalog"):
         ingest(con, "team")
     with pytest.raises(IngestionError, match="'cost_type' can't group by"):

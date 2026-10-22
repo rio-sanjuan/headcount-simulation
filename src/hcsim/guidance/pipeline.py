@@ -81,6 +81,7 @@ class Ingest:
             snapshot=str(series.snapshot),
             grouping=series.grouping,
             categories=[c.value for c in series.categories],
+            ungrouped=series.ungrouped,
             counted=[c.value for c in ingestion.counted(config.categories)],
         )
         return {"series": series}
