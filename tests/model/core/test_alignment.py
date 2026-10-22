@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -100,3 +103,70 @@ def test_bad_targets_report_every_problem() -> None:
     with pytest.raises(AlignmentError, match="at least one month") as error:
         AlignmentTarget((), M("2026-01", "M"), months=0, planned_depth=1)
     assert "at least one marginal" in str(error.value)
+
+
+# --- the manifest, files, and digest -------------------------------------------------------------
+
+
+def test_a_saved_target_loads_back_with_its_digest(tmp_path: Path) -> None:
+    target = AlignmentTarget(
+        plan().marginals, M("2026-01", "M"), 12, 6, normalization={"duplicates_summed": 3}
+    )
+    target.save(tmp_path / "plan")
+    manifest = json.loads((tmp_path / "plan" / "manifest.json").read_text())
+    assert manifest["digest"] == target.digest()
+    assert manifest["normalization"] == {"duplicates_summed": 3}
+    assert manifest["marginals"] == [
+        {"grouping": "cost_center", "file": "targets_cost_center.csv", "rows": 3}
+    ]
+    rows = (tmp_path / "plan" / "targets_cost_center.csv").read_text().splitlines()
+    assert rows[0] == "group,month,target,band"
+    assert "CC-02,2026-06,40,5" in rows
+    loaded = AlignmentTarget.load(tmp_path / "plan")
+    assert loaded.digest() == target.digest()
+    assert dict(loaded.normalization) == {"duplicates_summed": 3}
+    np.testing.assert_array_equal(loaded.path("cost_center"), target.path("cost_center"))
+
+
+def test_the_digest_is_the_content_in_any_group_order() -> None:
+    a = marginal("cost_center", ["CC-01", "CC-02"], ["2026-03"], [[1.0], [2.0]])
+    b = marginal("cost_center", ["CC-02", "CC-01"], ["2026-03"], [[2.0], [1.0]])
+    one = AlignmentTarget((a,), M("2026-01", "M"), 6, 3)
+    two = AlignmentTarget((b,), M("2026-01", "M"), 6, 3, normalization={"excluded": 1})
+    assert one.digest() == two.digest()  # how it was built doesn't change what it is
+    assert one.digest().startswith("at1-")
+    other = AlignmentTarget((a,), M("2026-01", "M"), 6, 4)
+    assert other.digest() != one.digest()
+
+
+def test_loading_refuses_a_target_that_doesn_t_hold(tmp_path: Path) -> None:
+    with pytest.raises(AlignmentError, match="no alignment target at"):
+        AlignmentTarget.load(tmp_path / "none")
+    plan().save(tmp_path / "plan")
+    manifest_path = tmp_path / "plan" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest_path.write_text(json.dumps(manifest | {"format_version": 9}))
+    with pytest.raises(AlignmentError, match="unsupported format_version 9"):
+        AlignmentTarget.load(tmp_path / "plan")
+    manifest_path.write_text(json.dumps(manifest | {"digest": "at1-0"}))
+    with pytest.raises(AlignmentError, match="doesn't match its recorded digest"):
+        AlignmentTarget.load(tmp_path / "plan")
+    manifest_path.write_text(json.dumps(manifest))
+    csv = tmp_path / "plan" / "targets_cost_center.csv"
+    lines = csv.read_text().splitlines()
+    csv.write_text("\n".join([*lines, lines[1]]) + "\n")
+    with pytest.raises(AlignmentError, match="repeats 1 cells"):
+        AlignmentTarget.load(tmp_path / "plan")
+    csv.write_text("group,month\nCC-01,2026-03\n")
+    with pytest.raises(AlignmentError, match="lacks columns \\['target'\\]"):
+        AlignmentTarget.load(tmp_path / "plan")
+
+
+def test_a_file_without_bands_reads_as_exact(tmp_path: Path) -> None:
+    exact = AlignmentTarget(
+        (marginal("org_level1", ["ORG-A"], ["2026-02"], [[10.0]]),), M("2026-01", "M"), 3, 2
+    )
+    exact.save(tmp_path / "x")
+    loaded = AlignmentTarget.load(tmp_path / "x")
+    assert loaded.marginal("org_level1").bands is None
+    assert loaded.marginal("org_level1").band_at(M("2026-02", "M")).tolist() == [0.0]
