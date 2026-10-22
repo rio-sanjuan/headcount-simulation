@@ -382,7 +382,11 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in ends]})
     comp, price, grant = config.compensation, config.prices, config.grants
     world.tables["comp_range"] = equity.compensation_ranges(
-        config.families, config.levels, config.locations, comp
+        config.families,
+        config.levels,
+        config.locations,
+        comp,
+        np.random.default_rng([config.seed, 257]),
     )
     world.tables["stock_price"] = equity.stock_prices(ends, price, price_rng)
     hires = _as_dates(txn[txn["trans_type"] == "HIRE"].astype({"job_code": str}), "event_date")
