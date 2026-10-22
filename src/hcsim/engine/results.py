@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -67,10 +68,12 @@ def _no_openings() -> RowChange:
 
 @dataclass(frozen=True)
 class Grant:
-    """An award for every employee the result appends. Handlers emit grants whatever the run's
-    scope; a headcount-only run sizes nothing."""
+    """An award for each employee the result appends, as a hire's is, or each it writes, as a
+    promotion's is. Handlers emit grants whatever the run's scope. A run sizes a grant only when
+    its award settings have a sizer for the award type, and counts the rest as unsized."""
 
     award_type: str
+    rows: Literal["appended", "written"] = "appended"
 
 
 @dataclass(frozen=True)

@@ -41,10 +41,16 @@ from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
-from hcsim.model.core.schema import COST_CENTER, JOB_LEVEL, SchemaError, SimulationSchema
+from hcsim.model.core.schema import (
+    AWARD_TYPE,
+    COST_CENTER,
+    JOB_LEVEL,
+    SchemaError,
+    SimulationSchema,
+)
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.generative import EmpiricalAttributeGenerator
-from hcsim.model.ml.markov import MarkovModel
+from hcsim.model.ml.markov import MarkovModel, SimilarityMatrix
 
 
 class ConfigError(ValueError):
@@ -159,6 +165,8 @@ class DomainModels:
     backfill_transfer: GroupRateModel | EntityModel | None = None
     #: Scores employee rows for promotion. Without it, only known promotions happen.
     promotion: EntityModel | None = None
+    #: How alike job families are, for a promotion that changes family.
+    family_similarity: SimilarityMatrix | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -190,9 +198,12 @@ MODEL_FIELDS: Final = (
     "performance",
     "backfill_transfer",
     "promotion",
+    "family_similarity",
 )
 #: The model fields a run may leave empty.
-OPTIONAL_MODELS: Final = frozenset({"performance", "backfill_transfer", "promotion"})
+OPTIONAL_MODELS: Final = frozenset(
+    {"performance", "backfill_transfer", "promotion", "family_similarity"}
+)
 #: The artifact domain a model field loads from, where it isn't the field's own name.
 ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
 
@@ -204,6 +215,15 @@ class AwardSettings:
     new_hire: NewHireGapFill
     price_model: StockPriceModel
     expense: ExpenseConfig = field(default_factory=ExpenseConfig)
+    #: Sizes promotion grants. Without it, promotions emit grants nobody sizes.
+    promotion: NewHireGapFill | None = None
+
+    def sizer(self, award_type: str) -> NewHireGapFill | None:
+        """The sizer for an award type, if the run has one."""
+        sizers = {self.new_hire.award_type: self.new_hire}
+        if self.promotion is not None:
+            sizers[self.promotion.award_type] = self.promotion
+        return sizers.get(award_type)
 
 
 @dataclass(frozen=True)
@@ -269,6 +289,9 @@ class SimulationConfig:
     )
     promotion_gate_probability: float = setting(
         "promotion", 1.0, "the chance a cycle month's promotions happen at all"
+    )
+    promotion_family_change_probability: float = setting(
+        "promotion", 0.0, "the chance a sampled promotion also moves to a similar job family"
     )
     # pending starts
     pending_starts_staleness_days: int = setting(
@@ -444,6 +467,14 @@ class SimulationConfig:
                 ),
             ),
             (
+                ("promotion_family_change_probability",),
+                lambda: self._check_family_change(),
+            ),
+            (
+                ("forecast_scope",),
+                lambda: self._check_promotion_sizer(),
+            ),
+            (
                 ("pending_starts_staleness_days",),
                 lambda: _when(
                     self.pending_starts_staleness_days < 0,
@@ -468,6 +499,28 @@ class SimulationConfig:
         for needs, check in checks:
             if set(needs) <= typed:
                 problems += check()
+        return problems
+
+    def _check_family_change(self) -> list[str]:
+        chance = self.promotion_family_change_probability
+        if not 0.0 <= chance <= 1.0:
+            return ["promotion_family_change_probability must lie in [0, 1]"]
+        if chance > 0 and self.models.family_similarity is None:
+            return ["a promotion that changes family needs a family_similarity model"]
+        return []
+
+    def _check_promotion_sizer(self) -> list[str]:
+        sizer = None if self.awards is None else self.awards.promotion
+        if sizer is None:
+            return []
+        problems = []
+        if sizer.award_type != "promotion":
+            problems.append(f"the promotion sizer grants {sizer.award_type!r}, not 'promotion'")
+        elif (
+            AWARD_TYPE not in self.schema.vocabularies
+            or "promotion" not in self.schema.vocabulary(AWARD_TYPE)
+        ):
+            problems.append("sizing promotion grants needs 'promotion' among the award types")
         return problems
 
     def _check_backfill_models(self) -> list[str]:
