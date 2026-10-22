@@ -1,7 +1,8 @@
 """Measures: how a guidance series is counted from the warehouse.
 
-Each measure renders one SQL query that yields `(month, cost_center, value)`: the month as the
-first of the month, the leaf cost center, and the count.
+Each measure renders one SQL query that yields `(month, cost_center, job_family, job_level,
+location, company, value)`: the month as the first of the month, the attributes a count can be
+grouped by (`KEYS`), and the count.
 
 A `TransTypeMeasure` sums the aggregate fact's rows for a set of codes, each with a sign, over
 regular accounts. Net hires, for instance, are `HIRE` less `HIRE_REV`, so a hire recorded in
@@ -26,6 +27,11 @@ from hcsim.model.sql.render import Template, literal
 
 #: Regular employees only: contingent and temporary workers book to their own accounts.
 REGULAR_ACCOUNTS: Final = "SELECT account FROM dim_account WHERE account_group = 'regular'"
+#: The attributes every measure's rows carry, beside the month: the leaf cost center, and the
+#: job and place a series can be grouped by.
+KEYS: Final = ("cost_center", "job_family", "job_level", "location", "company")
+#: The same attributes as each measure selects them, past the cost center.
+_ATTRIBUTES: Final = "job_family, job_level, location, company"
 
 
 class MeasureError(ValueError):
@@ -35,7 +41,7 @@ class MeasureError(ValueError):
 _FLOW: Final = Template(
     """
     SELECT date_trunc('month', CAST(period AS DATE)) AS month, {{cost_center}} AS cost_center,
-           sum({{expression}}) AS value
+           {{attributes}}, sum({{expression}}) AS value
     FROM workforce_agg
     WHERE trans_type IN ({{codes}})
       AND account IN ({{regular}})
@@ -96,6 +102,7 @@ class TransTypeMeasure:
             codes=codes,
             regular=REGULAR_ACCOUNTS,
             cost_center=cost_center,
+            attributes=_ATTRIBUTES,
         )
 
 
@@ -124,7 +131,7 @@ def _identifier(name: str) -> str:
 
 
 def consolidated_sql(measures: Sequence[Measure], columns: Mapping[str, str] | None = None) -> str:
-    """One query for every measure, yielding `(month, cost_center, measure, value)`.
+    """One query for every measure, yielding its `KEYS` with the month, measure, and value.
 
     The transaction measures share one pass over the aggregate fact, a column each, unpivoted
     to rows; each template measure runs its own SQL beside them. `columns` names each table's
@@ -139,6 +146,7 @@ def consolidated_sql(measures: Sequence[Measure], columns: Mapping[str, str] | N
     if not measures:
         raise MeasureError("no measures to count")
     flows = [m for m in measures if isinstance(m, TransTypeMeasure)]
+    keys = ", ".join(KEYS)
     parts = []
     if flows:
         codes = ", ".join(literal(c.value) for c in sorted(set().union(*(m.codes for m in flows))))
@@ -146,11 +154,11 @@ def consolidated_sql(measures: Sequence[Measure], columns: Mapping[str, str] | N
         cost_center = resolved.get("workforce_agg", "cost_center")
         parts.append(
             f"""
-            SELECT month, cost_center, measure, CAST(value AS DOUBLE) AS value
+            SELECT month, {keys}, measure, CAST(value AS DOUBLE) AS value
             FROM (
                 UNPIVOT (
                     SELECT date_trunc('month', CAST(period AS DATE)) AS month,
-                           {cost_center} AS cost_center, {sums}
+                           {cost_center} AS cost_center, {_ATTRIBUTES}, {sums}
                     FROM workforce_agg
                     WHERE trans_type IN ({codes}) AND account IN ({REGULAR_ACCOUNTS})
                     GROUP BY ALL
@@ -163,7 +171,7 @@ def consolidated_sql(measures: Sequence[Measure], columns: Mapping[str, str] | N
     for m in measures:
         if isinstance(m, TemplateMeasure):
             parts.append(
-                f"SELECT month, cost_center, {literal(m.name)} AS measure, "
+                f"SELECT month, {keys}, {literal(m.name)} AS measure, "
                 f"CAST(value AS DOUBLE) AS value "
                 f"FROM ({m.sql(resolved.get(m.table, 'cost_center'))})"
             )
@@ -193,10 +201,13 @@ REQUISITIONS_OPENED: Final = TemplateMeasure(
     Template(
         f"""
         SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
-               sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
+               {_ATTRIBUTES}, sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
         FROM (
             SELECT req_id, min(opened_date) AS opened_date,
-                   any_value({{{{cost_center}}}}) AS cost_center, max(openings) AS openings
+                   any_value({{{{cost_center}}}}) AS cost_center,
+                   any_value(job_family) AS job_family, any_value(job_level) AS job_level,
+                   any_value(location) AS location, any_value(company) AS company,
+                   max(openings) AS openings
             FROM req_interval GROUP BY req_id
         )
         GROUP BY ALL
@@ -213,11 +224,13 @@ REQUISITIONS_CLOSED_UNFILLED: Final = TemplateMeasure(
     Template(
         """
         SELECT date_trunc('month', CAST(closed_date AS DATE)) AS month, cost_center,
-               count(*) AS value
+               job_family, job_level, location, company, count(*) AS value
         FROM (
             SELECT req_id, arg_max(close_reason, interval_number) AS close_reason,
                    max(closed_date) AS closed_date,
-                   any_value({{cost_center}}) AS cost_center
+                   any_value({{cost_center}}) AS cost_center, any_value(job_family) AS job_family,
+                   any_value(job_level) AS job_level, any_value(location) AS location,
+                   any_value(company) AS company
             FROM req_interval GROUP BY req_id
         )
         WHERE close_reason = 'unfilled'

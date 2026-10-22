@@ -24,7 +24,16 @@ import duckdb
 import pandas as pd
 
 #: The tables ingestion reads.
-TABLES: Final = ("workforce_agg", "dim_trans_type", "dim_account", "dim_org", "req_interval")
+TABLES: Final = (
+    "workforce_agg",
+    "req_interval",
+    "dim_trans_type",
+    "dim_account",
+    "dim_org",
+    "dim_job",
+    "dim_location",
+    "dim_company",
+)
 #: The file formats a `FileSource` reads, by suffix.
 FORMATS: Final = {".parquet": "read_parquet", ".csv": "read_csv_auto"}
 

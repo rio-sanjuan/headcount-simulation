@@ -99,7 +99,7 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
                 "models": ["seasonal_naive", "prophet", "seasonal_naive"],
                 "combination": {"method": "median"},
                 "reconciliation": {"method": "mint"},
-                "grouping": "job_family",
+                "grouping": "cost_type",
             }
         )
     lines = str(error.value).splitlines()
@@ -109,8 +109,7 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
         "  - models: each model is named once; ['seasonal_naive'] repeat",
         "  - combination.method: unknown combination method 'median'; known: inverse_error",
         "  - reconciliation.method: unknown reconciliation method 'mint'; known: greedy",
-        "  - grouping: series are counted per cost center, so they can't be grouped by "
-        "'job_family'; supported: cost_center, org_level<k>, TOPLINE",
+        "  - grouping: 'cost_type' can't group by; it permits filter, population",
     ]
 
 

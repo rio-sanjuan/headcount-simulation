@@ -38,10 +38,31 @@ GROUP: Final = "group"
 CATEGORY: Final = "category"
 VALUE: Final = "value"
 
-#: Groupings the series support: the leaf cost center, any org level from the column catalog
-#: (`org_level1` to the deepest), and the whole population. Series are counted per cost
-#: center, so nothing finer or unrelated to the org can group them.
-GROUPINGS: Final = ("cost_center", "org_level<k>", TOPLINE)
+#: Groupings the series support: every column the column catalog lets a series group by, and
+#: the whole population. Each resolves on the measures' rows: the cost center and its org
+#: levels (`org_level1` to the deepest), the job family and level, the tech indicator, the
+#: location and its country and region, and the company and its planning rollup.
+_GROUP_SQL: Final = {
+    "cost_center": "m.cost_center",
+    "job_family": "m.job_family",
+    "job_level": "CAST(m.job_level AS VARCHAR)",
+    "tech_indicator": "j.tech_indicator",
+    "location": "m.location",
+    "country": "l.country",
+    "region": "l.region",
+    "company": "m.company",
+    "planning_company": "c.planning_company",
+}
+GROUPINGS: Final = (*_GROUP_SQL, "org_level<k>", TOPLINE)
+#: The dimensions a grouping reads, joined to the measures' rows on their keys. The tech
+#: indicator belongs to a job, which the aggregate fact names by family and level.
+_JOINS: Final = """
+    LEFT JOIN dim_org o USING (cost_center)
+    LEFT JOIN dim_location l USING (location)
+    LEFT JOIN dim_company c USING (company)
+    LEFT JOIN (SELECT DISTINCT job_family, job_level, tech_indicator FROM dim_job) j
+        USING (job_family, job_level)
+"""
 
 # Each counted category is one measure, a SQL query yielding (month, cost_center, value).
 # Workforce measures read the pre-summed fact, `workforce_agg`, as the data contract intends
@@ -80,6 +101,8 @@ class Series:
     snapshot: pd.Period
     #: The months in which any measure had any row, whatever its count.
     observed: tuple[pd.Period, ...] = ()
+    #: The absolute count on rows no group took, left out of every series.
+    ungrouped: float = 0.0
 
     @property
     def groups(self) -> list[str]:
@@ -110,11 +133,8 @@ def grouping_problems(grouping: str) -> list[str]:
         column = require(grouping, Use.GROUP)
     except CatalogError as error:
         return [str(error)]
-    if column.name != "cost_center" and not is_org_level(column.name):
-        return [
-            f"series are counted per cost center, so they can't be grouped by {grouping!r}; "
-            f"supported: {', '.join(GROUPINGS)}"
-        ]
+    if column.name not in _GROUP_SQL and not is_org_level(column.name):  # pragma: no cover
+        return [f"series can't be grouped by {grouping!r}; supported: {', '.join(GROUPINGS)}"]
     return []
 
 
@@ -124,13 +144,22 @@ def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
     found = grouping_problems(grouping)
     if found:
         raise IngestionError(found[0])
-    column = require(grouping, Use.GROUP)
-    if column.name == "cost_center":
-        return "m.cost_center"
+    if grouping in _GROUP_SQL:
+        if grouping == "tech_indicator":
+            (ambiguous,) = con.execute(
+                "SELECT count(*) FROM (SELECT job_family, job_level FROM dim_job "
+                "GROUP BY ALL HAVING count(DISTINCT tech_indicator) > 1)"
+            ).fetchone() or (0,)
+            if ambiguous:
+                raise IngestionError(
+                    f"dim_job gives {ambiguous} job family and level pair(s) more than one tech "
+                    "indicator, so the aggregate fact's rows can't be grouped by it"
+                )
+        return _GROUP_SQL[grouping]
     levels = {c[0] for c in con.execute("DESCRIBE dim_org").fetchall()}
-    if column.name not in levels:
-        raise IngestionError(f"dim_org has no {column.name!r}")
-    return column.expression
+    if grouping not in levels:
+        raise IngestionError(f"dim_org has no {grouping!r}")
+    return f"o.{grouping}"
 
 
 def problems(
@@ -187,12 +216,15 @@ def ingest(
         f"""
         SELECT m.month, {group} AS "group", m.measure AS category, sum(m.value)::DOUBLE AS value
         FROM ({sql}) m
-        LEFT JOIN dim_org o USING (cost_center)
+        {_JOINS}
         GROUP BY ALL
         """
     ).df()
     if raw.empty:
         raise IngestionError("the warehouse holds no workforce or requisition data")
+    # A row whose attribute names no group, such as a location missing from its dimension, is
+    # left out of every series; the count it carried is reported.
+    ungrouped = float(raw.loc[raw["group"].isna(), VALUE].abs().sum())
     names = {m.name: c.value for c, m in measures.items()}
     raw[CATEGORY] = raw[CATEGORY].map(names)
     raw[MONTH] = pd.to_datetime(raw[MONTH]).dt.to_period("M")
@@ -202,6 +234,10 @@ def ingest(
     observed = tuple(sorted(m for m in raw[MONTH].unique() if m <= snapshot))
     months = pd.period_range(raw[MONTH].min(), snapshot, freq="M")
     groups = sorted(raw["group"].dropna().unique())
+    if not groups:
+        raise IngestionError(
+            f"no row falls in any {grouping!r} group: its dimension names none of their keys"
+        )
     grid = pd.MultiIndex.from_product(
         [months, groups, [c.value for c in measures]], names=[MONTH, GROUP, CATEGORY]
     )
@@ -213,7 +249,7 @@ def ingest(
         .reset_index()
     )
     frame = _compose(frame, categories)
-    return Series(frame, grouping, snapshot, observed)
+    return Series(frame, grouping, snapshot, observed, ungrouped)
 
 
 def _compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.DataFrame:

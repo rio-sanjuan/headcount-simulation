@@ -23,7 +23,7 @@ from hcsim.guidance.sources import (
     missing_tables,
 )
 from hcsim.model.core.contract import CONTRACT_TABLE, role_column
-from hcsim.model.core.measures import CATEGORY_MEASURES, MeasureError, consolidated_sql
+from hcsim.model.core.measures import CATEGORY_MEASURES, KEYS, MeasureError, consolidated_sql
 from hcsim.synth.config import preset
 from hcsim.synth.export import export_parquet
 from hcsim.synth.world import generate_world, write_world
@@ -61,7 +61,7 @@ def tables_of(con: duckdb.DuckDBPyConnection) -> dict[str, pd.DataFrame]:
 
 def long_form(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.assign(month=pd.to_datetime(frame["month"]), value=frame["value"].astype(float))
-    return frame.sort_values(["measure", "month", "cost_center"], ignore_index=True)
+    return frame.sort_values(["measure", "month", *KEYS], ignore_index=True)
 
 
 def test_one_query_counts_what_each_measure_counts_on_its_own(
@@ -73,7 +73,7 @@ def test_one_query_counts_what_each_measure_counts_on_its_own(
     alone = []
     for m in measures:
         frame = con.execute(m.sql(columns[m.table])).df().assign(measure=m.name)
-        alone.append(frame[["month", "cost_center", "measure", "value"]])
+        alone.append(frame[["month", *KEYS, "measure", "value"]])
     expected = long_form(pd.concat(alone, ignore_index=True))
     # One pass counts every measure for each month and cost center any code touched, so it
     # carries zeros a measure's own query leaves out.
@@ -123,11 +123,11 @@ def test_the_pipeline_runs_on_any_source(world: Path, exported: Path) -> None:
 def test_a_source_missing_tables_is_refused_naming_them(con: duckdb.DuckDBPyConnection) -> None:
     partial = {k: v for k, v in tables_of(con).items() if k not in ("dim_org", "req_interval")}
     with FrameSource(partial).connect() as connection:
-        assert missing_tables(connection) == ["dim_org", "req_interval"]
+        assert missing_tables(connection) == ["req_interval", "dim_org"]
         assert problems(connection) == [
-            "the source has no dim_org, req_interval: ingestion reads " + ", ".join(TABLES)
+            "the source has no req_interval, dim_org: ingestion reads " + ", ".join(TABLES)
         ]
-    with pytest.raises(PipelineError, match="the source has no dim_org, req_interval"):
+    with pytest.raises(PipelineError, match="the source has no req_interval, dim_org"):
         run(FrameSource(partial))
 
 

@@ -174,9 +174,9 @@ def test_guidance_fit_refuses_a_grouping_the_series_can_t_take(
 ) -> None:
     args = ["guidance", "fit", "--world", str(world_path), "--out", str(tmp_path / "a")]
     with pytest.raises(SystemExit) as stop:
-        hcsim([*args, "--grouping", "job_family"])
+        hcsim([*args, "--grouping", "cost_type"])
     assert stop.value.code == 2
-    assert "can't be grouped by 'job_family'" in capsys.readouterr().err
+    assert "'cost_type' can't group by" in capsys.readouterr().err
 
 
 def test_guidance_fit_reads_a_configuration_and_its_flags_override_it(
