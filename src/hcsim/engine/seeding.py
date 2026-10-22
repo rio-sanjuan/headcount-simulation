@@ -45,6 +45,7 @@ import pandas as pd
 
 from hcsim.engine.config import SimulationConfig
 from hcsim.engine.state import SimulationState
+from hcsim.financial.prices import CustomPrice, StockPriceModel
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.tracker import HolderLedger
 from hcsim.model.core.contract import role_column
@@ -382,6 +383,31 @@ def executive_min_level(con: duckdb.DuckDBPyConnection) -> int | None:
 
 def range_table_from_world(con: duckdb.DuckDBPyConnection, schema: SimulationSchema) -> RangeTable:
     return RangeTable.load(con, schema)
+
+
+def realized_price(
+    con: duckdb.DuckDBPyConnection,
+    run_date: dt.date,
+    extend_with: StockPriceModel | None = None,
+) -> CustomPrice:
+    """The realized price path from the run's start: step k's price is the month-end close
+    before step k, from the close before the run, its opening price, through the warehouse's
+    last month-end. After that `extend_with`, which must open at the last close, continues it."""
+    closes = con.execute(
+        "SELECT close FROM stock_price WHERE month_end >= ? ORDER BY month_end",
+        [opening_month_end(con, run_date)],
+    ).fetchall()
+    return CustomPrice([float(c[0]) for c in closes], extend_with)
+
+
+def opening_month_end(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> dt.date:
+    """The last month-end with a close before the run starts."""
+    (month_end,) = con.execute(
+        "SELECT max(month_end) FROM stock_price WHERE month_end < ?", [run_date]
+    ).fetchone() or (None,)
+    if month_end is None:
+        raise SeedingError(f"no stock price before {run_date}")
+    return dt.date.fromisoformat(str(month_end)[:10])
 
 
 def opening_price(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> float:

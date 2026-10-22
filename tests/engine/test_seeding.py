@@ -14,10 +14,12 @@ from hcsim.engine.seeding import (
     SeedingError,
     opening_price,
     range_table_from_world,
+    realized_price,
     schema_from_world,
     seed_state,
     snapshot_before,
 )
+from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER, JOB_LEVEL, REQ_TYPE, SimulationSchema
 from hcsim.synth.config import preset
@@ -126,3 +128,20 @@ def test_a_run_before_the_world_starts_is_refused(con: duckdb.DuckDBPyConnection
     with pytest.raises(SeedingError, match="no stock price"):
         opening_price(con, dt.date(2020, 1, 1))
     assert np.isfinite(opening_price(con, RUN))
+
+
+def test_the_realized_price_path_runs_from_the_opening_close_to_the_last(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    closes = con.execute(
+        "SELECT close FROM stock_price WHERE month_end >= ? ORDER BY month_end",
+        [dt.date(RUN.year, RUN.month, 1) - dt.timedelta(days=1)],
+    ).fetchall()
+    path = realized_price(con, RUN)
+    assert path.price == pytest.approx(opening_price(con, RUN))
+    assert list(path.path) == pytest.approx([c[0] for c in closes])
+    growth = AnnualGrowthPrice(float(closes[-1][0]), growth_rate=1.05)
+    extended = realized_price(con, RUN, growth)
+    for month in range(len(closes) + 3):
+        extended.step(month % 12 + 1)
+    assert extended.price > 0
