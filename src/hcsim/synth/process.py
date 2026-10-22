@@ -34,6 +34,7 @@ from hcsim.synth.config import WorldConfig, by_age
 from hcsim.synth.dates import MonthDays
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
+from hcsim.synth.offers import Offers, direct_hires
 from hcsim.synth.population import Roles, draw_roles
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
@@ -213,6 +214,7 @@ def simulate(
     promotions: PromotionProcess | None = None,
     movements: MovementProcess | None = None,
     programs: TerminationPrograms | None = None,
+    offers: Offers | None = None,
 ) -> dict[str, Any]:
     """Run the world over `month_ends`. The first month-end is the initial stock. Returns the
     random effects the run drew, for the truth manifest."""
@@ -333,21 +335,31 @@ def simulate(
         external = u < h_ext
         transfer = ~external & (u < h_ext + h_tr)
         conversion = ~external & ~transfer & (u < h_ext + h_tr + h_conv)
-        # External hires start on the start weekday; other fills fall on business days.
+        # Fills fall on business days. An external fill is an accepted offer, whose person
+        # starts later (see `offers`); without offers, they start the same day.
         earliest = book.column("interval_start")[row]
         dates = days.sample("business", len(row), rng, earliest)
-        dates[external] = days.sample("start", int(external.sum()), rng, earliest[external])
         fills = Fills()
-        hired = workforce.hire(book.roles(row[external]), dates[external])
+        if offers is not None:
+            hired = offers.make(
+                workforce, row[external], book.roles(row[external]), dates[external]
+            )
+        else:
+            hired = workforce.hire(book.roles(row[external]), dates[external])
         fills.add(row[external], dates[external], "filled_external", hired)
         _transfers(
             config, workforce, row[transfer], dates[transfer], book, m, rng, backfills, fills
         )
         _conversions(config, workforce, row[conversion], dates[conversion], book, rng, fills)
         fills.apply(book)
+        if offers is not None:
+            offers.start(workforce, book, month)
+            direct_hires(config, workforce, days, rng)
         # 4. Campus: openings on the schedule, and fills in the start months.
         campus_month(config, workforce, book, month, m, days, rng)
         workforce.snapshot(end)
+        if offers is not None:
+            offers.snapshot(end)
         if promotions is not None:
             promotions.accrue()
 

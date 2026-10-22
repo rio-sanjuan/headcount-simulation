@@ -34,7 +34,8 @@ def vacancies(world: World) -> pd.DataFrame:
 def linked(world: World) -> pd.DataFrame:
     """Each backfill joined to the vacancy it replaces, on the person and the day."""
     reqs = world.tables["req_interval"].astype({"req_type": str, "cost_center": str})
-    bf = reqs[reqs["req_type"] == "backfill"].assign(
+    first = reqs.drop_duplicates("req_id")  # a requisition's first interval, from its opening
+    bf = first[first["req_type"] == "backfill"].assign(
         employee_id=lambda f: f["backfill_of"].astype(int),
         day=lambda f: pd.to_datetime(f["opened_date"]),
     )
@@ -50,7 +51,7 @@ def test_every_backfill_names_the_vacancy_it_replaces(small_world: World) -> Non
     reqs = small_world.tables["req_interval"]
     assert reqs.loc[reqs["req_type"] == "backfill", "backfill_of"].notna().all()
     assert reqs.loc[reqs["req_type"] != "backfill", "backfill_of"].isna().all()
-    assert len(linked(small_world)) == (reqs["req_type"] == "backfill").sum()
+    assert len(linked(small_world)) == reqs.loc[reqs["req_type"] == "backfill", "req_id"].nunique()
 
 
 def test_backfills_open_with_the_probability_of_their_vacancy(small_world: World) -> None:
@@ -60,7 +61,8 @@ def test_backfills_open_with_the_probability_of_their_vacancy(small_world: World
     logit = np.log(truth.base_probability / (1 - truth.base_probability))
     z = logit + vac["cost_center"].map(effect) + vac["level"].map(truth.level_shift)
     p = 1 / (1 + np.exp(-z.to_numpy()))
-    observed = int((small_world.tables["req_interval"]["req_type"] == "backfill").sum())
+    reqs = small_world.tables["req_interval"]
+    observed = int(reqs.loc[reqs["req_type"] == "backfill", "req_id"].nunique())
     stat_check(observed, float(p.sum()), float(np.sqrt((p * (1 - p)).sum())), label="backfills")
 
 

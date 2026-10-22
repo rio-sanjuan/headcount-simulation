@@ -139,11 +139,23 @@ class Workforce:
             **now,
         )
 
-    def hire(self, roles: Roles, dates: NDArray[np.datetime64]) -> NDArray[np.int64]:
-        """Hire one person per role, on each date. Returns the new employee ids."""
-        n = len(dates)
+    def reserve_ids(self, n: int) -> NDArray[np.int64]:
+        """Ids for people who will join later, such as accepted offers."""
         ids = self.next_id + np.arange(n, dtype=np.int64)
         self.next_id += n
+        return ids
+
+    def hire(
+        self,
+        roles: Roles,
+        dates: NDArray[np.datetime64],
+        ids: NDArray[np.int64] | None = None,
+    ) -> NDArray[np.int64]:
+        """Hire one person per role, on each date, with reserved ids or new ones. Returns the
+        employee ids."""
+        n = len(dates)
+        if ids is None:
+            ids = self.reserve_ids(n)
         index = self.people.append(
             n, employee_id=ids, hire_date=dates, active=True, rating=-1, exit_month=-1, **roles
         )

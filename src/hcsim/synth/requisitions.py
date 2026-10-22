@@ -24,8 +24,10 @@ CLOSE_REASONS: Final = (
     "unfilled",
     "filled_conversion",
     "filled_campus",
+    "reopened",
 )
 OPEN: Final = -1
+REOPENED: Final = CLOSE_REASONS.index("reopened")
 UNFILLED: Final = CLOSE_REASONS.index("unfilled")
 INTERVAL_DTYPES: Final[dict[str, DTypeLike]] = {
     "req": np.int64,
@@ -138,6 +140,22 @@ class RequisitionBook:
             done = j[left == 0]
             self.reqs.column("closed_date")[done] = day[left == 0]
             self.reqs.column("close_reason")[done] = reasons[pick][left == 0]
+
+    def reopen(self, index: Index, dates: NDArray[np.datetime64]) -> None:
+        """Give back one opening per entry, as when an accepted offer never starts. A filled
+        requisition opens a new state interval; an open one ends its interval and starts the
+        next with one opening more. A requisition that exited unfilled stays closed: it was
+        cancelled, so there's nothing to give back to."""
+        for j, day in zip(index.tolist(), dates, strict=True):
+            if self.reqs.column("close_reason")[j] == UNFILLED:
+                continue
+            if self.reqs.column("close_reason")[j] == OPEN:
+                self._end_intervals(np.array([j]), np.array([day]), REOPENED, np.array([-1]))
+            else:
+                self.reqs.column("close_reason")[j] = OPEN
+                self.reqs.column("closed_date")[j] = np.datetime64("NaT", "D")
+            self.reqs.column("remaining")[j] += 1
+            self.reqs.column("interval_start")[j] = day
 
     def exit(self, index: Index, dates: NDArray[np.datetime64]) -> None:
         """Close requisitions unfilled, with every opening they still carry."""

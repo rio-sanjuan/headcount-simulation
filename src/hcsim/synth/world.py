@@ -22,6 +22,7 @@ from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
+from hcsim.synth.offers import PENDING_DTYPES, Offers
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
@@ -184,6 +185,26 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
     )
 
 
+def _pending_starts(offers: Offers, book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
+    """One row per accepted offer and month-end between the offer and the start."""
+    c = offers.pending.collect(PENDING_DTYPES)
+    o, config = offers.book.column, labels.config
+    k = c["offer"]
+    return pd.DataFrame(
+        {
+            "snapshot_date": labels.dates(c["snapshot_date"]),
+            "employee_id": o("employee_id")[k],
+            "req_id": book.column("req_id")[o("req")[k]],
+            "cost_center": labels.of(o("cost_center")[k], labels.cost_centers),
+            "job_code": labels.job(o("family")[k], o("level")[k], o("is_manager")[k]),
+            "location": labels.of(o("location")[k], config.locations),
+            "company": labels.of(o("company")[k], config.companies),
+            "offer_date": labels.dates(o("offer_date")[k]),
+            "start_date": labels.dates(o("start_date")[k]),
+        }
+    )
+
+
 def _ratings(ratings: RatingProcess, config: WorldConfig) -> pd.DataFrame:
     """One row per employee and calibration cycle, with the rating's label and rank."""
     c = ratings.log.collect(RATING_DTYPES)
@@ -206,7 +227,7 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(9)
+    streams = np.random.SeedSequence(config.seed).spawn(10)
     (
         population_rng,
         process_rng,
@@ -217,6 +238,7 @@ def generate_world(config: WorldConfig) -> World:
         promotion_rng,
         movement_rng,
         program_rng,
+        offer_rng,
     ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
@@ -237,6 +259,7 @@ def generate_world(config: WorldConfig) -> World:
     promotions = PromotionProcess(config, workforce, promotion_rng)
     movements = MovementProcess(config, workforce, org_of_cost_center, movement_rng)
     movements.seed(pd.Period(ends[0], freq="M"))
+    offers = Offers(config, offer_rng)
     process_truth = process.simulate(
         config,
         workforce,
@@ -248,6 +271,7 @@ def generate_world(config: WorldConfig) -> World:
         promotions,
         movements,
         TerminationPrograms(config, workforce, org_of_cost_center, program_rng),
+        offers,
     )
     plan: LatentPlan = process_truth.pop("plan")
     world.tables["truth_latent_plan"] = plan.frame(structure.cost_center_names(config))
@@ -256,6 +280,7 @@ def generate_world(config: WorldConfig) -> World:
     txn = _transactions(workforce, labels)
     world.tables["workforce_txn"] = txn
     world.tables["req_interval"] = _requisitions(book, labels)
+    world.tables["pending_start"] = _pending_starts(offers, book, labels)
     world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in ends]})
     comp, price, grant = config.compensation, config.prices, config.grants
     world.tables["comp_range"] = equity.compensation_ranges(
