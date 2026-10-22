@@ -7,7 +7,8 @@ A run names one artifact per domain. `load_models` loads each one and checks two
   model gives a rate per group (`GroupRateModel`) and draws counts, and a generator draws
   outcomes;
 - **a probe**: the model scores a small probe input, and its output has the right shape and is
-  finite: probabilities in [0, 1], non-negative counts, and category codes in range.
+  finite: probabilities in [0, 1], non-negative counts, and category codes in range. A
+  generator of whole roles draws a role for each context's cost center instead.
 
 Every problem is recorded against its domain instead of stopping the load, so one report names
 everything wrong with a run's models at once. A domain with problems loads no model.
@@ -23,8 +24,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.model.core.layouts import OpeningColumn
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.arms import ALGORITHMS, ArmMatrix
+from hcsim.model.ml.generative import ATTRIBUTES, EmpiricalAttributeGenerator
 from hcsim.model.ml.persistence import ArtifactError, ModelArtifact, load_model
 
 
@@ -96,6 +99,8 @@ def probe(model: Any, family: str, inputs: Probe) -> list[str]:
             return problems
         if inputs.contexts is None or inputs.n_categories is None:
             return ["a generator probe needs contexts and the number of categories"]
+        if isinstance(model, EmpiricalAttributeGenerator):
+            return _probe_rows(model, inputs.contexts, inputs.n_categories, rng)
         drawn = np.asarray(model.sample(inputs.contexts, rng))
         if drawn.shape != (len(inputs.contexts),):
             return [f"drew {drawn.shape} for {len(inputs.contexts)} contexts"]
@@ -104,6 +109,23 @@ def probe(model: Any, family: str, inputs: Probe) -> list[str]:
         return []
     except Exception as error:
         return [f"the probe raised {type(error).__name__}: {error}"]
+
+
+def _probe_rows(
+    model: EmpiricalAttributeGenerator,
+    contexts: NDArray[np.int64],
+    n_categories: int,
+    rng: np.random.Generator,
+) -> list[str]:
+    """A generator of whole roles draws one row per context's cost center (its first level),
+    and the probe's categories bound the job family."""
+    rows = np.concatenate([model.sample(int(c), 1, rng) for c in contexts[:, 0]])
+    if rows.shape != (len(contexts), len(ATTRIBUTES)):
+        return [f"drew {rows.shape} for {len(contexts)} contexts"]
+    family = rows[:, ATTRIBUTES.index(OpeningColumn.JOB_FAMILY)]
+    if (rows < 0).any() or (family >= n_categories).any():
+        return [f"roles must carry codes, with a job family in 0..{n_categories - 1}"]
+    return []
 
 
 def load_models(
