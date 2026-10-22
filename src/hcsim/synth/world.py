@@ -49,6 +49,8 @@ from hcsim.synth.requisitions import (
 from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
 
 GENERATOR_VERSION = 1
+#: The version of `docs/data-contract.md` the tables follow.
+CONTRACT_VERSION = "1.0"
 #: DuckDB's working memory while a world is written.
 WRITE_MEMORY_LIMIT = "1GB"
 
@@ -538,6 +540,7 @@ def generate_world(config: WorldConfig) -> World:
     world.truth = {
         "quirks": {"snapshot_gaps": gaps},
         "generator_version": GENERATOR_VERSION,
+        "contract_version": CONTRACT_VERSION,
         "config": config.to_dict(),
         "processes": process_truth | {"equity": equity.truth_dict(comp, price, grant)},
     }
