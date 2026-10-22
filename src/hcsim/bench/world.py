@@ -68,6 +68,13 @@ def run_one(name: str, seed: int, directory: Path) -> PresetRun:
     written = time.perf_counter()
     with duckdb.connect(str(path), read_only=True) as con:
         results = validate(con, examples=0)
+        rows = 0
+        for (table,) in con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' AND table_type = 'BASE TABLE'"
+        ).fetchall():
+            (count,) = con.execute(f'SELECT count(*) FROM "{table}"').fetchone() or (0,)
+            rows += int(count)
     checked = time.perf_counter()
     return PresetRun(
         preset=name,
@@ -77,7 +84,7 @@ def run_one(name: str, seed: int, directory: Path) -> PresetRun:
         write_seconds=round(written - generated, 3),
         validate_seconds=round(checked - written, 3),
         peak_rss_mib=round(peak_rss_mib(), 1),
-        rows=sum(len(frame) for frame in world.tables.values()),
+        rows=rows,
         checks_passed=all(r.passed for r in results),
         digest=digest(world),
     )

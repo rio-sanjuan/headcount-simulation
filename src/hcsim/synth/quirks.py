@@ -71,6 +71,8 @@ def apply(
     config: WorldConfig, txn: pd.DataFrame, offers: Offers, rng: np.random.Generator
 ) -> pd.DataFrame:
     q = config.quirks
+    if not (q.backdated_share or q.correction_share or q.no_show_pair_share or q.pending_hire_rows):
+        return txn  # nothing to change: no copy of what can be the biggest table
     frame = txn.copy()
     extra: list[pd.DataFrame] = []
 

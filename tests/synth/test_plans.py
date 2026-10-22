@@ -14,10 +14,12 @@ from tests.support.stat_check import stat_check
 
 @pytest.fixture
 def vintages(small_world: World) -> pd.DataFrame:
-    """The vintages, with each cell's regime from the truth."""
+    """The vintages, with each cell's regime from the truth, labels as plain values."""
+    labels = {"vintage": object, "cost_center": object, "job_family": object, "regime": object}
     return (
         small_world.tables["plan_headcount"]
         .merge(small_world.truth_tables["plan_regime"], on=["vintage", "cost_center"], how="left")
+        .astype(labels)
         .assign(month=lambda f: pd.to_datetime(f["month_end"]).dt.to_period("M"))
     )
 

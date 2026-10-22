@@ -7,12 +7,13 @@ follow the data contract that hcsim's extraction SQL reads. Only `synth` writes 
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import duckdb
 import numpy as np
@@ -30,6 +31,7 @@ from hcsim.synth import (
     structure,
     truth,
 )
+from hcsim.synth.columns import categorical
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -47,6 +49,8 @@ from hcsim.synth.requisitions import (
 from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
 
 GENERATOR_VERSION = 1
+#: DuckDB's working memory while a world is written.
+WRITE_MEMORY_LIMIT = "1GB"
 
 TXN_COLUMNS = [
     "employee_id",
@@ -102,6 +106,26 @@ class World:
     truth: dict[str, Any] = field(default_factory=dict)
     #: The `truth/` tables (see `hcsim.synth.truth`).
     truth_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    #: Source tables too big to hold whole at scale, produced in chunks when they're written
+    #: or asked for. A table of the same name in `tables` takes their place.
+    deferred: dict[str, Callable[[], Iterator[pd.DataFrame]]] = field(default_factory=dict)
+
+    def table(self, name: str) -> pd.DataFrame:
+        """A source table, assembled whole if it's deferred."""
+        if name in self.tables:
+            return self.tables[name]
+        return pd.concat(list(self.deferred[name]()), ignore_index=True)
+
+    def chunks(self, name: str) -> Iterator[pd.DataFrame]:
+        """A source table, a chunk at a time."""
+        if name in self.tables:
+            yield self.tables[name]
+        else:
+            yield from self.deferred[name]()
+
+    @property
+    def table_names(self) -> list[str]:
+        return sorted(set(self.tables) | set(self.deferred))
 
 
 class _Labels:
@@ -121,10 +145,7 @@ class _Labels:
 
     @staticmethod
     def of(codes: np.ndarray, labels: Sequence[str]) -> pd.Categorical:
-        # The stubs want a Sequence; an integer array is the fast path pandas takes anyway.
-        return pd.Categorical.from_codes(
-            cast("Sequence[int]", codes.astype(np.int64)), categories=pd.Index(list(labels))
-        )
+        return categorical(codes, labels)
 
     def job(self, family: np.ndarray, level: np.ndarray, manager: np.ndarray) -> pd.Categorical:
         position = self.job_position[family, self.level_index[level], manager.astype(np.int64)]
@@ -152,34 +173,34 @@ def _reporting_dates(
 
 
 def _transactions(workforce: Workforce, labels: _Labels, rng: np.random.Generator) -> pd.DataFrame:
-    c = workforce.log.collect(TXN_DTYPES)
+    c = workforce.log.collect(TXN_DTYPES, release=True)  # nothing reads the log after this
     config = labels.config
     accounts = [name for name, _ in config.accounts]
-    return pd.DataFrame(
-        {
-            "employee_id": c["employee_id"],
-            "reporting_date": labels.dates(_reporting_dates(c, config, rng)),
-            "event_date": labels.dates(c["event_date"]),
-            "trans_type": labels.of(c["trans_type"], TRANS_TYPES),
-            "amount": c["amount"].astype(np.int64),
-            "cost_center": labels.of(c["cost_center"], labels.cost_centers),
-            "cost_center_previous": labels.of(c["cost_center_previous"], labels.cost_centers),
-            "job_code": labels.job(c["family"], c["level"], c["is_manager"]),
-            "job_code_previous": labels.job(
-                c["family_previous"], c["level_previous"], c["is_manager_previous"]
-            ),
-            "location": labels.of(c["location"], config.locations),
-            "location_previous": labels.of(c["location_previous"], config.locations),
-            "company": labels.of(c["company"], config.companies),
-            "company_previous": labels.of(c["company_previous"], config.companies),
-            "account": labels.of(c["account"], accounts),
-            "account_previous": labels.of(c["account_previous"], accounts),
-            "is_manager": c["is_manager"],
-            "is_manager_previous": c["is_manager_previous"],
-            "hire_date": labels.dates(c["hire_date"]),
-        },
-        columns=TXN_COLUMNS,
+    # Each raw column is released as soon as it's labelled, so the raw log and the finished
+    # table are never held whole at once.
+    reporting = labels.dates(_reporting_dates(c, config, rng))
+    columns: dict[str, Any] = {}
+    columns["employee_id"] = c.pop("employee_id")
+    columns["reporting_date"] = reporting
+    c.pop("reporting_date")
+    columns["event_date"] = labels.dates(c.pop("event_date"))
+    columns["trans_type"] = labels.of(c.pop("trans_type"), TRANS_TYPES)
+    columns["amount"] = c.pop("amount").astype(np.int64)
+    columns["cost_center"] = labels.of(c.pop("cost_center"), labels.cost_centers)
+    columns["cost_center_previous"] = labels.of(c.pop("cost_center_previous"), labels.cost_centers)
+    columns["job_code"] = labels.job(c.pop("family"), c.pop("level"), c["is_manager"])
+    columns["job_code_previous"] = labels.job(
+        c.pop("family_previous"), c.pop("level_previous"), c["is_manager_previous"]
     )
+    for name, names in (("location", config.locations), ("company", config.companies)):
+        columns[name] = labels.of(c.pop(name), names)
+        columns[f"{name}_previous"] = labels.of(c.pop(f"{name}_previous"), names)
+    columns["account"] = labels.of(c.pop("account"), accounts)
+    columns["account_previous"] = labels.of(c.pop("account_previous"), accounts)
+    columns["is_manager"] = c.pop("is_manager")
+    columns["is_manager_previous"] = c.pop("is_manager_previous")
+    columns["hire_date"] = labels.dates(c.pop("hire_date"))
+    return pd.DataFrame({name: columns.pop(name) for name in TXN_COLUMNS}, copy=False)
 
 
 def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
@@ -295,17 +316,77 @@ AGG_KEYS = [
 def _aggregate(txn: pd.DataFrame, jobs: pd.DataFrame) -> pd.DataFrame:
     """`workforce_agg`: the transactions pre-summed by month, org and job attributes, account,
     and code. `headcount` counts rows and `amount` sums their signed amounts. A month is the
-    event's month, and `period` is its month-end."""
-    job = jobs.set_index("job_code")
-    keyed = txn.assign(
-        period=txn["event_date"].dt.to_period("M").dt.end_time.dt.normalize(),
-        job_family=txn["job_code"].map(job["job_family"]),
-        job_level=txn["job_code"].map(job["job_level"]),
+    event's month, and `period` is its month-end.
+
+    Groups are found by sorting one packed integer key per row, in the keys' order, rather
+    than by a frame-wide group-by that would copy the table several times over at scale."""
+    job = jobs.set_index("job_code").reindex(txn["job_code"].cat.categories)
+    families = list(dict.fromkeys(jobs["job_family"]))
+    family_of = pd.Categorical(job["job_family"], categories=families).codes.astype(np.int64)
+    level_of = job["job_level"].to_numpy(np.int64)
+    levels = np.unique(level_of)
+    rank_of = np.searchsorted(levels, level_of)
+    months = txn["event_date"].to_numpy().astype("datetime64[M]")
+    first = months.min() if len(months) else np.datetime64("2000-01", "M")
+    job_code = txn["job_code"].cat.codes.to_numpy(np.int64)
+    coded = {
+        "period": (months - first).astype(np.int64),
+        "cost_center": txn["cost_center"].cat.codes.to_numpy(np.int64),
+        "job_family": np.where(job_code >= 0, family_of[job_code], -1),
+        "job_level": np.where(job_code >= 0, rank_of[job_code], -1),
+        **{
+            name: txn[name].cat.codes.to_numpy(np.int64)
+            for name in ("location", "company", "account", "trans_type")
+        },
+    }
+    del months, job_code
+    sizes = {
+        "period": int(coded["period"].max(initial=0)) + 1,
+        "cost_center": len(txn["cost_center"].cat.categories),
+        "job_family": len(families),
+        "job_level": len(levels),
+        **{n: len(txn[n].cat.categories) for n in ("location", "company", "account", "trans_type")},
+    }
+    assert float(np.prod([float(v) for v in sizes.values()])) < 2.0**62, "aggregate key overflow"
+    # A row with any key missing belongs to no group, as in a group-by that drops them.
+    keep = np.ones(len(txn), dtype=bool)
+    key = np.zeros(len(txn), dtype=np.int64)
+    for name in AGG_KEYS:
+        keep &= coded[name] >= 0
+        key = key * sizes[name] + coded.pop(name)
+    rows = np.flatnonzero(keep)
+    order = rows[np.argsort(key[rows], kind="stable")]
+    del rows, keep
+    ordered = key[order]
+    del key
+    starts = np.flatnonzero(np.r_[True, ordered[1:] != ordered[:-1]][: len(ordered)])
+    packed = ordered[starts]
+    del ordered
+    amount = (
+        np.add.reduceat(txn["amount"].to_numpy(np.int64)[order], starts)
+        if len(starts)
+        else np.zeros(0, np.int64)
     )
-    agg = keyed.groupby(AGG_KEYS, observed=True).agg(
-        headcount=("employee_id", "size"), amount=("amount", "sum")
-    )
-    return agg.reset_index()
+    headcount = np.diff(np.r_[starts, len(order)]).astype(np.int64)
+    del order
+    decoded: dict[str, NDArray[np.int64]] = {}
+    for name in reversed(AGG_KEYS):
+        packed, decoded[name] = np.divmod(packed, sizes[name])
+    month = first + decoded["period"].astype("timedelta64[M]")
+    period_end = (month + np.timedelta64(1, "M")).astype("datetime64[D]") - np.timedelta64(1, "D")
+    columns: dict[str, Any] = {
+        "period": period_end.astype("datetime64[ns]"),
+        "cost_center": categorical(decoded["cost_center"], list(txn["cost_center"].cat.categories)),
+        "job_family": categorical(decoded["job_family"], families),
+        "job_level": levels[decoded["job_level"]],
+        **{
+            name: categorical(decoded[name], list(txn[name].cat.categories))
+            for name in ("location", "company", "account", "trans_type")
+        },
+        "headcount": headcount,
+        "amount": amount,
+    }
+    return pd.DataFrame(columns, copy=False)
 
 
 def _rating_dimension(config: WorldConfig) -> pd.DataFrame:
@@ -398,9 +479,6 @@ def generate_world(config: WorldConfig) -> World:
     clean = _transactions(workforce, labels, reporting_rng)
     txn = quirks.apply(config, clean, offers, quirk_rng)
     world.tables["workforce_txn"] = txn
-    world.tables["workforce_agg"] = quirks.aggregate_only(
-        config, _aggregate(txn, world.tables["dim_job"]), quirk_rng
-    )
     world.tables["dim_rating"] = _rating_dimension(config)
     world.tables["req_interval"] = _requisitions(book, labels)
     world.tables["pending_start"] = _pending_starts(offers, book, labels)
@@ -438,9 +516,22 @@ def generate_world(config: WorldConfig) -> World:
         config, equity_tables["equity_award"], equity_tables["equity_vest"]
     )
     world.tables["equity_forfeiture_estimate"] = estimates
-    world.tables["equity_expense"] = awards.reference_ledger(
-        config, equity_tables["equity_award"], equity_tables["equity_vest"], estimates, ends
+    # The ledger is the biggest table by far, and nothing else reads it: it's built in chunks
+    # as it's written.
+    world.deferred["equity_expense"] = functools.partial(
+        awards.ledger_frames,
+        config,
+        equity_tables["equity_award"],
+        equity_tables["equity_vest"],
+        estimates,
+        ends,
     )
+    # The aggregate comes last: nothing above reads it, so it isn't held while the equity world
+    # is built. The quirk stream draws in the same order as ever: rows, aggregate, snapshots.
+    world.tables["workforce_agg"] = quirks.aggregate_only(
+        config, _aggregate(txn, world.tables["dim_job"]), quirk_rng
+    )
+    del clean, txn
     world.tables["contract_columns"] = quirks.cost_center_columns(config, world.tables)
     quirks.rename_cost_centers(config, world.tables)
     gaps = quirks.snapshot_gaps(config, ends, quirk_rng)
@@ -480,11 +571,18 @@ def digest(world: World) -> str:
     """A fingerprint of everything the world holds: every table's columns, types, and values,
     the truth tables, and the manifest. Equal digests mean identical worlds."""
     h = hashlib.sha256()
-    for kind, tables in (("table", world.tables), ("truth", world.truth_tables)):
-        for name in sorted(tables):
-            frame = tables[name]
-            h.update(f"{kind}:{name}:{list(frame.columns)}:{list(map(str, frame.dtypes))}".encode())
+
+    def add(kind: str, name: str, frames: Iterator[pd.DataFrame]) -> None:
+        for k, frame in enumerate(frames):
+            if k == 0:  # a deferred table hashes as if it were whole
+                header = f"{kind}:{name}:{list(frame.columns)}:{list(map(str, frame.dtypes))}"
+                h.update(header.encode())
             h.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
+
+    for name in world.table_names:
+        add("table", name, world.chunks(name))
+    for name in sorted(world.truth_tables):
+        add("truth", name, iter([world.truth_tables[name]]))
     h.update(json.dumps(world.truth, sort_keys=True).encode())
     return h.hexdigest()
 
@@ -494,10 +592,17 @@ def write_world(world: World, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.unlink(missing_ok=True)
     with duckdb.connect(str(path)) as con:
-        for name, frame in world.tables.items():
-            con.register("frame", frame)
-            con.execute(f"CREATE TABLE {name} AS SELECT {_select_list(frame)} FROM frame")
-            con.unregister("frame")
+        # Writing needs little working memory; capped, DuckDB flushes as it goes rather than
+        # buffering up to most of the machine's memory.
+        con.execute(f"SET memory_limit = '{WRITE_MEMORY_LIMIT}'")
+        for name in [*world.tables, *(n for n in world.deferred if n not in world.tables)]:
+            for k, frame in enumerate(world.chunks(name)):
+                con.register("frame", frame)
+                select = f"SELECT {_select_list(frame)} FROM frame"
+                con.execute(
+                    f"CREATE TABLE {name} AS {select}" if k == 0 else f"INSERT INTO {name} {select}"
+                )
+                con.unregister("frame")
         # Month-end snapshots of every open requisition, with the openings still to fill then.
         # A requisition opened and closed inside one month never appears, as with real
         # snapshot data. Quirks may drop whole month-ends, and spell the state differently

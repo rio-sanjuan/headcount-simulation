@@ -48,7 +48,7 @@ def test_the_digest_sees_every_table_and_the_manifest(world: World) -> None:
         return digest(dataclasses.replace(world, **parts))
 
     for name in ("dim_org", "workforce_txn", "equity_expense"):
-        frame = world.tables[name]
+        frame = world.table(name)  # a whole table in `tables` takes a deferred one's place
         assert changed(tables=world.tables | {name: frame.iloc[:-1]}) != base
         reordered = frame[list(reversed(frame.columns))]
         assert changed(tables=world.tables | {name: reordered}) != base
@@ -97,6 +97,7 @@ def test_each_write_holds_the_same_rows(world: World, tmp_path: Path) -> None:
             )
     a, b = frames
     assert list(a) == list(b)
-    assert len(a) == len(world.tables) + len(world.truth_tables) + 2  # the view and manifest
+    expected = len(world.table_names) + len(world.truth_tables) + 2  # the view and manifest
+    assert len(a) == expected
     for name in a:
         pd.testing.assert_frame_equal(a[name], b[name], obj=name)

@@ -34,7 +34,7 @@ def test_the_truth_is_written_apart_from_the_source_tables(tmp_path: Path) -> No
     truth = schemas[schemas["table_schema"] == "truth"]
     assert set(truth["table_name"]) == {"manifest", *world.truth_tables}
     assert set(schemas.loc[schemas["table_schema"] == "main", "table_name"]) == {
-        *world.tables,
+        *world.table_names,
         "req_snapshot",
     }
     assert json.loads(manifest)["config"]["seed"] == 2

@@ -138,7 +138,7 @@ def test_every_check_has_a_break() -> None:
 
 @pytest.mark.parametrize("name", list(BREAKS))
 def test_each_check_catches_its_break(world: World, tmp_path: Path, name: str) -> None:
-    tables = dict(world.tables)
+    tables = dict(world.tables) | {"equity_expense": world.table("equity_expense")}
     BREAKS[name](tables)
     broken = dataclasses.replace(world, tables=tables)
     result = checked(broken, tmp_path / "b.duckdb")[name]
