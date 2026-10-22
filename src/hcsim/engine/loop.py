@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -43,6 +43,8 @@ from hcsim.engine.domains import (
     Handler,
     StepContext,
 )
+from hcsim.engine.events import EventCells, cells_frame, decode
+from hcsim.engine.events import empty as no_cells
 from hcsim.engine.gates import Registered, RegistrationGate, register
 from hcsim.engine.known_domains import (
     CONVERSION_OUT,
@@ -68,6 +70,7 @@ from hcsim.engine.transfers import transfers
 from hcsim.financial.expense import ExpenseResult, compute_expense, sbc_frame
 from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
+from hcsim.model.core.schema import COST_CENTER
 
 Ints = NDArray[np.int64]
 
@@ -140,6 +143,8 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (CAMPUS, campus),  # opens and fills campus requisitions on their schedule
     *DOMAINS[3:],
 )
+#: Each domain's code in the event cells: its place in the step order.
+DOMAIN_INDEX: Final[Mapping[str, int]] = {name: k for k, (name, _) in enumerate(STEP_ORDER)}
 #: The known-event kind each domain fires.
 FIRES: Final[Mapping[str, EventKind]] = {
     **KINDS,
@@ -205,6 +210,10 @@ class TrajectoryResult:
     known_fired: Mapping[str, int] = field(default_factory=dict)
     #: Diagnostics by name, as (months, cost centers) counts, such as degenerate rows.
     diagnostics: Mapping[str, Ints] = field(default_factory=dict)
+    #: The trajectory's event cells, as `events.EventCells` gathers them.
+    event_cells: Ints = field(default_factory=no_cells)
+    #: Grants each domain emitted that the run's award settings had no sizer for.
+    unsized_grants: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -260,6 +269,80 @@ class SimulationResult:
         totals["per_trajectory"] = totals["shortfall"] / len(self.trajectories)
         return totals
 
+    def event_cells(self, *, decoded: bool = False, trajectory: int | None = None) -> pd.DataFrame:
+        """What every domain did, counted by cell (see `events`): one row per trajectory,
+        step, domain, buffer, change, cost center, level, and job family. The attributes are
+        codes, or with `decoded`, their labels; `trajectory` keeps one trajectory's cells."""
+        cells = [(t.trajectory, t.event_cells) for t in self._of(trajectory)]
+        return cells_frame(cells, list(DOMAIN_INDEX), self.config.schema, decoded=decoded)
+
+    def channel_counts(
+        self, *, decoded: bool = False, trajectory: int | None = None
+    ) -> pd.DataFrame:
+        """Every channel's count: one row per trajectory, step, flow symbol, and cost center
+        the flow moved, as the notation names the channels by which headcount and openings
+        change."""
+        return self._long("flow", lambda t: t.flows, decoded, trajectory)
+
+    def diagnostics(self, *, decoded: bool = False, trajectory: int | None = None) -> pd.DataFrame:
+        """Every nonzero diagnostic: one row per trajectory, step, name, and cost center."""
+        return self._long("name", lambda t: t.diagnostics, decoded, trajectory)
+
+    def run_counts(self, *, trajectory: int | None = None) -> pd.DataFrame:
+        """Each trajectory's counts for the whole run: months each domain's step gate
+        bypassed it, known events fired by kind, and grants left unsized by domain."""
+        rows = [
+            {"trajectory": t.trajectory, "kind": kind, "name": name, "count": int(count)}
+            for t in self._of(trajectory)
+            for kind, counts in (
+                ("bypassed", t.bypasses),
+                ("known_fired", t.known_fired),
+                ("unsized_grants", t.unsized_grants),
+            )
+            for name, count in counts.items()
+            if count
+        ]
+        return pd.DataFrame(rows, columns=["trajectory", "kind", "name", "count"])
+
+    def _of(self, trajectory: int | None) -> list[TrajectoryResult]:
+        if trajectory is None:
+            return list(self.trajectories)
+        chosen = [t for t in self.trajectories if t.trajectory == trajectory]
+        if not chosen:
+            raise KeyError(f"no trajectory {trajectory} in this result")
+        return chosen
+
+    def _long(
+        self,
+        key: str,
+        series: Callable[[TrajectoryResult], Mapping[str, Ints]],
+        decoded: bool,
+        trajectory: int | None,
+    ) -> pd.DataFrame:
+        """(months, cost centers) counts by name, as one row per nonzero count."""
+        frames = []
+        for t in self._of(trajectory):
+            for name, counts in series(t).items():
+                step, cc = np.nonzero(counts)
+                frames.append(
+                    pd.DataFrame(
+                        {
+                            "trajectory": t.trajectory,
+                            "step": step.astype(np.int64),
+                            key: name,
+                            COST_CENTER: cc.astype(np.int64),
+                            "count": counts[step, cc].astype(np.int64),
+                        }
+                    )
+                )
+        columns = ["trajectory", "step", key, COST_CENTER, "count"]
+        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
+        frame = frame[columns]
+        if decoded:
+            codes = frame[COST_CENTER].to_numpy(dtype=np.int64)
+            frame[COST_CENTER] = decode(self.config.schema, COST_CENTER, codes)
+        return frame
+
 
 def calendar_month(run_date: dt.date, step: int) -> int:
     """The calendar month, 1-12, of simulation step `step`."""
@@ -306,6 +389,8 @@ def run_trajectory(
     bypasses = dict.fromkeys(registered.steps, 0)
     fired = FiringLog()
     diagnostics: dict[str, Ints] = {}
+    cells = EventCells(config.schema)
+    unsized = dict.fromkeys(registered.domains, 0)
 
     for step in range(months):
         if state.price is not None:
@@ -319,7 +404,9 @@ def run_trajectory(
                 bypasses[domain] += 1
                 continue
             result = handlers[domain](state, ctx)
+            cells.capture(step, DOMAIN_INDEX[domain], result, state)
             applied = apply(state, result, step, config.schema, awards)
+            unsized[domain] += applied.unsized_grants
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
             for name, counts in result.diagnostics.items():
@@ -354,6 +441,8 @@ def run_trajectory(
             bypasses=bypasses,
             known_fired=known_fired,
             diagnostics=diagnostics,
+            event_cells=cells.array(),
+            unsized_grants=unsized,
         )
     tranches = state.ledger.tranches()
     if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
@@ -372,6 +461,8 @@ def run_trajectory(
         bypasses,
         known_fired,
         diagnostics,
+        cells.array(),
+        unsized,
     )
 
 
