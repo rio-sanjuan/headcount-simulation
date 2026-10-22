@@ -116,7 +116,9 @@ def test_the_lite_pipeline_s_steps() -> None:
         "validate",
         "select",
         "generate",
+        "cohere_generated",
         "reconcile",
+        "cohere_reconciled",
         "format",
     )
     assert pipeline(GuidanceConfig(reconciliation=Reconciliation(method=None))).names == (
@@ -124,6 +126,7 @@ def test_the_lite_pipeline_s_steps() -> None:
         "validate",
         "select",
         "generate",
+        "cohere_generated",
         "format",
     )
     assert pipeline(GuidanceConfig()).check(["source", "config"]) == []
