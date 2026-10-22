@@ -22,6 +22,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from hcsim.guidance.alignment import ALIGNERS
 from hcsim.guidance.combination import COMBINERS
 from hcsim.guidance.evaluation import EvaluationConfig, space_of
 from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
@@ -117,6 +118,22 @@ class Coherence(_Strict):
     method: Literal["bottom_up", "top_down", "ols"] = "bottom_up"
 
 
+class Alignment(_Strict):
+    """How the forecast is moved onto plan targets (see `alignment`). No method leaves it
+    as reconciled."""
+
+    method: str | None = None
+    #: Align every planned month to the interpolated target, not only the target dates.
+    all_months: bool = False
+    #: Flows that keep their forecast.
+    fixed: tuple[GuidanceCategory, ...] = ()
+    #: The QP's weight on each flow's change, by category; one where it names none.
+    weights: dict[GuidanceCategory, float] = Field(default_factory=dict)
+    #: The QP: measure a flow's change as a share of the anchor, its exposure.
+    rate_aware: bool = True
+    shortfall_penalty: float = Field(default=1e4, gt=0)
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
@@ -133,6 +150,7 @@ class GuidanceConfig(_Strict):
     tuning: Tuning = Tuning()
     uncertainty: Uncertainty = Uncertainty()
     coherence: Coherence = Coherence()
+    alignment: Alignment = Alignment()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")
@@ -184,6 +202,16 @@ class GuidanceConfig(_Strict):
                 "uncertainty: sample paths are on, but no model in the suite samples them; "
                 "models that do include native.NegativeBinomialGLM and statsforecast.AutoETS"
             )
+        if self.alignment.method is not None:
+            method = [self.alignment.method]
+            found += [f"alignment.method: {p}" for p in ALIGNERS.problems(method)]
+            if ANCHOR not in self.categories:
+                found.append("alignment: aligning moves the headcount anchor; add it")
+        bad = sorted(c.value for c in self.alignment.fixed if c not in self.categories)
+        if bad:
+            found.append(f"alignment.fixed: {bad} aren't among the categories")
+        if any(w <= 0 for w in self.alignment.weights.values()):
+            found.append("alignment.weights: every weight must be positive")
         if self.reconcile and ANCHOR not in self.categories:
             found.append(
                 f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "

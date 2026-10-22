@@ -15,7 +15,10 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
    headcount anchor, over the identity's terms: the deepest carried cover of the fill tree and
    the other flows the run forecasts. Moves out of a group have no category, so the identity
    is partial wherever people move between groups, and the report names every missing term;
-7. **format** writes the artifact. Negative cells are clamped to zero there, and the report
+7. **align**, when the configuration names a method, moves each group's anchor onto its plan
+   targets and re-derives the flows (see `alignment`), after reconciliation, so the aligned
+   values are final, and a coherence pass follows it;
+8. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
@@ -35,6 +38,7 @@ import pandas as pd
 
 from hcsim.guidance import ingest as ingestion
 from hcsim.guidance import validation
+from hcsim.guidance.alignment import ALIGNERS, AlignmentProblem
 from hcsim.guidance.coherence import PASSES, cohere
 from hcsim.guidance.coherence import Method as CoherenceMethod
 from hcsim.guidance.config import GuidanceConfig
@@ -45,6 +49,7 @@ from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS, Problem
 from hcsim.guidance.selection import Selection, select
 from hcsim.guidance.sources import Source, SourceError, as_source
+from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 from hcsim.model.core.fill_tree import identity_terms
 from hcsim.model.core.guidance import GuidanceForecast
@@ -307,6 +312,105 @@ class Reconcile:
 
 
 @dataclass(frozen=True)
+class Align:
+    """Move each group's anchor onto its plan targets, re-deriving the flows (see
+    `alignment`), after reconciliation, so the aligned values are final."""
+
+    name: str = "align"
+    needs: tuple[str, ...] = ("series", "forecasts", "config", "target", "movements")
+    gives: tuple[str, ...] = ("forecasts",)
+
+    def validate(self, ctx: Context) -> list[str]:
+        target, config = ctx["target"], ctx["config"]
+        if target is None:
+            return ["alignment needs a target, and the run has none"]
+        if not isinstance(target, AlignmentTarget):
+            return [f"the target must be an AlignmentTarget, not {type(target).__name__}"]
+        groupings = [m.grouping for m in target.marginals]
+        if config.grouping not in groupings:
+            return [
+                f"the target has no marginal for the run's grouping {config.grouping!r}; it "
+                f"has {groupings}"
+            ]
+        return []
+
+    def execute(self, ctx: Context) -> Mapping[str, Any]:
+        series, config, target = ctx["series"], ctx["config"], ctx["target"]
+        rules = config.alignment
+        forecasts: Forecasts = dict(ctx["forecasts"])
+        terms_of, _ = identity_terms({category for _, category in forecasts})
+        signs = {c.value: s for c, s in terms_of.items()}
+        marginal = target.marginal(config.grouping)
+        months = [series.snapshot + 1 + k for k in range(config.horizon)]
+        movements = ctx["movements"] or {}
+        shortfalls: dict[str, float] = {}
+        untargeted, aligned_months = [], 0
+        for group in series.groups:
+            keys = [ANCHOR, *terms_of]
+            if any((group, c) not in forecasts for c in keys):
+                continue
+            if group not in marginal.groups:
+                untargeted.append(group)
+                continue
+            g = marginal.groups.index(group)
+            goal, band = _targets(target, marginal, config.grouping, months, g, rules.all_months)
+            problem = AlignmentProblem(
+                forecasts[group, ANCHOR],
+                float(series.values(group, ANCHOR).iloc[-1]),
+                {c.value: forecasts[group, c] for c in terms_of},
+                signs,
+                goal,
+                band,
+                frozenset(c.value for c in rules.fixed),
+                movements.get(group),
+                {c.value: w for c, w in rules.weights.items()},
+                rules.rate_aware,
+                rules.shortfall_penalty,
+            )
+            result = ALIGNERS.build(rules.method)(problem)
+            forecasts[group, ANCHOR] = result.anchor
+            for c in terms_of:
+                forecasts[group, c] = result.flows[c.value]
+            aligned_months += int((~np.isnan(goal)).sum())
+            shortfalls[group] = float(np.abs(result.shortfall).max(initial=0.0))
+        ctx.note(
+            self.name,
+            method=rules.method,
+            target=target.digest(),
+            aligned_months=aligned_months,
+            untargeted_groups=untargeted,
+            max_shortfall=max(shortfalls.values(), default=0.0),
+            shortfalls={g: v for g, v in shortfalls.items() if v > 0},
+        )
+        return {"forecasts": forecasts}
+
+
+def _targets(
+    target: AlignmentTarget,
+    marginal: Any,
+    grouping: str,
+    months: list[Any],
+    group: int,
+    all_months: bool,
+) -> tuple[Any, Any]:
+    """Per forecast month, the group's target and band, NaN where the month isn't aligned:
+    outside the target's window, past its evaluation month, or, unless `all_months`, off its
+    target dates."""
+    first, last = target.window
+    goal, band = np.full(len(months), np.nan), np.zeros(len(months))
+    for k, month in enumerate(months):
+        if not first <= month <= last or not target.is_planned(month):
+            continue
+        if all_months:
+            goal[k] = target.target(grouping, month)[group]
+            continue
+        width = marginal.band_at(month)[group]
+        if not np.isnan(width):
+            goal[k], band[k] = target.target(grouping, month)[group], width
+    return goal, band
+
+
+@dataclass(frozen=True)
 class Format:
     """Write the artifact: the point forecasts, and with sample paths on, the paths and the
     quantiles read from them. Negative values are clamped to zero, as writers clamp.
@@ -384,18 +488,33 @@ class Format:
 def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(), Cohere("reconciled")) if config.reconcile else ()
+    align = (Align(), Cohere("aligned")) if config.alignment.method is not None else ()
     return Pipeline(
-        (Ingest(), Validate(), Select(), Generate(), Cohere("generated"), *middle, Format())
+        (
+            Ingest(),
+            Validate(),
+            Select(),
+            Generate(),
+            Cohere("generated"),
+            *middle,
+            *align,
+            Format(),
+        )
     )
 
 
 def run(
-    source: Source | duckdb.DuckDBPyConnection | Path, config: GuidanceConfig | None = None
+    source: Source | duckdb.DuckDBPyConnection | Path,
+    config: GuidanceConfig | None = None,
+    target: AlignmentTarget | None = None,
+    movements: Mapping[str, Any] | None = None,
 ) -> PipelineResult:
     """Run the pipeline on `source`: a `Source`, a DuckDB connection, or a path to a DuckDB
-    file or a directory of table files."""
+    file or a directory of table files. `target` holds the plan targets alignment moves the
+    forecast onto, and `movements` each group's declared change, `ε_H`, per forecast month."""
     config = config or GuidanceConfig()
-    ctx = pipeline(config).run(Context({"source": source, "config": config}))
+    seed = {"source": source, "config": config, "target": target, "movements": movements}
+    ctx = pipeline(config).run(Context(seed))
     artifact: GuidanceForecast = ctx["artifact"]
     sections = ctx.report
     report = {
@@ -408,6 +527,7 @@ def run(
             *sections["generate"]["series_skipped"],
         ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
+        "alignment": sections.get("align", {"method": None}),
         "coherence": {
             "method": config.coherence.method,
             "closed": {
