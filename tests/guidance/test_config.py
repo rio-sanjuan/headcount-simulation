@@ -10,7 +10,7 @@ from hcsim.cli import main as hcsim
 from hcsim.guidance.combination import COMBINERS, inverse_error
 from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.models import MODELS, SeasonalNaive
-from hcsim.guidance.reconcile import RECONCILERS, reconcile_greedy
+from hcsim.guidance.reconcile import RECONCILERS, greedy
 from hcsim.guidance.registry import Entry, Registry, RegistryError
 
 # --- registries ---------------------------------------------------------------------------------
@@ -91,7 +91,7 @@ def test_the_pipeline_s_registries() -> None:
     } <= set(MODELS.names)
     assert isinstance(MODELS.build("native.SeasonalNaive"), SeasonalNaive)
     assert COMBINERS.build("inverse_error") is inverse_error
-    assert RECONCILERS.build("greedy") is reconcile_greedy
+    assert RECONCILERS.build("greedy") is greedy
 
 
 # --- the configuration --------------------------------------------------------------------------
@@ -138,7 +138,7 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
             {
                 "models": ["native.SeasonalNaive", "prophet", "native.SeasonalNaive"],
                 "combination": {"method": "median"},
-                "reconciliation": {"method": "mint"},
+                "reconciliation": {"method": "bottom_up"},
                 "grouping": "cost_type",
             }
         )
@@ -150,7 +150,8 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
         "  - models: each model is named once; ['native.SeasonalNaive'] repeat",
         "  - combination.method: unknown combination method 'median'; known: bates_granger, "
         "equal, inverse_error, rank, ridge, softmax",
-        "  - reconciliation.method: unknown reconciliation method 'mint'; known: greedy",
+        "  - reconciliation.method: unknown reconciliation method 'bottom_up'; known: greedy, "
+        "mint, ols, wls",
         "  - grouping: 'cost_type' can't group by; it permits filter, population",
     ]
 

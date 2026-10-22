@@ -38,7 +38,7 @@ from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.generation import generate
 from hcsim.guidance.models import ForecastError, capabilities
-from hcsim.guidance.reconcile import RECONCILERS
+from hcsim.guidance.reconcile import RECONCILERS, Problem
 from hcsim.guidance.selection import Selection, select
 from hcsim.guidance.sources import Source, SourceError, as_source
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
@@ -166,7 +166,7 @@ class Generate:
 
     name: str = "generate"
     needs: tuple[str, ...] = ("series", "selections", "covariates", "config")
-    gives: tuple[str, ...] = ("forecasts", "paths")
+    gives: tuple[str, ...] = ("forecasts", "paths", "residuals")
 
     def validate(self, ctx: Context) -> list[str]:
         return []
@@ -175,6 +175,7 @@ class Generate:
         series, config = ctx["series"], ctx["config"]
         forecasts: Forecasts = {}
         paths: Forecasts = {}
+        residuals: Forecasts = {}
         point_only: list[dict[str, str]] = []
         report: dict[str, dict[str, Any]] = {}
         skipped: list[dict[str, str]] = []
@@ -198,6 +199,8 @@ class Generate:
                 skipped.append({"group": group, "category": category.value, "reason": str(error)})
                 continue
             forecasts[group, category] = result.values
+            if result.residuals is not None:
+                residuals[group, category] = result.residuals
             if result.paths is not None:
                 paths[group, category] = result.paths
             elif config.selection.uncertainty is not None:
@@ -212,7 +215,7 @@ class Generate:
                 "parameters": result.parameters,
             }
         ctx.note(self.name, series_skipped=skipped, selection=report, point_only=point_only)
-        return {"forecasts": forecasts, "paths": paths}
+        return {"forecasts": forecasts, "paths": paths, "residuals": residuals}
 
 
 @dataclass(frozen=True)
@@ -220,7 +223,7 @@ class Reconcile:
     """Reconcile each group's flows to its anchor, rewriting the forecasts."""
 
     name: str = "reconcile"
-    needs: tuple[str, ...] = ("series", "forecasts", "config")
+    needs: tuple[str, ...] = ("series", "forecasts", "residuals", "config")
     gives: tuple[str, ...] = ("forecasts",)
 
     def validate(self, ctx: Context) -> list[str]:
@@ -236,26 +239,38 @@ class Reconcile:
         carried = {category for _, category in forecasts}
         terms_of, missing = identity_terms(carried)
         signs = {c.value: s for c, s in terms_of.items()}
+        rules = config.reconciliation
+        errors: Forecasts = ctx["residuals"]
         residuals = {}
+        methods: dict[str, int] = {}
         for group in series.groups:
             terms = [GuidanceCategory(c) for c in signs]
             if (group, ANCHOR) not in forecasts or any((group, c) not in forecasts for c in terms):
                 continue
-            last_actual = float(series.values(group, ANCHOR).iloc[-1])
-            reconciled = RECONCILERS.build(config.reconciliation.method)(
+            keys = [ANCHOR, *terms]
+            problem = Problem(
                 forecasts[group, ANCHOR],
-                last_actual,
+                float(series.values(group, ANCHOR).iloc[-1]),
                 {c.value: forecasts[group, c] for c in terms},
                 signs,
                 config.tolerance,
+                {c.value: errors[group, c] for c in keys if (group, c) in errors},
+                rules.sign_aware,
+                rules.anchor_fixed,
+                rules.shrinkage,
             )
+            reconciled = RECONCILERS.build(rules.method)(problem)
             for c in terms:
                 forecasts[group, c] = reconciled.flows[c.value]
+            if reconciled.anchor is not None:
+                forecasts[group, ANCHOR] = reconciled.anchor
             residuals[group] = reconciled.residual
+            methods[reconciled.method] = methods.get(reconciled.method, 0) + 1
         largest = max((float(np.abs(r).max()) for r in residuals.values()), default=0.0)
         ctx.note(
             self.name,
             max_abs_residual=largest,
+            methods=methods,
             terms=signs,
             missing_terms=[*(c.value for c in missing), TRANSFERS_OUT],
         )
@@ -372,6 +387,7 @@ def run(
         "reconciliation": {
             "identity": "partial",
             "terms": sections.get("reconcile", {}).get("terms", {}),
+            "methods": sections.get("reconcile", {}).get("methods", {}),
             "missing_terms": sections.get("reconcile", {}).get("missing_terms", [TRANSFERS_OUT]),
             "max_abs_residual": sections.get("reconcile", {}).get("max_abs_residual", 0.0),
         },
