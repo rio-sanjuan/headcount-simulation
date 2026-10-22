@@ -84,6 +84,7 @@ class _History:
                 "trans_type": txn["trans_type"],
                 "date": txn["event_date"].to_numpy().astype("datetime64[D]"),
                 "cost_center": txn["cost_center"],
+                "company": txn["company"],
                 "job_level": txn["job_code"].map(level).to_numpy(np.int64),
                 "account": txn["account"],
                 "hire_date": txn["hire_date"].to_numpy().astype("datetime64[D]"),
@@ -145,7 +146,7 @@ def _triggers(config: WorldConfig, history: _History, rng: np.random.Generator) 
     """Every candidate award: who, which type, when its trigger fell, and its sizing inputs."""
     g = config.grants
     regular = next(name for name, group in config.accounts if group == "regular")
-    columns = ["employee_id", "cost_center", "job_level"]
+    columns = ["employee_id", "cost_center", "company", "job_level"]
     parts = []
 
     def add(
@@ -197,15 +198,58 @@ def _triggers(config: WorldConfig, history: _History, rng: np.random.Generator) 
     return pd.concat(parts, ignore_index=True)
 
 
+def schedules(config: WorldConfig) -> dict[str, tuple[tuple[int, ...], tuple[float, ...]]]:
+    """Every vest schedule: each award type's own, and the executive one."""
+    g = config.grants
+    found = {
+        name: (g.award_type(name).vest_months, g.award_type(name).vest_shares) for name in g.TYPES
+    }
+    found["executive"] = (g.executive_vest_months, g.executive_vest_shares)
+    return found
+
+
+def schedule_frame(config: WorldConfig) -> pd.DataFrame:
+    """`dim_vest_schedule`: each schedule's tranches, in months after the award."""
+    rows = [
+        {"schedule": name, "vest_number": k + 1, "months_after_award": m, "share": share}
+        for name, (months, shares) in schedules(config).items()
+        for k, (m, share) in enumerate(zip(months, shares, strict=True))
+    ]
+    return pd.DataFrame(rows)
+
+
+def _appraisals(config: WorldConfig, monthly: pd.DataFrame) -> pd.Series:
+    """The offline plans' appraised value per share, set at each quarter-end."""
+    ends = pd.to_datetime(monthly["month_end"])
+    quarter = ends.dt.month.isin([3, 6, 9, 12])
+    value = monthly["close"].to_numpy() * config.grants.offline_appraisal_discount
+    return pd.Series(
+        value[quarter.to_numpy()], index=ends[quarter].to_numpy().astype("datetime64[D]")
+    )
+
+
+def _appraisal_on(
+    appraisals: pd.Series, dates: NDArray[np.datetime64], opening: float
+) -> NDArray[np.float64]:
+    """The latest appraisal on or before each date, or the opening one before the first."""
+    index = appraisals.index.to_numpy().astype("datetime64[D]")
+    position = np.searchsorted(index, dates.astype("datetime64[D]"), side="right") - 1
+    values = appraisals.to_numpy()
+    result: NDArray[np.float64] = np.where(position >= 0, values[np.maximum(position, 0)], opening)
+    return result
+
+
 def make_awards(
     config: WorldConfig,
     txn: pd.DataFrame,
     ratings: pd.DataFrame,
     jobs: pd.DataFrame,
     daily: pd.DataFrame,
+    monthly: pd.DataFrame,
     rng: np.random.Generator,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """`equity_award` and `equity_vest`, with each tranche's status."""
+) -> dict[str, pd.DataFrame]:
+    """The equity tables: `equity_award`, `equity_vest`, `equity_valuation`, `equity_holder`,
+    and `dim_vest_schedule`."""
     g = config.grants
     world_end = _world_end(config)
     history = _History(txn, ratings, jobs)
@@ -231,17 +275,128 @@ def make_awards(
         .sort_values(["award_date", "employee_id", "award_type"], kind="stable")
         .reset_index(drop=True)
     )
+    # Plans and schedules: offline subsidiaries grant under their own plan, and executives'
+    # new-hire and annual awards vest on the executive schedule.
+    offline = set(config.companies[len(config.companies) - config.offline_subsidiaries :])
+    plan = np.where(awards["company"].astype(str).isin(offline), "offline", "primary")
+    executive = (awards["job_level"] >= config.executive_min_level) & awards["award_type"].isin(
+        ["new_hire", "annual"]
+    )
+    schedule = np.where(executive, "executive", awards["award_type"])
     fair = daily.assign(
         price_date=pd.to_datetime(daily["price_date"]).to_numpy().astype("datetime64[D]")
     ).set_index("price_date")["fair_value"]
-    fair_value = fair.reindex(awards["award_date"].to_numpy()).to_numpy()
-    shares = np.maximum(1, np.rint(awards["value"].to_numpy() / fair_value)).astype(np.int64)
+    dates = awards["award_date"].to_numpy().astype("datetime64[D]")
+    grant_value = fair.reindex(dates).to_numpy()
+    appraisals = _appraisals(config, monthly)
+    opening = float(monthly["close"].iloc[0]) * g.offline_appraisal_discount
+    grant_value = np.where(
+        plan == "offline", _appraisal_on(appraisals, dates, opening), grant_value
+    )
+    shares = np.maximum(1, np.rint(awards["value"].to_numpy() / grant_value)).astype(np.int64)
     awards = awards.assign(
         award_id=FIRST_AWARD_ID + np.arange(len(awards)),
         shares=shares,
-        fair_value=fair_value.round(4),
+        fair_value=grant_value.round(4),
+        plan=plan,
+        schedule=schedule,
     )
-    return _frame(awards), _vests(config, awards, history)
+    vests = _vests(config, awards, history)
+    settles = _settle_dates(awards, vests, history, world_end)
+    return {
+        "equity_award": _frame(awards),
+        "equity_vest": vests,
+        "equity_valuation": _valuations(awards, settles, appraisals, world_end),
+        "equity_holder": _holders(awards, settles, history),
+        "dim_vest_schedule": schedule_frame(config),
+    }
+
+
+def _settle_dates(
+    awards: pd.DataFrame, vests: pd.DataFrame, history: _History, world_end: np.datetime64
+) -> NDArray[np.datetime64]:
+    """When each award stops being held: its last vest, its holder's exit, or the world's end,
+    whichever comes first."""
+    last_vest = vests.groupby("award_id")["vest_date"].max().reindex(awards["award_id"]).to_numpy()
+    left = history.next_exit(awards, "award_date")
+    end = np.minimum(last_vest.astype("datetime64[D]"), world_end)
+    result: NDArray[np.datetime64] = np.where(~np.isnat(left) & (left < end), left, end)
+    return result
+
+
+def _valuations(
+    awards: pd.DataFrame,
+    settles: NDArray[np.datetime64],
+    appraisals: pd.Series,
+    world_end: np.datetime64,
+) -> pd.DataFrame:
+    """`equity_valuation`: each award's grant-date value per share, and for offline plans,
+    every quarter-end appraisal while the award is held."""
+    grant = pd.DataFrame(
+        {
+            "award_id": awards["award_id"],
+            "valuation_date": awards["award_date"].to_numpy().astype("datetime64[s]"),
+            "value_per_share": awards["fair_value"],
+            "basis": np.where(awards["plan"] == "offline", "appraisal", "grant_date_fair_value"),
+        }
+    )
+    offline = awards["plan"].to_numpy() == "offline"
+    dates = appraisals.index.to_numpy().astype("datetime64[D]")
+    start = awards["award_date"].to_numpy().astype("datetime64[D]")[offline]
+    later = (dates[None, :] > start[:, None]) & (dates[None, :] <= settles[offline][:, None])
+    award, quarter = np.nonzero(later)
+    remeasured = pd.DataFrame(
+        {
+            "award_id": awards["award_id"].to_numpy()[offline][award],
+            "valuation_date": dates[quarter].astype("datetime64[s]"),
+            "value_per_share": appraisals.to_numpy()[quarter].round(4),
+            "basis": "appraisal",
+        }
+    )
+    frames = [f for f in (grant, remeasured) if len(f)]
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["award_id", "valuation_date"], ignore_index=True
+    )
+
+
+def _holders(
+    awards: pd.DataFrame, settles: NDArray[np.datetime64], history: _History
+) -> pd.DataFrame:
+    """`equity_holder`: each award's holder link over time, a new interval whenever the holder
+    moves cost center or company, until the award settles."""
+    moves = history.txn[history.txn["trans_type"].isin(["XFER_IN", "REORG_IN", "CONV_IN"])][
+        ["employee_id", "date", "cost_center", "company"]
+    ]
+    base = pd.DataFrame(
+        {
+            "award_id": awards["award_id"].to_numpy(),
+            "employee_id": awards["employee_id"].to_numpy(),
+            "valid_from": awards["award_date"].to_numpy().astype("datetime64[D]"),
+            "settles": settles,
+            "cost_center": awards["cost_center"].to_numpy(),
+            "company": awards["company"].to_numpy(),
+        }
+    )
+    joined = base[["award_id", "employee_id", "valid_from", "settles"]].merge(
+        moves, on="employee_id"
+    )
+    within = (joined["date"] > joined["valid_from"]) & (joined["date"] < joined["settles"])
+    changes = joined[within].assign(valid_from=lambda f: f["date"])[base.columns]
+    links = pd.concat([base, changes], ignore_index=True).sort_values(
+        ["award_id", "valid_from"], ignore_index=True
+    )
+    following = links.groupby("award_id")["valid_from"].shift(-1)
+    valid_to = following.fillna(pd.Series(links["settles"].to_numpy(), index=links.index))
+    return pd.DataFrame(
+        {
+            "award_id": links["award_id"],
+            "employee_id": links["employee_id"],
+            "cost_center": links["cost_center"].astype(str),
+            "company": links["company"].astype(str),
+            "valid_from": links["valid_from"].to_numpy().astype("datetime64[s]"),
+            "valid_to": pd.to_datetime(valid_to).to_numpy().astype("datetime64[s]"),
+        }
+    )
 
 
 def _frame(awards: pd.DataFrame) -> pd.DataFrame:
@@ -254,7 +409,10 @@ def _frame(awards: pd.DataFrame) -> pd.DataFrame:
             "shares": awards["shares"],
             "fair_value": awards["fair_value"],
             "cost_center": awards["cost_center"],
+            "company": awards["company"],
             "job_level": awards["job_level"].astype(np.int64),
+            "plan": awards["plan"],
+            "schedule": awards["schedule"],
         }
     )
 
@@ -262,19 +420,17 @@ def _frame(awards: pd.DataFrame) -> pd.DataFrame:
 def _vests(config: WorldConfig, awards: pd.DataFrame, history: _History) -> pd.DataFrame:
     """One row per tranche, with its status: vested, forfeited (the holder left first), or
     still unvested at the world's end."""
-    g = config.grants
     parts = []
-    for name in g.TYPES:
-        t = g.award_type(name)
-        mine = awards[awards["award_type"] == name]
-        k = len(t.vest_months)
+    for name, (vest_months, vest_shares) in schedules(config).items():
+        mine = awards[awards["schedule"] == name]
+        k = len(vest_months)
         shares = mine["shares"].to_numpy()
-        split = np.floor(np.outer(shares, t.vest_shares)).astype(np.int64)
+        split = np.floor(np.outer(shares, vest_shares)).astype(np.int64)
         split[:, -1] += shares - split.sum(axis=1)  # the last tranche absorbs rounding
         if mine.empty:
             continue
         dates = np.repeat(mine["award_date"].to_numpy().astype("datetime64[D]"), k)
-        vest_dates = add_months(dates, np.tile(np.asarray(t.vest_months), len(mine)))
+        vest_dates = add_months(dates, np.tile(np.asarray(vest_months), len(mine)))
         parts.append(
             pd.DataFrame(
                 {

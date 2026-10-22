@@ -134,3 +134,131 @@ def test_award_values_follow_the_type_s_value_by_level(small_world: World) -> No
 def test_a_bad_grant_truth_is_refused(grants: GrantTruth, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         WorldConfig(grants=grants)
+
+
+# --- schedules, plans, valuations, and holder links ------------------------------------------
+
+
+def test_every_award_vests_on_its_schedule(small_world: World) -> None:
+    catalog = small_world.tables["dim_vest_schedule"]
+    assert set(catalog["schedule"]) == {*GrantTruth.TYPES, "executive"}
+    assert np.allclose(catalog.groupby("schedule")["share"].sum(), 1)
+    award = small_world.tables["equity_award"]
+    vests = small_world.tables["equity_vest"].merge(
+        award[["award_id", "schedule", "award_date"]], on="award_id"
+    )
+    months = catalog.set_index(["schedule", "vest_number"])["months_after_award"]
+    expected = vests.apply(lambda r: months[(r["schedule"], r["vest_number"])], axis=1)
+    span = (
+        pd.to_datetime(vests["vest_date"]).dt.to_period("M")
+        - pd.to_datetime(vests["award_date"]).dt.to_period("M")
+    ).map(lambda d: d.n)
+    assert (span == expected).all()
+
+
+def test_executives_new_hire_and_annual_awards_use_the_executive_schedule(
+    small_world: World,
+) -> None:
+    award = small_world.tables["equity_award"]
+    executive = (award["job_level"] >= small_world.config.executive_min_level) & award[
+        "award_type"
+    ].isin(["new_hire", "annual"])
+    assert executive.any()
+    assert (award.loc[executive, "schedule"] == "executive").all()
+    assert (award.loc[~executive, "schedule"] == award.loc[~executive, "award_type"]).all()
+
+
+def _quarter_ends(world: World) -> pd.Series:
+    monthly = world.tables["stock_price"].assign(month_end=lambda f: pd.to_datetime(f["month_end"]))
+    quarters = monthly[monthly["month_end"].dt.month.isin([3, 6, 9, 12])]
+    discount = world.config.grants.offline_appraisal_discount
+    return pd.Series(quarters["close"].to_numpy() * discount, index=quarters["month_end"])
+
+
+def test_offline_subsidiaries_grant_at_an_appraised_value(small_world: World) -> None:
+    award = small_world.tables["equity_award"]
+    offline_companies = set(
+        small_world.config.companies[-small_world.config.offline_subsidiaries :]
+    )
+    assert ((award["plan"] == "offline") == award["company"].isin(offline_companies)).all()
+    offline = award[award["plan"] == "offline"]
+    appraisal = _quarter_ends(small_world)
+    position = (
+        np.searchsorted(
+            appraisal.index.to_numpy(),
+            pd.to_datetime(offline["award_date"]).to_numpy(),
+            side="right",
+        )
+        - 1
+    )
+    opening = (
+        small_world.tables["stock_price"]["close"].iloc[0]
+        * small_world.config.grants.offline_appraisal_discount
+    )
+    expected = np.where(position >= 0, appraisal.to_numpy()[np.maximum(position, 0)], opening)
+    assert np.allclose(offline["fair_value"], expected, atol=1e-3)
+
+
+def test_valuations_record_grants_and_each_offline_quarter_end(small_world: World) -> None:
+    award = small_world.tables["equity_award"].set_index("award_id")
+    valuation = small_world.tables["equity_valuation"]
+    first = valuation.groupby("award_id").first()
+    assert len(first) == len(award)
+    assert (
+        pd.to_datetime(first["valuation_date"])
+        == pd.to_datetime(award.loc[first.index, "award_date"])
+    ).all()
+    primary = award.index[award["plan"] == "primary"]
+    assert (valuation[valuation["award_id"].isin(primary)].groupby("award_id").size() == 1).all()
+    later = (
+        valuation[valuation["award_id"].isin(award.index[award["plan"] == "offline"])]
+        .groupby("award_id")
+        .nth(slice(1, None))
+    )
+    assert len(later) > 0
+    assert set(pd.to_datetime(later["valuation_date"]).dt.month) <= {3, 6, 9, 12}
+    assert (later["basis"] == "appraisal").all()
+
+
+def test_holder_links_follow_the_holder_from_grant_to_settlement(small_world: World) -> None:
+    holders = small_world.tables["equity_holder"].assign(
+        start=lambda f: pd.to_datetime(f["valid_from"]), end=lambda f: pd.to_datetime(f["valid_to"])
+    )
+    award = small_world.tables["equity_award"].set_index("award_id")
+    first = holders.groupby("award_id").first()
+    assert (first["start"] == pd.to_datetime(award.loc[first.index, "award_date"])).all()
+    assert (first["cost_center"] == award.loc[first.index, "cost_center"].astype(str)).all()
+    assert (holders["start"] <= holders["end"]).all()
+    # Each interval starts where the one before it ended.
+    previous_end = holders.groupby("award_id")["end"].shift()
+    follows = previous_end.isna() | (holders["start"] == previous_end)
+    assert follows.all()
+    # A later interval starts on a move, into the cost center that move records.
+    txn = small_world.tables["workforce_txn"]
+    moves = txn[txn["trans_type"].isin(["XFER_IN", "REORG_IN", "CONV_IN"])]
+    keys = set(
+        zip(
+            moves["employee_id"],
+            pd.to_datetime(moves["event_date"]),
+            moves["cost_center"].astype(str),
+            strict=True,
+        )
+    )
+    later = holders[holders.groupby("award_id").cumcount() > 0]
+    assert len(later) > 0
+    assert all(
+        key in keys
+        for key in zip(later["employee_id"], later["start"], later["cost_center"], strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    ("grants", "message"),
+    [
+        (GrantTruth(executive_vest_shares=(0.5, 0.5, 0.5)), "executive vest shares"),
+        (GrantTruth(offline_appraisal_discount=0.0), "offline_appraisal_discount"),
+    ],
+)
+def test_bad_executive_and_offline_settings_are_refused(grants: GrantTruth, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(grants=grants)

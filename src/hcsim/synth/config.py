@@ -393,6 +393,12 @@ class GrantTruth:
     transfer_award_probability: float = 0.25
     retention_monthly_rate: float = 0.003
     off_cycle_monthly_rate: float = 0.001
+    #: Executives' new-hire and annual awards vest on their own schedule.
+    executive_vest_months: tuple[int, ...] = (12, 24, 36)
+    executive_vest_shares: tuple[float, ...] = (1 / 3, 1 / 3, 1 / 3)
+    #: Offline subsidiaries grant under their own plan, at an appraised value: the month-end
+    #: close times this discount, remeasured at each quarter-end until the award settles.
+    offline_appraisal_discount: float = 0.7
 
     TYPES: ClassVar[tuple[str, ...]] = (
         "new_hire",
@@ -409,6 +415,12 @@ class GrantTruth:
 
     def problems(self, levels: tuple[int, ...], ratings: int) -> list[str]:
         found = [p for name in self.TYPES for p in self.award_type(name).problems(name, levels)]
+        if len(self.executive_vest_months) != len(self.executive_vest_shares) or not np.isclose(
+            sum(self.executive_vest_shares), 1
+        ):
+            found.append("grants executive vest shares must sum to 1, one per month")
+        if not 0 < self.offline_appraisal_discount <= 1:
+            found.append("grants.offline_appraisal_discount must lie in (0, 1]")
         if self.annual_month not in range(1, 13):
             found.append("grants.annual_month must be a calendar month 1-12")
         if len(self.annual_rating_factor) != ratings:
