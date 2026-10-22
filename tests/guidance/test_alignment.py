@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
+from pathlib import Path
 
 import duckdb
 import numpy as np
 import pandas as pd
 import pytest
 
+from hcsim.cli import main as hcsim
+from hcsim.engine.config import ConfigError
 from hcsim.guidance.alignment import AlignmentProblem, greedy, path, shortfall_of
 from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.pipeline import run
 from hcsim.model.core.alignment import AlignmentTarget, marginal
 from hcsim.model.core.categories import GuidanceCategory
+from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
 
@@ -83,10 +88,15 @@ def test_a_shortfall_is_signed_and_zero_within_the_band() -> None:
 
 
 @pytest.fixture(scope="module")
-def con(tmp_path_factory: pytest.TempPathFactory) -> Iterator[duckdb.DuckDBPyConnection]:
+def world(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path_ = tmp_path_factory.mktemp("world") / "world.duckdb"
     write_world(generate_world(preset("tiny", seed=4)), path_)
-    with duckdb.connect(str(path_), read_only=True) as connection:
+    return path_
+
+
+@pytest.fixture(scope="module")
+def con(world: Path) -> Iterator[duckdb.DuckDBPyConnection]:
+    with duckdb.connect(str(world), read_only=True) as connection:
         yield connection
 
 
@@ -153,3 +163,61 @@ def test_a_run_aligns_by_the_qp_too(con: duckdb.DuckDBPyConnection) -> None:
     assert abs(values[5] - 320.0) <= 2.0 + 1e-6
     assert result.report["alignment"]["method"] == "qp"
     assert result.report["alignment"]["max_shortfall"] == 0.0
+
+
+# --- the aligned_to stamp, and precedence ------------------------------------------------------
+
+
+def test_an_aligned_artifact_is_stamped_with_its_target(
+    con: duckdb.DuckDBPyConnection, tmp_path: Path
+) -> None:
+    target = target_for([300.0, 320.0])
+    aligned = run(con, GuidanceConfig.from_mapping(CONFIG), target).artifact
+    assert aligned.aligned_to == target.digest()
+    aligned.save(tmp_path / "g")
+    assert GuidanceForecast.load(tmp_path / "g").aligned_to == target.digest()
+    plain = run(con, GuidanceConfig(horizon=6, grouping="TOPLINE")).artifact
+    assert plain.aligned_to is None
+
+
+def test_alignment_takes_precedence_over_reconciliation(con: duckdb.DuckDBPyConnection) -> None:
+    config = GuidanceConfig.from_mapping(
+        {**CONFIG, "reconciliation": {"method": "ols", "tolerance": 0.0}}
+    )
+    result = run(con, config, target_for([300.0, 320.0]))
+    frame = result.artifact.frame
+    values = frame[frame["category"] == "headcount"].sort_values("forecast_month")["value"]
+    assert values.to_numpy()[[2, 5]].tolist() == pytest.approx([300.0, 320.0])
+    assert result.report["alignment"]["precedence"] == "aligned after reconciliation"
+    steps = [s["step"] for s in result.report["steps"]]
+    assert steps.index("reconcile") < steps.index("align") < steps.index("format")
+
+
+def test_the_command_aligns_to_a_saved_target(
+    con: duckdb.DuckDBPyConnection, world: Path, tmp_path: Path
+) -> None:
+    target = target_for([300.0, 320.0])
+    target.save(tmp_path / "plan")
+    (tmp_path / "guidance.yaml").write_text(
+        "horizon: 6\ngrouping: TOPLINE\nalignment: {method: greedy}\n"
+    )
+    args = ["guidance", "fit", "--world", str(world), "--config", str(tmp_path / "guidance.yaml")]
+    assert hcsim([*args, "--target", str(tmp_path / "plan"), "--out", str(tmp_path / "g")]) == 0
+    assert GuidanceForecast.load(tmp_path / "g").aligned_to == target.digest()
+    with pytest.raises(SystemExit):
+        hcsim([*args, "--target", str(tmp_path / "nowhere"), "--out", str(tmp_path / "h")])
+
+
+def test_the_engine_refuses_guidance_aligned_to_another_plan() -> None:
+    from tests.engine.test_ceiling import plan
+    from tests.engine.test_loop import config, guidance
+
+    run_plan = plan({"CC-01": [90.0, 90.0]})
+    other = plan({"CC-01": [95.0, 95.0]})
+    aligned = dataclasses.replace(
+        guidance({"attrition": {"CC-01": 1.0}}), aligned_to=other.digest()
+    )
+    with pytest.raises(ConfigError, match="guidance was aligned to the plan"):
+        config(guidance=aligned, plan=run_plan)
+    matching = dataclasses.replace(aligned, aligned_to=run_plan.digest())
+    assert config(guidance=matching, plan=run_plan).guidance is matching

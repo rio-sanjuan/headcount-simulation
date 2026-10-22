@@ -13,6 +13,7 @@ from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
 from hcsim.guidance.pipeline import run
+from hcsim.model.core.alignment import AlignmentError, AlignmentTarget
 
 
 def main(argv: Sequence[str]) -> int:
@@ -22,6 +23,7 @@ def main(argv: Sequence[str]) -> int:
     fit.add_argument("--world", type=Path, required=True, help="the world's DuckDB file")
     fit.add_argument("--out", type=Path, required=True, help="the artifact directory to write")
     fit.add_argument("--config", type=Path, help="a guidance configuration (YAML)")
+    fit.add_argument("--target", type=Path, help="the alignment target's directory, to align to")
     fit.add_argument("--horizon", type=int, help="overrides the configuration's horizon")
     fit.add_argument(
         "--grouping", help=f"overrides the configuration's grouping: one of {', '.join(GROUPINGS)}"
@@ -37,9 +39,15 @@ def main(argv: Sequence[str]) -> int:
         config = GuidanceConfig.from_mapping(base.model_dump() | given)
     except GuidanceConfigError as error:
         parser.error(str(error))
+    target = None
+    if args.target is not None:
+        try:
+            target = AlignmentTarget.load(args.target)
+        except (OSError, AlignmentError) as error:
+            parser.error(f"can't read the alignment target at {args.target}: {error}")
     with duckdb.connect(str(args.world), read_only=True) as con:
         try:
-            result = run(con, config)
+            result = run(con, config, target)
         except (IngestionError, PipelineError) as error:
             parser.error(str(error))
     result.artifact.save(args.out)
