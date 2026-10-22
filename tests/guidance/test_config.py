@@ -52,7 +52,7 @@ def test_a_registry_refuses_a_name_twice() -> None:
 
 
 def test_the_pipeline_s_registries() -> None:
-    assert MODELS.names == ("drift", "historical_average", "last_observed", "seasonal_naive")
+    assert {"drift", "historical_average", "last_observed", "seasonal_naive"} <= set(MODELS.names)
     assert isinstance(MODELS.build("seasonal_naive"), SeasonalNaive)
     assert COMBINERS.build("inverse_error") is inverse_error_weights
     assert RECONCILERS.build("greedy") is reconcile_greedy
@@ -105,8 +105,7 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
     lines = str(error.value).splitlines()
     assert lines[0] == "invalid guidance configuration:"
     assert lines[1:] == [
-        "  - models: unknown model 'prophet'; known: drift, historical_average, last_observed, "
-        "seasonal_naive",
+        f"  - models: unknown model 'prophet'; known: {', '.join(MODELS.names)}",
         "  - models: each model is named once; ['seasonal_naive'] repeat",
         "  - combination.method: unknown combination method 'median'; known: inverse_error",
         "  - reconciliation.method: unknown reconciliation method 'mint'; known: greedy",

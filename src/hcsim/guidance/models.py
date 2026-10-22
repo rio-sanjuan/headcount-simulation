@@ -16,14 +16,12 @@ from typing import ClassVar, Self
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.guidance.adapters import statsforecast
+from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry, Registry, RegistryError
-from hcsim.model.interface import ProbabilisticOutput
+from hcsim.model.interface import ProbabilisticOutput, TimeSeriesModel
 
 Floats = NDArray[np.float64]
-
-
-class ForecastError(ValueError):
-    """A forecaster asked to work without the history it needs."""
 
 
 class SeasonalNaive:
@@ -119,9 +117,10 @@ class Drift:
         return self._last + self._slope * np.arange(1, horizon + 1, dtype=np.float64)
 
 
-Forecaster = LastObserved | SeasonalNaive | HistoricalAverage | Drift
+Forecaster = TimeSeriesModel
 
-#: The registered suite. A configuration names models from here.
+#: The registered suite: the native benchmarks, and each adapter's models under its library's
+#: namespace. A configuration names models from here.
 MODELS: Registry[Forecaster] = Registry(
     "model",
     (
@@ -129,6 +128,7 @@ MODELS: Registry[Forecaster] = Registry(
         Entry(SeasonalNaive.NAME, SeasonalNaive),
         Entry(HistoricalAverage.NAME, HistoricalAverage),
         Entry(Drift.NAME, Drift),
+        *statsforecast.ENTRIES,
     ),
 )
 

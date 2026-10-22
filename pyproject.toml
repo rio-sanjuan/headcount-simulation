@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.13",
     "pyyaml>=6.0.2",
     "scikit-learn>=1.6",
+    "statsforecast>=2.0",
 ]
 
 [project.scripts]
