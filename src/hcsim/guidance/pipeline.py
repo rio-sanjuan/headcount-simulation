@@ -10,8 +10,9 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
    `selection`), for every series long enough;
 4. **generate** refits the selected models, reweights them, and forecasts (see `generation`);
 5. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
-   headcount anchor. The lite identity carries hires and attrition only, so it's partial
-   wherever people move between groups, and the report says so;
+   headcount anchor, over the identity's terms: the deepest carried cover of the fill tree and
+   the other flows the run forecasts. Moves out of a group have no category, so the identity
+   is partial wherever people move between groups, and the report names every missing term;
 6. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
@@ -40,11 +41,13 @@ from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
 from hcsim.guidance.selection import Selection, select
 from hcsim.guidance.sources import Source, SourceError, as_source
-from hcsim.model.core.categories import ANCHOR, GuidanceCategory, coherency_terms
+from hcsim.model.core.categories import ANCHOR, GuidanceCategory
+from hcsim.model.core.fill_tree import identity_terms
 from hcsim.model.core.guidance import GuidanceForecast
 
-#: Flows the full identity carries that the lite categories can't forecast.
-MISSING_TERMS: Final = ("internal_starts", "transfers_out", "conversion_out")
+#: The identity's one flow no category forecasts: moves out of a group to another, the
+#: counterpart of internal starts, which leaves every group's identity partial.
+TRANSFERS_OUT: Final = "transfers_out"
 
 Forecasts = dict[tuple[str, GuidanceCategory], np.ndarray]
 
@@ -227,10 +230,12 @@ class Reconcile:
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
         forecasts: Forecasts = dict(ctx["forecasts"])
-        # The identity's terms this run forecasts. A term with no series can't be adjusted, and
-        # the gap it leaves falls on the others.
-        forecast = {category for _, category in forecasts}
-        signs = {c.value: s for c, s in coherency_terms().items() if c in forecast}
+        # The identity's terms: the deepest cover of the fill tree the run forecasts, and the
+        # other flows it carries. A flow it doesn't carry can't be adjusted, and the gap it
+        # leaves falls on the others.
+        carried = {category for _, category in forecasts}
+        terms_of, missing = identity_terms(carried)
+        signs = {c.value: s for c, s in terms_of.items()}
         residuals = {}
         for group in series.groups:
             terms = [GuidanceCategory(c) for c in signs]
@@ -248,7 +253,12 @@ class Reconcile:
                 forecasts[group, c] = reconciled.flows[c.value]
             residuals[group] = reconciled.residual
         largest = max((float(np.abs(r).max()) for r in residuals.values()), default=0.0)
-        ctx.note(self.name, max_abs_residual=largest)
+        ctx.note(
+            self.name,
+            max_abs_residual=largest,
+            terms=signs,
+            missing_terms=[*(c.value for c in missing), TRANSFERS_OUT],
+        )
         return {"forecasts": forecasts}
 
 
@@ -361,7 +371,8 @@ def run(
         },
         "reconciliation": {
             "identity": "partial",
-            "missing_terms": list(MISSING_TERMS),
+            "terms": sections.get("reconcile", {}).get("terms", {}),
+            "missing_terms": sections.get("reconcile", {}).get("missing_terms", [TRANSFERS_OUT]),
             "max_abs_residual": sections.get("reconcile", {}).get("max_abs_residual", 0.0),
         },
         "selection": sections["generate"]["selection"],

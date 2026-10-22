@@ -10,6 +10,8 @@ from hcsim.model.core.fill_tree import (
     FILL_TREE,
     ancestors,
     check,
+    cover,
+    identity_terms,
     is_leaf,
     leaves,
     nodes,
@@ -73,3 +75,50 @@ def test_a_broken_tree_is_named(
 
 def test_the_tree_is_checked_when_imported() -> None:
     assert fill_tree._problems == []
+
+
+# --- the identity's terms: the deepest carried cover ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("carried", "terms", "missing"),
+    [
+        # Leaves, when they cover their parent, are preferred to it.
+        (
+            {C.FILLS, C.HIRES, C.EXTERNAL_HIRES, C.CONVERSION_HIRES, C.INTERNAL_STARTS},
+            {C.EXTERNAL_HIRES, C.CONVERSION_HIRES, C.INTERNAL_STARTS},
+            set(),
+        ),
+        # A parent stands in for children that don't cover it.
+        ({C.HIRES, C.EXTERNAL_HIRES, C.INTERNAL_STARTS}, {C.HIRES, C.INTERNAL_STARTS}, set()),
+        ({C.FILLS, C.EXTERNAL_HIRES}, {C.FILLS}, set()),
+        # With no carried parent, the children cover what they can.
+        ({C.EXTERNAL_HIRES}, {C.EXTERNAL_HIRES}, {C.CONVERSION_HIRES, C.INTERNAL_STARTS}),
+        (set(), set(), {C.EXTERNAL_HIRES, C.CONVERSION_HIRES, C.INTERNAL_STARTS}),
+    ],
+)
+def test_the_fill_tree_is_covered_by_its_deepest_carried_nodes(
+    carried: set[GuidanceCategory], terms: set[GuidanceCategory], missing: set[GuidanceCategory]
+) -> None:
+    found, gaps = cover(C.FILLS, carried)
+    assert set(found) == terms
+    assert set(gaps) == missing
+    # Every leaf is covered once, or missing.
+    covered = [leaf for node in found for leaf in leaves(node)]
+    assert len(covered) == len(set(covered))
+    assert set(covered) | set(gaps) == set(leaves(C.FILLS))
+
+
+def test_the_identity_takes_the_cover_and_every_other_carried_flow() -> None:
+    terms, missing = identity_terms(
+        {C.HEADCOUNT, C.ATTRITION, C.HIRES, C.INTERNAL_STARTS, C.PROMOTIONS}
+    )
+    assert terms == {C.HIRES: 1, C.INTERNAL_STARTS: 1, C.ATTRITION: -1}
+    assert missing == [C.CONVERSIONS_OUT]
+    # The skeleton's categories, as the lite pipeline reconciled them.
+    terms, missing = identity_terms({C.HEADCOUNT, C.ATTRITION, C.EXTERNAL_HIRES})
+    assert terms == {C.EXTERNAL_HIRES: 1, C.ATTRITION: -1}
+    assert set(missing) == {C.CONVERSION_HIRES, C.INTERNAL_STARTS, C.CONVERSIONS_OUT}
+    # A requisition flow and a promotion are never terms: they move no one in or out.
+    terms, _ = identity_terms({C.REQUISITIONS_OPENED, C.PROMOTIONS})
+    assert terms == {}
