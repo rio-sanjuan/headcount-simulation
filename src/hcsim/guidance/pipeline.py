@@ -6,11 +6,13 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
    inner fill-tree node from its leaves;
 2. **validate** settles the series: the snapshot, the feed's gaps, and the all-zero series (see
    `validation`), and gives the calendar covariates for the history and the horizon;
-3. **forecast** gives every series long enough a combined benchmark forecast;
-4. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
+3. **select** scores each series' suite by rolling-origin evaluation and weighs the best (see
+   `selection`), for every series long enough;
+4. **generate** refits the selected models, reweights them, and forecasts (see `generation`);
+5. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
    headcount anchor. The lite identity carries hires and attrition only, so it's partial
    wherever people move between groups, and the report says so;
-5. **format** writes the artifact. Negative cells are clamped to zero there, and the report
+6. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
@@ -33,9 +35,10 @@ from hcsim.guidance import validation
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
+from hcsim.guidance.generation import generate
 from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
-from hcsim.guidance.selection import forecast
+from hcsim.guidance.selection import Selection, select
 from hcsim.guidance.sources import Source, SourceError, as_source
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory, coherency_terms
 from hcsim.model.core.guidance import GuidanceForecast
@@ -116,11 +119,20 @@ class Validate:
         }
 
 
+def _exposure(series: Any, group: str, category: GuidanceCategory) -> Any:
+    """A flow's exposure: its group's anchor history, when the group has one."""
+    if category is not ANCHOR and (group, ANCHOR) in series.keys:
+        return series.values(group, ANCHOR).to_numpy()
+    return None
+
+
 @dataclass(frozen=True)
-class Forecast:
-    name: str = "forecast"
+class Select:
+    """Score each series' suite and weigh its candidates."""
+
+    name: str = "select"
     needs: tuple[str, ...] = ("series", "covariates", "config")
-    gives: tuple[str, ...] = ("forecasts",)
+    gives: tuple[str, ...] = ("selections",)
 
     def validate(self, ctx: Context) -> list[str]:
         horizon = ctx["config"].horizon
@@ -128,34 +140,65 @@ class Forecast:
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
-        forecasts: Forecasts = {}
-        scores: dict[str, dict[str, Any]] = {}
+        selections: dict[tuple[str, GuidanceCategory], Selection] = {}
         skipped: list[dict[str, str]] = []
-        keys = series.keys
-        for group, category in keys:  # each group's anchor first, as its flows' exposure
+        for group, category in series.keys:
             values = series.values(group, category).to_numpy()
-            exposure = future = None
-            if category is not ANCHOR and (group, ANCHOR) in keys:
-                exposure = series.values(group, ANCHOR).to_numpy()
-                future = forecasts.get((group, ANCHOR))
-            calendar = ctx["covariates"]
+            exposure = _exposure(series, group, category)
             try:
-                result = forecast(
-                    values, config.horizon, config.selection, exposure, future, calendar
+                selections[group, category] = select(
+                    values, config.selection, exposure, ctx["covariates"]
+                )
+            except ForecastError as error:
+                skipped.append({"group": group, "category": category.value, "reason": str(error)})
+        suite = {name: capabilities(name).as_record() for name in config.selection.suite}
+        ctx.note(self.name, series_skipped=skipped, capabilities=suite)
+        return {"selections": selections}
+
+
+@dataclass(frozen=True)
+class Generate:
+    """Refit each series' selected models, reweight them, and forecast, each group's anchor
+    first, so a flow's share models have its forecast as their exposure."""
+
+    name: str = "generate"
+    needs: tuple[str, ...] = ("series", "selections", "covariates", "config")
+    gives: tuple[str, ...] = ("forecasts",)
+
+    def validate(self, ctx: Context) -> list[str]:
+        return []
+
+    def execute(self, ctx: Context) -> Mapping[str, Any]:
+        series, config = ctx["series"], ctx["config"]
+        forecasts: Forecasts = {}
+        report: dict[str, dict[str, Any]] = {}
+        skipped: list[dict[str, str]] = []
+        for (group, category), selection in ctx["selections"].items():  # anchors first
+            values = series.values(group, category).to_numpy()
+            exposure = _exposure(series, group, category)
+            future = None if exposure is None else forecasts.get((group, ANCHOR))
+            try:
+                result = generate(
+                    selection,
+                    values,
+                    config.horizon,
+                    config.selection,
+                    exposure,
+                    future,
+                    ctx["covariates"],
                 )
             except ForecastError as error:
                 skipped.append({"group": group, "category": category.value, "reason": str(error)})
                 continue
             forecasts[group, category] = result.values
-            scores[f"{group}/{category.value}"] = {
+            report[f"{group}/{category.value}"] = {
                 "scores": result.scores,
                 "weights": result.weights,
                 "method": result.method,
                 "folds": {m: [f.as_record() for f in fs] for m, fs in result.folds.items()},
                 "parameters": result.parameters,
             }
-        suite = {name: capabilities(name).as_record() for name in config.selection.suite}
-        ctx.note(self.name, series_skipped=skipped, selection=scores, capabilities=suite)
+        ctx.note(self.name, series_skipped=skipped, selection=report)
         return {"forecasts": forecasts}
 
 
@@ -238,7 +281,7 @@ class Format:
 def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(),) if config.reconcile else ()
-    return Pipeline((Ingest(), Validate(), Forecast(), *middle, Format()))
+    return Pipeline((Ingest(), Validate(), Select(), Generate(), *middle, Format()))
 
 
 def run(
@@ -255,7 +298,10 @@ def run(
         "snapshot": sections["validate"]["snapshot"],
         "grouping": config.grouping,
         "series_forecast": len(ctx["forecasts"]),
-        "series_skipped": sections["forecast"]["series_skipped"],
+        "series_skipped": [
+            *sections["select"]["series_skipped"],
+            *sections["generate"]["series_skipped"],
+        ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
         "validation": {
             "gaps": sections["validate"]["gaps"],
@@ -266,8 +312,8 @@ def run(
             "missing_terms": list(MISSING_TERMS),
             "max_abs_residual": sections.get("reconcile", {}).get("max_abs_residual", 0.0),
         },
-        "selection": sections["forecast"]["selection"],
-        "capabilities": sections["forecast"]["capabilities"],
+        "selection": sections["generate"]["selection"],
+        "capabilities": sections["select"]["capabilities"],
         "steps": [
             {"step": r.step, "gave": list(r.gave), "seconds": round(r.seconds, 6)}
             for r in ctx.records

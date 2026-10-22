@@ -127,7 +127,8 @@ def test_the_report_records_the_partial_identity_and_clamping(result: PipelineRe
     assert [s["step"] for s in report["steps"]] == [
         "ingest",
         "validate",
-        "forecast",
+        "select",
+        "generate",
         "reconcile",
         "format",
     ]
