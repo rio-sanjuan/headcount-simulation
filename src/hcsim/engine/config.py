@@ -36,10 +36,10 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
-from hcsim.engine.replay import ReplayedAwards
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
+from hcsim.financial.routing import HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
@@ -242,8 +242,16 @@ class AwardSettings:
     expense: ExpenseConfig = field(default_factory=ExpenseConfig)
     #: Sizes promotion grants. Without it, promotions emit grants nobody sizes.
     promotion: SizingStrategy | None = None
-    #: In a replay, the awards as recorded, for the grants it covers.
-    replayed: ReplayedAwards | None = None
+    #: The awards as recorded, for the grants they cover: a recipient holding one takes it,
+    #: and the rest are sized.
+    replayed: RecordedAwards | None = None
+    #: The hybrid window's last step for recorded awards: grants after it are all sized. None
+    #: routes recorded awards at every step.
+    replay_through: int | None = None
+
+    @property
+    def window(self) -> HybridWindow:
+        return HybridWindow(self.replay_through)
 
     def sizer(self, award_type: str) -> SizingStrategy | None:
         """The sizer for an award type, if the run has one."""

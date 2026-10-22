@@ -25,6 +25,7 @@ from hcsim.engine.loop import FLOW_SYMBOLS, HEADCOUNT_IDENTITY, OPENING_IDENTITY
 from hcsim.engine.replay import (
     RESERVED_OPENINGS,
     ReplayedRequisitions,
+    recorded_awards,
     replay_requisitions,
     replayed_requisitions,
 )
@@ -32,7 +33,7 @@ from hcsim.engine.results import DomainResult, Grant, RowChange
 from hcsim.engine.seeding import schema_from_world, seed_state
 from hcsim.engine.seeds import SeedManager
 from hcsim.financial.prices import StaticPrice
-from hcsim.financial.sizing import AwardBatch
+from hcsim.financial.routing import RecordedAwards
 from hcsim.financial.tracker import HolderLedger
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import REQ_TYPE, SimulationSchema
@@ -194,35 +195,36 @@ def test_boundary_fills_follow_their_setting(con: duckdb.DuckDBPyConnection) -> 
     assert int(without.flow("F_bdy").sum()) == 0
 
 
-class Recorded:
-    """Replayed awards: 7 shares a month for a year, for new hires only."""
-
-    def batch(self, rows: Any, step: int, award_type: str, prices: Any) -> AwardBatch | None:
-        if award_type != "new_hire":
-            return None
-        schedule = np.zeros((len(rows), 72), dtype=np.int64)
-        schedule[:, :12] = 7
-        return AwardBatch(
-            award_type, np.full(len(rows), 1.0), np.full((len(rows), 6), 14), schedule
-        )
+#: A recorded new-hire award for employee 900: 7 shares a month for a year.
+RECORDED = RecordedAwards({("new_hire", 0): {900: np.array([7] * 12 + [0] * 60)}})
 
 
 def test_replayed_awards_replace_sizing_for_the_grants_they_cover(tmp_path: Path) -> None:
-    settings = dataclasses.replace(awards(), replayed=Recorded())
+    settings = dataclasses.replace(awards(), replayed=RECORDED)
     state = initial_state()
     state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
     hires = EMPLOYEE.empty(2)
-    hires[:, EmployeeColumn.EMPLOYEE_ID] = -1
+    hires[:, EmployeeColumn.EMPLOYEE_ID] = [900, 901]  # 900 holds a recorded award, 901 doesn't
     result = DomainResult(
         "fills", employees=RowChange(EMPLOYEE, append=hires), grants=(Grant("new_hire"),)
     )
     applied = apply(state, result, 0, SCHEMA, settings)
-    assert applied.recorded_tranches > 0
+    assert (applied.replayed_grants, applied.unsized_grants) == (1, 0)
+    # Both bases are imputed by the sizer; only 901's grant is sized.
     assert (
-        state.employees[state.n_employees - 2 : state.n_employees, EmployeeColumn.BASE_SALARY]
-        == 1.0
+        state.employees[state.n_employees - 2 : state.n_employees, EmployeeColumn.BASE_SALARY] > 0
     ).all()
-    assert int(state.ledger.tranches().shares.sum()) == 2 * 12 * 7
+    tranches = state.ledger.tranches()
+    holder_900 = (
+        tranches.holder == state.employees[state.n_employees - 2, EmployeeColumn.VEST_INDEX]
+    )
+    assert int(tranches.shares[holder_900].sum()) == 12 * 7
+    assert int(tranches.shares[~holder_900].sum()) > 12 * 7
+    # After the hybrid window's last step, the recorded award no longer routes.
+    later = dataclasses.replace(settings, replay_through=-1)
+    state = initial_state()
+    state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
+    assert apply(state, result, 0, SCHEMA, later).replayed_grants == 0
 
 
 def test_requisitions_the_schema_can_t_hold_are_pruned(con: duckdb.DuckDBPyConnection) -> None:
@@ -256,3 +258,21 @@ def config_for(schema: SimulationSchema) -> SimulationConfig:
     return SimulationConfig(
         run_date=RUN, schema=schema, models=models(), forecast_scope=ForecastScope.HEADCOUNT
     )
+
+
+def test_the_recorded_awards_are_the_windows_primary_plan_awards(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    recorded = recorded_awards(con, RUN, MONTHS)
+    expected = con.execute(
+        "SELECT a.award_type, count(DISTINCT a.employee_id) AS holders, sum(v.shares) AS shares "
+        "FROM equity_award a JOIN equity_vest v USING (award_id) "
+        "WHERE a.plan = 'primary' AND a.award_date >= ? AND a.award_date < ? GROUP BY ALL",
+        [RUN, dt.date(2025, 7, 1)],
+    ).df()
+    assert len(recorded) > 0
+    by_type: dict[str, int] = {}
+    for (award_type, step), by_id in recorded.schedules.items():
+        assert 0 <= step < MONTHS
+        by_type[award_type] = by_type.get(award_type, 0) + sum(int(s.sum()) for s in by_id.values())
+    assert by_type == dict(zip(expected["award_type"], expected["shares"].astype(int), strict=True))
