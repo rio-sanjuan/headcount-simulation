@@ -102,6 +102,19 @@ class MarkovModel:
         entry = self._require()[1]
         return _draw(np.broadcast_to(entry, (n, self.n_states)), rng.random(n))
 
+    def sample(self, contexts: Ints, rng: np.random.Generator) -> Ints:
+        """The generator interface: each context row's first column is the previous state,
+        or -1 for a newcomer, who draws from the entry distribution."""
+        transitions, entry = self._require()
+        previous = np.asarray(contexts, dtype=np.int64)
+        if previous.ndim != 2 or previous.shape[1] < 1:
+            raise ValueError("contexts must be (rows, levels), the previous state first")
+        state = previous[:, 0]
+        if state.size and (state.min() < -1 or state.max() >= self.n_states):
+            raise ValueError(f"previous states must lie in -1..{self.n_states - 1}")
+        rows = np.where(state[:, None] >= 0, transitions[np.maximum(state, 0)], entry)
+        return _draw(rows, rng.random(len(state)))
+
 
 class SimilarityMatrix:
     ALGORITHM_NAME: ClassVar[str] = "cooccurrence_similarity"
