@@ -16,14 +16,16 @@ is collected: an unknown group or key, a value that doesn't read as its type, or
 setting no layer gives. Objects, such as the schema and the models, are passed in code.
 
 `load_settings` returns the merged values with the layer each came from, and `load_config`
-builds the configuration from them.
+builds the configuration from them. `production_config` adds the production defaults, a layer
+between the fields' defaults and YAML.
 
 **Records.** `to_record` writes a configuration as plain data: every setting by its path, the
 schema's and the guidance's fingerprints, whether it carries award settings, and each model's
 artifact version. `from_record` builds it again: the caller passes the schema, the guidance, and
-the award settings, which must match what the record names, and each model is re-attached from
-its artifact by version. A model built in code has no version, so a configuration holding one
-can't be written. Every problem is collected, as in loading.
+the award settings, which must match what the record names; eligibility rules are written in
+their raw labels; and each model is re-attached from its artifact by version. A model built in
+code has no version, so a configuration holding one can't be written. Every problem is
+collected, as in loading.
 """
 
 from __future__ import annotations
@@ -33,10 +35,11 @@ import datetime as dt
 import os
 import types
 import typing
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 import yaml
@@ -50,6 +53,7 @@ from hcsim.engine.config import (
     DomainModels,
     SimulationConfig,
 )
+from hcsim.engine.eligibility import EligibilityError, EligibilityRule
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
@@ -58,7 +62,16 @@ from hcsim.model.ml.persistence import ArtifactError, load_model
 
 ENV_PREFIX: Final = "HCSIM_CONFIG__"
 RECORD_VERSION: Final = 1
-LAYERS: Final = ("default", "yaml", "environment", "override")
+LAYERS: Final = ("default", "production", "yaml", "environment", "override")
+#: The production defaults, a layer between the fields' defaults and YAML: a run long enough
+#: to plan with, enough trajectories to read its spread, and results streamed out.
+PRODUCTION: Final[Mapping[str, Any]] = MappingProxyType(
+    {
+        "run.simulation_months": 24,
+        "run.num_trajectories": 200,
+        "results.streaming": True,
+    }
+)
 _TRUE: Final = frozenset({"true", "yes", "1"})
 _FALSE: Final = frozenset({"false", "no", "0"})
 _NONE: Final = frozenset({"", "none", "null"})
@@ -209,13 +222,16 @@ def load_settings(
     yaml_path: Path | None = None,
     env: Mapping[str, str] | None = None,
     overrides: Mapping[str, Any] | None = None,
+    production: bool = False,
 ) -> Layered:
-    """Merge the layers. `env` defaults to the process environment."""
+    """Merge the layers. `env` defaults to the process environment, and `production` adds
+    the production defaults under YAML."""
     known = settings()
     problems: list[str] = []
     values = {s.name: s.default for s in known.values() if not s.required}
     sources = dict.fromkeys(values, "default")
     layers = [
+        ("production", dict(PRODUCTION) if production else {}),
         ("yaml", _from_yaml(yaml_path, problems) if yaml_path is not None else {}),
         ("environment", _from_env(os.environ if env is None else env, problems)),
         ("override", dict(overrides or {})),
@@ -248,15 +264,30 @@ def load_config(
     models: DomainModels,
     guidance: GuidanceForecast | None = None,
     awards: AwardSettings | None = None,
+    eligibility: Sequence[EligibilityRule] = (),
     yaml_path: Path | None = None,
     env: Mapping[str, str] | None = None,
     overrides: Mapping[str, Any] | None = None,
+    production: bool = False,
 ) -> SimulationConfig:
     """The configuration from layered settings and the objects passed in code."""
-    layered = load_settings(yaml_path=yaml_path, env=env, overrides=overrides)
-    return SimulationConfig(
-        schema=schema, models=models, guidance=guidance, awards=awards, **layered.values
+    layered = load_settings(
+        yaml_path=yaml_path, env=env, overrides=overrides, production=production
     )
+    return SimulationConfig(
+        schema=schema,
+        models=models,
+        guidance=guidance,
+        awards=awards,
+        eligibility=tuple(eligibility),
+        **layered.values,
+    )
+
+
+def production_config(**kwargs: Any) -> SimulationConfig:
+    """`load_config` with the production defaults under YAML, the environment, and
+    overrides."""
+    return load_config(**kwargs, production=True)
 
 
 #: What each model field must be, to serve its domain.
@@ -293,6 +324,7 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "schema": config.schema.fingerprint(),
         "guidance": None if config.guidance is None else config.guidance.fingerprint(),
         "awards": config.awards is not None,
+        "eligibility": [rule.to_dict() for rule in config.eligibility],
         "models": dict(config.models.versions),
     }
 
@@ -353,9 +385,20 @@ def from_record(
     except ConfigError as error:
         problems += [f"settings: {p}" for p in error.problems]
         layered = None
+    rules = []
+    for entry in record.get("eligibility", []):
+        try:
+            rules.append(EligibilityRule.from_dict(entry))
+        except EligibilityError as error:
+            problems += error.problems
     models = _attach(record.get("models", {}), models_root, schema, problems)
     if problems or layered is None or models is None:
         raise ConfigError(problems)
     return SimulationConfig(
-        schema=schema, models=models, guidance=guidance, awards=awards, **layered.values
+        schema=schema,
+        models=models,
+        guidance=guidance,
+        awards=awards,
+        eligibility=tuple(rules),
+        **layered.values,
     )

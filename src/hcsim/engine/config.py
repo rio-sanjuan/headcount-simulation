@@ -6,12 +6,12 @@ schema, the guidance, the models) are treated as read-only.
 
 **Settings and objects.** A field is either a *setting*, a scalar that loads in layers (see
 `hcsim.engine.settings`), or an *object* passed in code: the schema, the models, the guidance,
-and the award settings. Every setting belongs to one *field group*, listed in `GROUPS`, and
-records it in its metadata. A setting's name is its group's name, an underscore, and its key,
-so `promotion_cycle_months` is the key `cycle_months` of the group `promotion`. The `run`
-group's settings go unprefixed. The configuration stays one flat record (ADR 0007), so the
-whole tunable surface can be listed, and a group with no settings yet is where a later domain
-puts its own.
+the award settings, and the eligibility rules, which are resolved against the schema. Every
+setting belongs to one *field group*, listed in `GROUPS`, and records it in its metadata. A
+setting's name is its group's name, an underscore, and its key, so `promotion_cycle_months` is
+the key `cycle_months` of the group `promotion`. The `run` group's settings go unprefixed. The
+configuration stays one flat record (ADR 0007), so the whole tunable surface can be listed, and
+a group with no settings yet is where a later domain puts its own.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final, cast
 
+from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.sizing import NewHireGapFill
@@ -253,7 +254,11 @@ class SimulationConfig:
     # objects, passed in code
     guidance: GuidanceForecast | None = None
     awards: AwardSettings | None = None
+    #: Eligibility rules, declared in raw labels.
+    eligibility: tuple[EligibilityRule, ...] = ()
     aligner: GroupAligner | None = field(init=False, default=None)
+    #: The rules, resolved against the schema.
+    resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
 
     def __post_init__(self) -> None:
         problems: list[str] = []
@@ -261,6 +266,11 @@ class SimulationConfig:
         problems += self._check_settings(typed)
         if self.guidance is not None and {"simulation_months", "run_date"} <= typed:
             problems += self._check_guidance(self.guidance)
+        object.__setattr__(self, "eligibility", tuple(self.eligibility))
+        try:
+            object.__setattr__(self, "resolved_eligibility", resolve(self.eligibility, self.schema))
+        except EligibilityError as error:
+            problems += [f"eligibility: {p}" for p in error.problems]
         if problems:
             raise ConfigError(problems)
 
