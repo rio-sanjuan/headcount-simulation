@@ -64,6 +64,8 @@ class StepContext:
     trajectory: int
     seeds: SeedManager
     departures: list[Buffer] = field(default_factory=list)
+    #: For each departure, whether a known event anticipated it.
+    anticipated: list[Mask] = field(default_factory=list)
     #: The run's known events, resolved, and the log of those fired.
     known: ResolvedPlan | None = None
     fired: FiringLog = field(default_factory=FiringLog)
@@ -80,6 +82,22 @@ class StepContext:
     def known_at(self, kind: EventKind) -> list[ResolvedEvent]:
         """This step's known events of `kind`."""
         return [] if self.known is None else self.known.at(self.step, kind)
+
+    def fire_known(self, rows: Buffer, kind: EventKind) -> Mask:
+        """The rows this step's known events of `kind` take, each recorded as fired. An event
+        whose employee isn't among `rows` stays unfired."""
+        taken = np.zeros(len(rows), dtype=bool)
+        events = self.known_at(kind)
+        if not events:
+            return taken
+        ids = rows[:, EmployeeColumn.EMPLOYEE_ID].astype(np.int64)
+        where = {int(e): k for k, e in enumerate(ids)}
+        for e in events:
+            row = None if e.event.employee_id is None else where.get(int(e.event.employee_id))
+            if row is not None:
+                taken[row] = True
+                self.fired.record(e.event)
+        return taken
 
     def sampled(self, rows: Buffer, p: Probabilities) -> Probabilities:
         """`p` with every employee waiting on a known event set to zero, so no sampled draw
@@ -128,15 +146,23 @@ def _draw(
     category: GuidanceCategory,
     ctx: StepContext,
     rng: np.random.Generator,
+    known: Mask | None = None,
 ) -> tuple[Mask, dict[str, QuotaRecord]]:
-    """Quota sampling for rows in covered groups, independent draws for the rest."""
+    """Quota sampling for rows in covered groups, independent draws for the rest. Rows in
+    `known` already experience the event: they count against their group's quota, and sampling
+    takes only what's left of it."""
     independent = bernoulli(p, rng)
     if not ctx.guided(category):
         return independent, {}
     groups = ctx.guided_groups(rows, layout, category)
-    selection = quota_select(p, groups, ctx.quota(category), rng)
+    quota = ctx.quota(category)
+    taken = np.zeros(len(quota), dtype=np.int64)
+    if known is not None:
+        covered = known & (groups >= 0)
+        taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
+    selection = quota_select(p, groups, np.maximum(quota - taken, 0), rng)
     mask = np.where(groups >= 0, selection.mask, independent)
-    record = QuotaRecord(selection.quota, selection.eligible, selection.realized)
+    record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken)
     return mask, {category.value: record}
 
 
@@ -159,15 +185,23 @@ def _requisitions(n: int, cost_centers: Ints, req_type: int, step: int) -> Buffe
 
 
 def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
+    """The month's known terminations leave first. Then everyone else draws from the model,
+    except those excluded by eligibility or waiting on a known event; under guidance, the known
+    terminations count against their group's quota, and sampling realizes what's left."""
     rows = state.live_employees
+    known = ctx.fire_known(rows, EventKind.TERMINATION)
     p = ctx.config.models.attrition.compute_probability(rows)
     p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p))
-    leave, quotas = _draw(p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION))
-    index = np.flatnonzero(leave)
+    p = np.where(known, 0.0, p)
+    sampled, quotas = _draw(
+        p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION), known
+    )
+    index = np.flatnonzero(sampled | known)
     return DomainResult(
         ATTRITION,
         employees=RowChange(EMPLOYEE, drop=index),
         departures=rows[index].copy(),
+        anticipated=known[index],
         quotas=quotas,
     )
 
