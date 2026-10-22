@@ -134,6 +134,26 @@ def apply(
     return _concat(frame, extra)
 
 
+def aggregate_only(
+    config: WorldConfig, agg: pd.DataFrame, rng: np.random.Generator
+) -> pd.DataFrame:
+    """Add `SYS_ADJ` rows to the aggregate fact: a share of its regular cost-center months gets
+    one, with a row count but no amount, as a system adjustment would. They have no
+    transactions behind them."""
+    share = config.quirks.aggregate_only_share
+    if share <= 0:
+        return agg
+    stock = agg[agg["trans_type"] == "ACTIVE"]
+    cells = stock.drop_duplicates(["period", "cost_center"])
+    chosen = cells[rng.random(len(cells)) < share]
+    rows = chosen.assign(trans_type="SYS_ADJ", headcount=rng.integers(1, 21, len(chosen)), amount=0)
+    combined = pd.concat([agg, rows], ignore_index=True)
+    for column, dtype in agg.dtypes.items():
+        if isinstance(dtype, pd.CategoricalDtype):
+            combined[column] = pd.Categorical(combined[column], categories=dtype.categories)
+    return combined
+
+
 def _concat(frame: pd.DataFrame, extra: list[pd.DataFrame]) -> pd.DataFrame:
     """Append rows, keeping the frame's column order and dtypes, categorical labels included."""
     dates = {

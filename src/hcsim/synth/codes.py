@@ -37,6 +37,7 @@ CATALOG: Final[dict[str, tuple[str, int, str]]] = {
     "HIRE_REV": ("measured", -1, "Reverses a hire recorded in error"),
     "TERM_REV": ("measured", 1, "Reverses a departure recorded in error"),
     "HIRE_PENDING": ("measured", 0, "An accepted offer, dated on the future start"),
+    "SYS_ADJ": ("ignored", 0, "A system adjustment, found only in the aggregate fact"),
 }
 DISPOSITIONS: Final = ("measured", "excluded", "ignored")
 

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from typing import Any
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pytest
 
+from hcsim.guidance.ingest import ingest
+from hcsim.synth.codes import CATALOG
 from hcsim.synth.config import QuirkTruth, WorldConfig, preset
-from hcsim.synth.world import World, generate_world
+from hcsim.synth.world import World, generate_world, write_world
 from tests.support.stat_check import stat_check
 
 QUIRKS = QuirkTruth(
@@ -148,7 +152,33 @@ def test_stocks_still_agree_with_the_summed_flows(quirky: World) -> None:
     pd.testing.assert_frame_equal(stock.diff().iloc[1:].astype(int), net.iloc[1:].astype(int))
 
 
-@pytest.mark.parametrize("field", ["backdated_share", "correction_share", "no_show_pair_share"])
+@pytest.mark.parametrize(
+    "field", ["backdated_share", "correction_share", "no_show_pair_share", "aggregate_only_share"]
+)
 def test_a_quirk_share_outside_the_unit_interval_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match=f"quirks.{field}"):
         WorldConfig(quirks=QuirkTruth(**{field: 1.5}))  # type: ignore[arg-type]
+
+
+def test_ignored_codes_appear_only_in_the_aggregate_fact(tmp_path: Path) -> None:
+    """With the quirk on, the aggregate carries `SYS_ADJ` rows that no transaction stands
+    behind. They're ignored, so the guidance measures, which select their codes, don't move."""
+    plain, quirky = world_with(), world_with(aggregate_only_share=0.2)
+    agg = quirky.tables["workforce_agg"].astype({"trans_type": str})
+    adjustments = agg[agg["trans_type"] == "SYS_ADJ"]
+    assert len(adjustments) > 0
+    assert (adjustments["amount"] == 0).all()
+    assert CATALOG["SYS_ADJ"][0] == "ignored"
+    assert "SYS_ADJ" not in set(txn(quirky)["trans_type"])
+    measured = agg[agg["trans_type"] != "SYS_ADJ"].reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        measured.astype({"trans_type": str}),
+        plain.tables["workforce_agg"].astype({"trans_type": str}),
+    )
+    series = []
+    for name, world in (("plain", plain), ("quirky", quirky)):
+        path = tmp_path / f"{name}.duckdb"
+        write_world(world, path)
+        with duckdb.connect(str(path), read_only=True) as con:
+            series.append(ingest(con).frame)
+    pd.testing.assert_frame_equal(series[0], series[1])
