@@ -25,11 +25,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from hcsim.guidance.combination import COMBINERS
 from hcsim.guidance.evaluation import EvaluationConfig, space_of
 from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
-from hcsim.guidance.models import MODELS
+from hcsim.guidance.models import MODELS, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
-from hcsim.guidance.selection import SelectionConfig
+from hcsim.guidance.selection import SelectionConfig, UncertaintySettings
 from hcsim.guidance.tuning import TuningSettings
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
+from hcsim.model.interface import ProbabilisticOutput
 
 
 class GuidanceConfigError(ValueError):
@@ -91,6 +92,17 @@ class Validation(_Strict):
     drop_all_zero: bool = True
 
 
+class Uncertainty(_Strict):
+    """Sample paths, and the quantiles read from them, for the artifact (see `generation`).
+    Off by default, which writes point forecasts only."""
+
+    enabled: bool = False
+    paths: int = Field(default=200, ge=10)
+    #: The quantile levels the artifact carries, in percent.
+    quantiles: tuple[int, ...] = (10, 50, 90)
+    seed: int = Field(default=0, ge=0)
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
@@ -105,6 +117,7 @@ class GuidanceConfig(_Strict):
     evaluation: Evaluation = Evaluation()
     validation: Validation = Validation()
     tuning: Tuning = Tuning()
+    uncertainty: Uncertainty = Uncertainty()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")
@@ -139,6 +152,23 @@ class GuidanceConfig(_Strict):
                 "tuning: tuning is on, but no model in the suite has a search space; models "
                 "that do include native.PoissonGLM and statsforecast.WindowAverage"
             )
+        levels = self.uncertainty.quantiles
+        if any(not 1 <= q <= 99 for q in levels) or list(levels) != sorted(set(levels)):
+            found.append(
+                f"uncertainty.quantiles: levels must be distinct, ascending, and in 1..99, "
+                f"not {list(levels)}"
+            )
+        sampling = [
+            m
+            for m in self.models
+            if MODELS.problems([m]) == []
+            and ProbabilisticOutput.SAMPLE_PATHS in capabilities(m).outputs
+        ]
+        if self.uncertainty.enabled and not sampling:
+            found.append(
+                "uncertainty: sample paths are on, but no model in the suite samples them; "
+                "models that do include native.NegativeBinomialGLM and statsforecast.AutoETS"
+            )
         if self.reconcile and ANCHOR not in self.categories:
             found.append(
                 f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "
@@ -172,6 +202,11 @@ class GuidanceConfig(_Strict):
             tuning=(
                 TuningSettings(t.trials, t.seed, t.inner_splits, t.inner_min_train_months)
                 if t.enabled
+                else None
+            ),
+            uncertainty=(
+                UncertaintySettings(self.uncertainty.paths, self.uncertainty.seed)
+                if self.uncertainty.enabled
                 else None
             ),
         )

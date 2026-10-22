@@ -13,8 +13,10 @@ Each model registers as `sktime.<Name>`:
 - `DeseasonalizedReduction`, a composed pipeline: the series deseasonalized, forecast by the
   linear reduction, and reseasonalized, as sktime's composition builds it.
 
-A configuration that names a model when the extra isn't installed is refused at load, with the
-install command. Fitting, forecasting, and failing work as for every adapter (see `base`).
+A forecaster with prediction intervals samples paths from a normal around its forecast, at
+the spread its own 80% interval implies. A configuration that names a model when the extra
+isn't installed is refused at load, with the install command. Fitting, forecasting, and
+failing work as for every adapter (see `base`).
 """
 
 from __future__ import annotations
@@ -38,7 +40,12 @@ EXTRA: Final = "sktime"
 SEASON: Final = 12
 SEED: Final = 0
 _POINT = frozenset({ProbabilisticOutput.NONE})
-_INTERVALS = frozenset({ProbabilisticOutput.NONE, ProbabilisticOutput.QUANTILES})
+_INTERVALS = frozenset(
+    {ProbabilisticOutput.NONE, ProbabilisticOutput.QUANTILES, ProbabilisticOutput.SAMPLE_PATHS}
+)
+#: The prediction-interval coverage a path's spread is read from, and its normal quantile.
+COVERAGE: Final = 0.8
+Z: Final = 1.2815515655446004
 
 
 def _forecaster(path: str, **arguments: Any) -> Any:
@@ -150,6 +157,23 @@ class SktimeModel(LibraryModel):
             raise ForecastError(f"{self.NAME} needs its covariates for the {horizon} months ahead")
         index = pd.RangeIndex(self._months, self._months + horizon)
         return np.asarray(fitted.predict(steps, X=pd.DataFrame(future[:horizon], index=index)))
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Normal draws around the forecast, at the spread the forecaster's own 80% prediction
+        interval implies, month by month."""
+        if ProbabilisticOutput.SAMPLE_PATHS not in self.OUTPUTS:
+            raise ForecastError(f"{self.NAME} gives no prediction intervals to sample from")
+        if self._fitted is None:
+            raise ForecastError("fit before sampling")
+        steps = np.arange(1, horizon + 1)
+        try:
+            band = self._fitted.predict_interval(steps, coverage=COVERAGE)
+            mean = np.asarray(self._fitted.predict(steps), dtype=np.float64).ravel()
+        except Exception as error:
+            raise ForecastError(f"{self.NAME} can't give intervals: {error}") from error
+        low, high = (np.asarray(band.iloc[:, k], dtype=np.float64) for k in (0, 1))
+        spread = np.maximum((high - low) / (2 * Z), 0.0)
+        return rng.normal(mean, spread, size=(paths, horizon))
 
 
 def _adapter(model: str, spec: Spec) -> type[SktimeModel]:

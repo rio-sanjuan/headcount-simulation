@@ -11,7 +11,8 @@ Each model registers as `statsforecast.<Name>`, built with a monthly season wher
   `RandomWalkWithDrift`, the twins of the native ones.
 
 `AutoARIMA` reads the working-day count (`weekdays`) as an exogenous regressor when the
-pipeline gives it the calendar.
+pipeline gives it the calendar. A model with prediction intervals samples paths from a normal
+around its forecast, at the spread its own 80% interval implies.
 
 Fitting, forecasting, and failing work as for every adapter (see `base`).
 """
@@ -37,7 +38,12 @@ Floats = NDArray[np.float64]
 NAMESPACE: Final = "statsforecast"
 SEASON: Final = 12
 _POINT = frozenset({ProbabilisticOutput.NONE})
-_INTERVALS = frozenset({ProbabilisticOutput.NONE, ProbabilisticOutput.QUANTILES})
+_INTERVALS = frozenset(
+    {ProbabilisticOutput.NONE, ProbabilisticOutput.QUANTILES, ProbabilisticOutput.SAMPLE_PATHS}
+)
+#: The prediction-interval level a path's spread is read from, and its normal quantile.
+LEVEL: Final = 80
+Z: Final = 1.2815515655446004
 
 #: Each model's constructor arguments, and what it can emit beyond a point forecast. The
 #: intermittent methods and window averages give intervals only through conformal calibration,
@@ -98,6 +104,26 @@ class StatsForecastModel(LibraryModel):
         if future is None or len(future) < horizon:
             raise ForecastError(f"{self.NAME} needs its covariates for the {horizon} months ahead")
         return fitted.predict(h=horizon, X=future[:horizon])["mean"]
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Normal draws around the forecast, at the spread the model's own 80% prediction
+        interval implies, month by month."""
+        if ProbabilisticOutput.SAMPLE_PATHS not in self.OUTPUTS:
+            raise ForecastError(f"{self.NAME} gives no prediction intervals to sample from")
+        if self._fitted is None:
+            raise ForecastError("fit before sampling")
+        extra = {}
+        if self.covariates_given and self.future_covariates is not None:
+            extra["X"] = self.future_covariates[:horizon]
+        try:
+            band = self._fitted.predict(h=horizon, level=[LEVEL], **extra)
+        except Exception as error:
+            raise ForecastError(f"{self.NAME} can't give intervals: {error}") from error
+        mean = np.asarray(band["mean"], dtype=np.float64)
+        spread = (np.asarray(band[f"hi-{LEVEL}"]) - np.asarray(band[f"lo-{LEVEL}"])) / (2 * Z)
+        if not (np.isfinite(mean).all() and np.isfinite(spread).all()):
+            raise ForecastError(f"{self.NAME} gave no finite intervals")
+        return rng.normal(mean, np.maximum(spread, 0.0), size=(paths, horizon))
 
 
 #: Each adapted model's class, by the library's name for it.

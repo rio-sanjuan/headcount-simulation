@@ -11,6 +11,14 @@ Selection (see `selection`) scores the suite and weighs the candidates. Generati
 
 A series none of whose selected models can refit gets no forecast, and the run report says
 why.
+
+**Uncertainty.** When the configuration asks for sample paths, a series whose weighted models
+can all sample them (see `capabilities`) draws them from the combined predictive distribution:
+a mixture of the models' own, the paths split among the models in proportion to their weights.
+Each series draws from its own seeded stream, so the paths are reproducible and independent of
+which other series the run forecasts. A series with any weighted model that can't sample gets
+no paths, since the pipeline never fabricates uncertainty, and the report says which model
+kept them from it.
 """
 
 from __future__ import annotations
@@ -21,9 +29,16 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.guidance.capabilities import SamplingModel
 from hcsim.guidance.evaluation import prepared, tuned
-from hcsim.guidance.models import ForecastError
-from hcsim.guidance.selection import Selection, SelectionConfig, SeriesForecast
+from hcsim.guidance.models import ForecastError, capabilities
+from hcsim.guidance.selection import (
+    Selection,
+    SelectionConfig,
+    SeriesForecast,
+    UncertaintySettings,
+)
+from hcsim.model.interface import ProbabilisticOutput
 
 Floats = NDArray[np.float64]
 
@@ -36,10 +51,13 @@ def generate(
     exposure: Floats | None = None,
     future_exposure: Floats | None = None,
     calendar: pd.DataFrame | None = None,
+    stream: int = 0,
 ) -> SeriesForecast:
-    """Refit the selected models on `history`, reweight, and forecast `horizon` months."""
+    """Refit the selected models on `history`, reweight, and forecast `horizon` months, with
+    sample paths drawn from the series' `stream` when the configuration asks for them."""
     values = np.asarray(history, dtype=np.float64)
     forecasts: dict[str, Floats] = {}
+    fitted: dict[str, Any] = {}
     parameters: dict[str, dict[str, Any]] = {}
     for name in selection.weights:
         tuning = config.tuning
@@ -55,6 +73,7 @@ def generate(
             forecasts[name] = model.fit(values).predict(horizon)
         except ForecastError:
             continue
+        fitted[name] = model
         parameters[name] = chosen
     if not forecasts:
         raise ForecastError(f"none of the selected models {sorted(selection.weights)} could refit")
@@ -63,6 +82,42 @@ def generate(
     combined = np.zeros(horizon)
     for name, weight in weights.items():
         combined += weight * forecasts[name]
+    paths, point_only = None, ""
+    if config.uncertainty is not None:
+        paths, point_only = _paths(fitted, weights, horizon, config.uncertainty, stream)
     return SeriesForecast(
-        combined, selection.scores, weights, selection.folds, parameters, selection.method
+        combined,
+        selection.scores,
+        weights,
+        selection.folds,
+        parameters,
+        selection.method,
+        paths,
+        point_only,
     )
+
+
+def _paths(
+    fitted: dict[str, Any],
+    weights: dict[str, float],
+    horizon: int,
+    settings: UncertaintySettings,
+    stream: int,
+) -> tuple[Floats | None, str]:
+    """Paths from the weighted mixture of the models' predictive distributions, or none and
+    the model that can't sample."""
+    for name in weights:
+        declared = ProbabilisticOutput.SAMPLE_PATHS in capabilities(name).outputs
+        if not declared or not isinstance(fitted[name], SamplingModel):
+            return None, f"{name} can't sample paths"
+    rng = np.random.default_rng(np.random.SeedSequence([settings.seed, stream]))
+    names = list(weights)
+    counts = rng.multinomial(settings.paths, [weights[n] for n in names])
+    draws = []
+    for name, count in zip(names, counts.tolist(), strict=True):
+        if count:
+            try:
+                draws.append(np.asarray(fitted[name].sample(horizon, count, rng), np.float64))
+            except ForecastError as error:
+                return None, str(error)
+    return np.concatenate(draws), ""
