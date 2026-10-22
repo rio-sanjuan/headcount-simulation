@@ -7,6 +7,7 @@ scale; the processes' parameters are the same at every scale unless a preset ove
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Final
 
@@ -925,6 +926,11 @@ class QuirkTruth:
     #: Add system-adjustment rows (`SYS_ADJ`, ignored) to the aggregate fact only, at this
     #: share of its cost-center months. They never appear among the transactions.
     aggregate_only_share: float = 0.0
+    #: Drop this share of month-ends from `req_snapshot`, as when a feed misses a run.
+    snapshot_gap_share: float = 0.0
+    #: From this month (`YYYY-MM`) on, `req_snapshot` spells its state `OPEN` instead of
+    #: `open`, as across a migration from one feed to another.
+    state_seam_month: str | None = None
 
     def problems(self) -> list[str]:
         found = []
@@ -933,9 +939,14 @@ class QuirkTruth:
             "correction_share",
             "no_show_pair_share",
             "aggregate_only_share",
+            "snapshot_gap_share",
         ):
             if not 0 <= getattr(self, name) <= 1:
                 found.append(f"quirks.{name} must lie in [0, 1]")
+        if self.state_seam_month is not None and not re.fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", self.state_seam_month
+        ):
+            found.append("quirks.state_seam_month must be a month, YYYY-MM")
         return found
 
 

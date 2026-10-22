@@ -153,7 +153,14 @@ def test_stocks_still_agree_with_the_summed_flows(quirky: World) -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["backdated_share", "correction_share", "no_show_pair_share", "aggregate_only_share"]
+    "field",
+    [
+        "backdated_share",
+        "correction_share",
+        "no_show_pair_share",
+        "aggregate_only_share",
+        "snapshot_gap_share",
+    ],
 )
 def test_a_quirk_share_outside_the_unit_interval_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match=f"quirks.{field}"):
@@ -182,3 +189,65 @@ def test_ignored_codes_appear_only_in_the_aggregate_fact(tmp_path: Path) -> None
         with duckdb.connect(str(path), read_only=True) as con:
             series.append(ingest(con).frame)
     pd.testing.assert_frame_equal(series[0], series[1])
+
+
+def _snapshot(world: World, path: Path) -> pd.DataFrame:
+    write_world(world, path)
+    with duckdb.connect(str(path), read_only=True) as con:
+        return con.execute("SELECT * FROM req_snapshot").df()
+
+
+def test_snapshot_gaps_drop_whole_month_ends(tmp_path: Path) -> None:
+    world = world_with(snapshot_gap_share=0.2)
+    gaps = world.truth["quirks"]["snapshot_gaps"]
+    assert len(gaps) > 0
+    seen = set(
+        pd.to_datetime(_snapshot(world, tmp_path / "g.duckdb")["snapshot_date"]).dt.date.astype(str)
+    )
+    assert not seen & set(gaps)
+    full = set(
+        pd.to_datetime(
+            _snapshot(world_with(), tmp_path / "f.duckdb")["snapshot_date"]
+        ).dt.date.astype(str)
+    )
+    assert full - seen == set(gaps) & full
+
+
+def test_a_feed_seam_changes_how_the_state_is_spelled(tmp_path: Path) -> None:
+    snapshot = _snapshot(world_with(state_seam_month="2023-07"), tmp_path / "s.duckdb")
+    after = pd.to_datetime(snapshot["snapshot_date"]) >= pd.Timestamp("2023-07-01")
+    assert set(snapshot.loc[~after, "state"]) == {"open"}
+    assert set(snapshot.loc[after, "state"]) == {"OPEN"}
+    assert set(_snapshot(world_with(), tmp_path / "p.duckdb")["state"]) == {"open"}
+
+
+def test_bulk_openings_come_and_go_with_their_toggle() -> None:
+    def bulk(world: World) -> int:
+        reqs = world.tables["req_interval"]
+        return int((reqs.groupby("req_id")["openings"].max() >= 15).sum())
+
+    tiny = preset("tiny", seed=12)
+    on = dataclasses.replace(tiny, openings=dataclasses.replace(tiny.openings, bulk_share=0.2))
+    off = dataclasses.replace(tiny, openings=dataclasses.replace(tiny.openings, bulk_share=0.0))
+    assert bulk(generate_world(on)) > 0
+    assert bulk(generate_world(off)) == 0
+
+
+def test_closures_are_right_censored_at_the_world_s_end(tmp_path: Path) -> None:
+    world = world_with()
+    reqs = world.tables["req_interval"]
+    assert (pd.to_datetime(reqs["closed_date"].dropna()) <= pd.Timestamp("2025-12-31")).all()
+    still_open = set(reqs.loc[reqs["closed_date"].isna(), "req_id"])
+    assert len(still_open) > 0
+    snapshot = _snapshot(world, tmp_path / "c.duckdb")
+    last = snapshot[pd.to_datetime(snapshot["snapshot_date"]) == pd.Timestamp("2025-12-31")]
+    # Everything open at the end shows in the last snapshot, except what opened that very day.
+    opened_last_day = set(
+        reqs.loc[pd.to_datetime(reqs["interval_start"]) > pd.Timestamp("2025-12-31"), "req_id"]
+    )
+    assert still_open - opened_last_day <= set(last["req_id"])
+
+
+def test_a_bad_seam_month_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"quirks\.state_seam_month"):
+        WorldConfig(quirks=QuirkTruth(state_seam_month="July"))

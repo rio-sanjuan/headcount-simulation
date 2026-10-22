@@ -417,7 +417,9 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["equity_expense"] = awards.reference_ledger(
         config, equity_tables["equity_award"], equity_tables["equity_vest"], estimates, ends
     )
+    gaps = quirks.snapshot_gaps(config, ends, quirk_rng)
     world.truth = {
+        "quirks": {"snapshot_gaps": gaps},
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
         "processes": process_truth | {"equity": equity.truth_dict(comp, price, grant)},
@@ -450,17 +452,28 @@ def write_world(world: World, path: Path) -> None:
             con.unregister("frame")
         # Month-end snapshots of every open requisition, with the openings still to fill then.
         # A requisition opened and closed inside one month never appears, as with real
-        # snapshot data.
+        # snapshot data. Quirks may drop whole month-ends, and spell the state differently
+        # from a seam month on.
+        recorded = world.truth.get("quirks", {})
+        gaps = ", ".join(f"DATE '{d}'" for d in recorded.get("snapshot_gaps", []))
+        seam = world.config.quirks.state_seam_month
+        state = (
+            f"CASE WHEN c.month_end >= DATE '{pd.Period(seam, freq='M').start_time.date()}' "
+            "THEN 'OPEN' ELSE 'open' END"
+            if seam
+            else "'open'"
+        )
         con.execute(
-            """
+            f"""
             CREATE VIEW req_snapshot AS
             SELECT c.month_end AS snapshot_date, r.req_id, r.req_type, r.cost_center,
                    r.job_code, r.location, r.company, r.is_manager, r.openings,
-                   'open' AS state, r.opened_date
+                   {state} AS state, r.opened_date
             FROM calendar c
             JOIN req_interval r
               ON r.interval_start <= c.month_end
              AND (r.closed_date IS NULL OR r.closed_date > c.month_end)
+            {f"WHERE c.month_end NOT IN ({gaps})" if gaps else ""}
             """
         )
         con.execute("CREATE TABLE truth_manifest (manifest JSON)")
