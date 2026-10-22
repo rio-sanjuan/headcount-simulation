@@ -38,6 +38,8 @@ DOMAIN_LAYOUTS: Final[Mapping[str, BufferLayout]] = MappingProxyType(
         "transfers": EMPLOYEE,
         "backfill": EMPLOYEE,  # the departures, as employee rows
         "external_fill": OPENING,
+        "conversion_fill": OPENING,
+        "transfer_fill": OPENING,
         "cancellation": OPENING,
     }
 )

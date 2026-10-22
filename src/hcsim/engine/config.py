@@ -31,6 +31,7 @@ import numpy as np
 
 from hcsim.engine.ceiling import Ceiling, CeilingError
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
+from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
@@ -167,6 +168,10 @@ class DomainModels:
     promotion: EntityModel | None = None
     #: How alike job families are, for a promotion that changes family.
     family_similarity: SimilarityMatrix | None = None
+    #: Score opening rows for filling by conversion and by transfer. Without one, its channel
+    #: never fills.
+    conversion_fill: EntityModel | None = None
+    transfer_fill: EntityModel | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -199,10 +204,19 @@ MODEL_FIELDS: Final = (
     "backfill_transfer",
     "promotion",
     "family_similarity",
+    "conversion_fill",
+    "transfer_fill",
 )
 #: The model fields a run may leave empty.
 OPTIONAL_MODELS: Final = frozenset(
-    {"performance", "backfill_transfer", "promotion", "family_similarity"}
+    {
+        "performance",
+        "backfill_transfer",
+        "promotion",
+        "family_similarity",
+        "conversion_fill",
+        "transfer_fill",
+    }
 )
 #: The artifact domain a model field loads from, where it isn't the field's own name.
 ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
@@ -323,6 +337,8 @@ class SimulationConfig:
     capacity_caps: Mapping[str, int] = field(default_factory=dict)
     #: The plan whose cost-center targets bound committed strength, `H*(c, t)`.
     plan: AlignmentTarget | None = None
+    #: A planner's reshaping of the fill channels' hazards.
+    fill_mix: FillMix | None = None
     aligner: GroupAligner | None = field(init=False, default=None)
     #: The rules, resolved against the schema.
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
