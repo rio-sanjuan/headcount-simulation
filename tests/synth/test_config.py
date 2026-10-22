@@ -68,7 +68,7 @@ def test_a_bad_configuration_lists_every_problem() -> None:
         "at least one location",
         "attrition.level_factor has no value for levels [9]",
         "compensation.base_midpoint_by_level has no value for levels [9]",
-        "grants.new_hire_value_by_level has no value for levels [9]",
+        "grants.new_hire.value_by_level has no value for levels [9]",
         "compensation.family_factor has no value for ['Astronomy', 'Engineering']",
         "growth_level_mix names unknown levels [11]",
     ):

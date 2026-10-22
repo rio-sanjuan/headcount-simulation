@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth import codes, equity, plans, population, process, structure
+from hcsim.synth import awards, codes, equity, plans, population, process, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -300,11 +300,6 @@ def _rating_dimension(config: WorldConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
-    """Plain `datetime.date` values, for the equity world's per-award arithmetic."""
-    return frame.assign(**{c: frame[c].dt.date for c in columns})
-
-
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
@@ -391,21 +386,20 @@ def generate_world(config: WorldConfig) -> World:
     daily = equity.daily_prices(ends, price, price_rng)
     world.tables["stock_price_daily"] = daily
     world.tables["stock_price"] = equity.month_end_closes(daily, ends)
-    hires = _as_dates(txn[txn["trans_type"] == "HIRE"].astype({"job_code": str}), "event_date")
-    terms = _as_dates(txn[txn["trans_type"] == "TERM"], "event_date")
-    awards, vests = equity.new_hire_awards(
-        hires,
-        terms,
-        world.tables["dim_job"],
-        daily,
-        grant,
-        ends[-1].date(),
-        grant_rng,
+    logged = ratings.log.collect(RATING_DTYPES)
+    rating_codes = pd.DataFrame(
+        {
+            "employee_id": logged["employee_id"],
+            "cycle_date": logged["cycle_date"],
+            "rating": logged["rating"].astype(np.int64),
+        }
     )
-    vests = equity.vest_status(vests, awards, terms, ends[-1].date())
-    world.tables["equity_award"] = awards
+    award_frame, vests = awards.make_awards(
+        config, txn, rating_codes, world.tables["dim_job"], daily, grant_rng
+    )
+    world.tables["equity_award"] = award_frame
     world.tables["equity_vest"] = vests
-    world.tables["equity_expense"] = equity.reference_ledger(awards, vests, ends)
+    world.tables["equity_expense"] = awards.reference_ledger(award_frame, vests, ends)
     world.truth = {
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
