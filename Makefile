@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -76,6 +76,24 @@ test-heavy: ## Slow, acceptance, and e2e tests
 BENCH_PRESETS ?= tiny small medium
 bench-world: ## Time generating, writing, and checking each world preset
 	$(UV_RUN) hcsim bench world $(foreach p,$(BENCH_PRESETS),--preset $(p)) --max-rss-gib 16
+
+# The `small` world as a release asset: generated, checked, and exported as uncompressed
+# Parquet, so the scan before upload reads every label. Then it's archived, compressed, with a
+# checksum. Builds into a fresh path under dist/, and never replaces one.
+WORLD_ASSET ?= dist/hcsim-world-small-seed0
+SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo shasum -a 256)
+world-asset: ## Build the small world's release archive under dist/
+	@if [ -e "$(WORLD_ASSET)" ] || [ -e "$(WORLD_ASSET).tar.gz" ]; then \
+		echo "$(WORLD_ASSET) is already built: move it aside first"; exit 2; \
+	fi
+	$(UV_RUN) hcsim synth generate --preset small --seed 0 --out "$(WORLD_ASSET).duckdb"
+	$(UV_RUN) hcsim synth validate --db "$(WORLD_ASSET).duckdb"
+	$(UV_RUN) hcsim synth export --db "$(WORLD_ASSET).duckdb" --out "$(WORLD_ASSET)" \
+		--compression uncompressed
+	ARTIFACT_PATH="$(WORLD_ASSET)" $(MAKE) -s sanitize-artifact
+	tar -czf "$(WORLD_ASSET).tar.gz" -C "$(dir $(WORLD_ASSET))" "$(notdir $(WORLD_ASSET))"
+	cd "$(dir $(WORLD_ASSET))" && $(SHA256) "$(notdir $(WORLD_ASSET)).tar.gz" \
+		> "$(notdir $(WORLD_ASSET)).tar.gz.sha256"
 
 # The e2e tests compare each scorecard with a committed baseline. After an intentional change,
 # regenerate the baselines and commit them in the same PR.

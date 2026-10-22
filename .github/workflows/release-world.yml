@@ -1,0 +1,40 @@
+# Attaches the `small` world to a release when it's published: generated from the release's tag,
+# checked, exported as Parquet, scanned before upload, and archived with its checksum. It uploads
+# nothing else, and nothing runs until a maintainer publishes a release.
+name: release world
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  world:
+    name: attach the small world
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: a release build mustn't read or write the shared uv cache.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - env:
+          SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
+        run: make world-asset
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" \
+            dist/hcsim-world-small-seed0.tar.gz dist/hcsim-world-small-seed0.tar.gz.sha256

@@ -1,4 +1,5 @@
-"""`hcsim synth`: generate a synthetic world and write it to DuckDB, then check or profile it."""
+"""`hcsim synth`: generate a synthetic world and write it to DuckDB, then check, profile,
+export, or import it."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from pathlib import Path
 import duckdb
 
 from hcsim.synth.config import PRESETS, preset
+from hcsim.synth.export import COMPRESSIONS, ExportError, export_parquet, import_parquet
 from hcsim.synth.profile import profile, render
 from hcsim.synth.validate import validate
 from hcsim.synth.world import generate_world, write_world
@@ -27,7 +29,18 @@ def main(argv: Sequence[str]) -> int:
     report = commands.add_parser("profile", help="write a Markdown profile of a written world")
     report.add_argument("--db", type=Path, required=True, help="the DuckDB file to profile")
     report.add_argument("--out", type=Path, help="the Markdown file to write; else stdout")
+    export = commands.add_parser("export", help="write a world's tables as Parquet files")
+    export.add_argument("--db", type=Path, required=True, help="the DuckDB file to export")
+    export.add_argument("--out", type=Path, required=True, help="a new or empty directory")
+    export.add_argument("--compression", default="zstd", choices=COMPRESSIONS)
+    load = commands.add_parser("import", help="build a DuckDB world from a Parquet export")
+    load.add_argument("--parquet", type=Path, required=True, help="the exported directory")
+    load.add_argument("--out", type=Path, required=True, help="the DuckDB file to write")
     args = parser.parse_args(list(argv))
+    if args.command == "export":
+        return _export(args.db, args.out, args.compression)
+    if args.command == "import":
+        return _import(args.parquet, args.out)
     if args.command == "validate":
         return _validate(args.db)
     if args.command == "profile":
@@ -47,6 +60,30 @@ def main(argv: Sequence[str]) -> int:
             (rows,) = con.execute(f'SELECT count(*) FROM {schema}."{name}"').fetchone() or (0,)
             label = name if schema == "main" else f"{schema}.{name}"
             print(f"  {label:26} {rows:>8} rows")
+    return 0
+
+
+def _export(path: Path, out: Path, compression: str) -> int:
+    if not path.is_file():
+        print(f"no world at {path}")
+        return 2
+    try:
+        with duckdb.connect(str(path), read_only=True) as con:
+            files = export_parquet(con, out, compression)
+    except ExportError as error:
+        print(f"hcsim synth: {error}")
+        return 2
+    print(f"wrote {len(files)} files to {out}")
+    return 0
+
+
+def _import(directory: Path, out: Path) -> int:
+    try:
+        import_parquet(directory, out)
+    except ExportError as error:
+        print(f"hcsim synth: {error}")
+        return 2
+    print(f"built {out} from {directory}")
     return 0
 
 
