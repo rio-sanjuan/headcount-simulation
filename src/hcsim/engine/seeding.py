@@ -14,6 +14,13 @@ cause that drops it:
 3. **pruning**: a row still carrying a -1 is dropped, under the first column that has one
    (`unknown_<column>`).
 
+Beyond the labels, an employee carries a manager flag, read from the stock with a missing flag
+as false, and their rating as of the run date: the rank of their latest rating from a cycle
+before it, or 0 if they've never been rated. A requisition is seeded when one of its state
+intervals is open at the snapshot. Its type is mapped from the warehouse's label, with case and
+spacing ignored, to one of the engine's three, and an unmapped type is pruned as unknown. Its
+openings are clipped to 1 through the configured maximum.
+
 Tenure and age are seeded as negative steps: `HIRE_STEP` and `CREATION_STEP` are months relative
 to the run's first month, so `step - HIRE_STEP` is real tenure. Simulated hires and
 requisitions get ids from a high base, so they never collide with the world's ids.
@@ -22,7 +29,7 @@ requisitions get ids from a high base, so they never collide with the world's id
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
@@ -61,6 +68,8 @@ from hcsim.model.data.subset import LoweredSubset, SubsetSpec
 from hcsim.model.sql.extract import seed_employees, seed_openings
 
 REQ_TYPES: Final = ("backfill", "campus", "growth")
+#: The warehouse's requisition types, as the engine's.
+REQ_TYPE_MAP: Final[Mapping[str, str]] = MappingProxyType({t: t for t in REQ_TYPES})
 AWARD_TYPES: Final = ("new_hire",)
 SIMULATED_ID_BASE: Final = 1_000_000_000
 #: Headcount is regular employees: contingent and temporary workers sit outside it.
@@ -161,12 +170,16 @@ def _pipeline(
     columns: Mapping[str, int],
     layout: BufferLayout,
     subset: LoweredSubset | None,
+    extras: Callable[[pd.DataFrame, np.ndarray], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
-    """Encode `frame` into a buffer, then filter it to the subset, then prune what's left of
-    unknown labels. Returns the buffer, the rows kept, and the rows dropped per cause."""
+    """Encode `frame` into a buffer, with `extras` writing the columns that aren't labels,
+    then filter it to the subset, then prune what's left of unknown labels. Returns the
+    buffer, the rows kept, and the rows dropped per cause."""
     rows = layout.empty(len(frame))
     for vocabulary, column in columns.items():
         rows[:, column] = schema.encode(vocabulary, frame[vocabulary], unknown="unattributed")
+    if extras is not None:
+        extras(frame, rows)
     keep = np.ones(len(frame), dtype=bool)
     causes: dict[str, int] = {}
     if subset is not None:
@@ -180,6 +193,48 @@ def _pipeline(
     return rows, keep, {cause: n for cause, n in causes.items() if n}
 
 
+def ratings_as_of(
+    con: duckdb.DuckDBPyConnection, run_date: dt.date, employees: pd.Series
+) -> np.ndarray:
+    """Each employee's rating rank from their latest cycle before `run_date`, or 0."""
+    latest = con.execute(
+        "SELECT employee_id, arg_max(rating_rank, cycle_date) AS rank FROM rating "
+        "WHERE cycle_date < ? GROUP BY employee_id",
+        [run_date],
+    ).df()
+    rank = dict(zip(latest["employee_id"], latest["rank"], strict=True))
+    return np.array([rank.get(e, 0) for e in employees], dtype=np.float64)
+
+
+def _flag(values: pd.Series) -> np.ndarray:
+    """A flag column as 0 or 1, a missing flag as 0."""
+    result: np.ndarray = values.astype("boolean").fillna(False).to_numpy(dtype=np.float64)
+    return result
+
+
+def _employee_extras(people: pd.DataFrame, rows: np.ndarray) -> None:
+    rows[:, EmployeeColumn.EMPLOYEE_ID] = people["employee_id"].to_numpy(dtype=np.float64)
+    rows[:, EmployeeColumn.IS_MANAGER] = _flag(people["is_manager"])
+    rows[:, EmployeeColumn.PERF_RATING] = people["perf_rating"].to_numpy(dtype=np.float64)
+
+
+def _opening_extras(run_date: dt.date) -> Callable[[pd.DataFrame, np.ndarray], None]:
+    def write(reqs: pd.DataFrame, rows: np.ndarray) -> None:
+        rows[:, OpeningColumn.REQ_ID] = reqs["req_id"].to_numpy(dtype=np.float64)
+        rows[:, OpeningColumn.IS_MANAGER] = _flag(reqs["is_manager"])
+        if len(reqs):
+            rows[:, OpeningColumn.CREATION_STEP] = _steps_from(reqs["opened_date"], run_date)
+
+    return write
+
+
+def _mapped_types(labels: pd.Series, mapping: Mapping[str, str]) -> pd.Series:
+    """Warehouse requisition types as the engine's, case and spacing ignored. An unmapped
+    type becomes missing, which encodes as unknown."""
+    folded = {str(k).strip().lower(): v for k, v in mapping.items()}
+    return labels.map(lambda t: folded.get(str(t).strip().lower()))
+
+
 def seed_state(
     con: duckdb.DuckDBPyConnection,
     schema: SimulationSchema,
@@ -188,6 +243,8 @@ def seed_state(
     population: PopulationSpec = REGULAR_POPULATION,
     subset: SubsetSpec | None = None,
     include_openings: bool = True,
+    max_openings: int = MAX_OPENINGS_PER_REQUISITION,
+    req_types: Mapping[str, str] = REQ_TYPE_MAP,
     opening_ceiling: int | None = None,
     with_ledger: bool = False,
 ) -> tuple[SimulationState, SeedReport]:
@@ -196,14 +253,17 @@ def seed_state(
     lowered = None if subset is None else subset.lower(schema)
     extracted = population if lowered is None else lowered.pushdown(population)
     people = con.execute(seed_employees(extracted), {"snapshot": snapshot}).df()
-    rows, keep, employee_causes = _pipeline(people, schema, _EMPLOYEE_CODES, EMPLOYEE, lowered)
-    rows[:, EmployeeColumn.EMPLOYEE_ID] = people["employee_id"].to_numpy(dtype=np.float64)
-    rows[:, EmployeeColumn.IS_MANAGER] = people["is_manager"].to_numpy(dtype=np.float64)
+    people["perf_rating"] = ratings_as_of(con, run_date, people["employee_id"])
+    rows, keep, employee_causes = _pipeline(
+        people, schema, _EMPLOYEE_CODES, EMPLOYEE, lowered, _employee_extras
+    )
     rows[:, EmployeeColumn.HIRE_STEP] = _steps_from(people["hire_date"], run_date)
     employees = rows[keep]
     n_employees = len(employees)
     employees[:, EmployeeColumn.VEST_INDEX] = np.arange(n_employees)
 
+    if max_openings < 1:
+        raise SeedingError("a requisition keeps at least one opening")
     if include_openings:
         cost_center = role_column(con, "req_interval")
         reqs = con.execute(seed_openings(extracted, cost_center), {"snapshot": snapshot}).df()
@@ -211,14 +271,13 @@ def seed_state(
         reqs = pd.DataFrame(
             columns=["req_id", *_OPENING_CODES, "is_manager", "openings", "opened_date"]
         )
-    req_rows, req_keep, opening_causes = _pipeline(reqs, schema, _OPENING_CODES, OPENING, lowered)
+    reqs[REQ_TYPE] = _mapped_types(reqs[REQ_TYPE], req_types)
+    req_rows, req_keep, opening_causes = _pipeline(
+        reqs, schema, _OPENING_CODES, OPENING, lowered, _opening_extras(run_date)
+    )
     raw_openings = reqs["openings"].to_numpy(dtype=np.float64)
-    clipped = np.clip(raw_openings, 1, MAX_OPENINGS_PER_REQUISITION)
-    req_rows[:, OpeningColumn.REQ_ID] = reqs["req_id"].to_numpy(dtype=np.float64)
-    req_rows[:, OpeningColumn.IS_MANAGER] = reqs["is_manager"].to_numpy(dtype=np.float64)
+    clipped = np.clip(raw_openings, 1, max_openings)
     req_rows[:, OpeningColumn.NUM_OPENINGS] = clipped
-    if len(reqs):
-        req_rows[:, OpeningColumn.CREATION_STEP] = _steps_from(reqs["opened_date"], run_date)
     openings = req_rows[req_keep]
 
     # Capacity: the seed plus room for the horizon. Buffers never grow.
