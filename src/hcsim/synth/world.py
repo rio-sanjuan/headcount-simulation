@@ -7,6 +7,7 @@ follow the data contract that hcsim's extraction SQL reads. Only `synth` writes 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -473,6 +474,19 @@ def _select_list(frame: pd.DataFrame) -> str:
         else:
             parts.append(quoted)
     return ", ".join(parts)
+
+
+def digest(world: World) -> str:
+    """A fingerprint of everything the world holds: every table's columns, types, and values,
+    the truth tables, and the manifest. Equal digests mean identical worlds."""
+    h = hashlib.sha256()
+    for kind, tables in (("table", world.tables), ("truth", world.truth_tables)):
+        for name in sorted(tables):
+            frame = tables[name]
+            h.update(f"{kind}:{name}:{list(frame.columns)}:{list(map(str, frame.dtypes))}".encode())
+            h.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
+    h.update(json.dumps(world.truth, sort_keys=True).encode())
+    return h.hexdigest()
 
 
 def write_world(world: World, path: Path) -> None:

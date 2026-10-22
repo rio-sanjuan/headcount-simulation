@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -70,6 +70,12 @@ memory: ## Peak-memory limits (pytest-memray)
 # pytest exits 5 when it selects no tests, which is expected until the first heavy test lands.
 test-heavy: ## Slow, acceptance, and e2e tests
 	$(UV_RUN) pytest -n auto -m "$(HEAVY)" $(TESTS) || [ $$? -eq 5 ]
+
+# Each preset in its own process, timed, with its peak memory. Timing is recorded, never gated.
+# The memory limit stops a preset too big for the machine before it swaps.
+BENCH_PRESETS ?= tiny small medium
+bench-world: ## Time generating, writing, and checking each world preset
+	$(UV_RUN) hcsim bench world $(foreach p,$(BENCH_PRESETS),--preset $(p)) --max-rss-gib 16
 
 # The e2e tests compare each scorecard with a committed baseline. After an intentional change,
 # regenerate the baselines and commit them in the same PR.
