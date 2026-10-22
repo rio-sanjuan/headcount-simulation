@@ -56,6 +56,7 @@ from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
 from hcsim.engine.modes import RunMode
 from hcsim.engine.performance import PERFORMANCE, performance
+from hcsim.engine.promotion import PROMOTION, promotion
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -75,7 +76,7 @@ FLOWS: Final[Mapping[str, str]] = {
     GROWTH: "G",
 }
 #: Every flow a run records.
-FLOW_SYMBOLS: Final = (*FLOWS.values(), "V_conv", "R_in", "R_out", "W_in", "W_out")
+FLOW_SYMBOLS: Final = (*FLOWS.values(), "V_conv", "R_in", "R_out", "W_in", "W_out", "Pi")
 #: The runtime accounting identities: each flow's sign in the change of a stock.
 HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "F_ext": +1,
@@ -99,10 +100,15 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (REORGANIZATION, reorganization),
     (OTHER_MOVEMENT, other_movement),
     (PERFORMANCE, performance),
+    (PROMOTION, promotion),
     *DOMAINS,
 )
 #: The known-event kind each domain fires.
-FIRES: Final[Mapping[str, EventKind]] = {**KINDS, ATTRITION: EventKind.TERMINATION}
+FIRES: Final[Mapping[str, EventKind]] = {
+    **KINDS,
+    PROMOTION: EventKind.PROMOTION,
+    ATTRITION: EventKind.TERMINATION,
+}
 #: Gates every run has: other movement comes only from replayed history.
 DEFAULT_GATES: Final = (
     RegistrationGate(OTHER_MOVEMENT, modes=(RunMode.REPLAY,), reason="replay only"),

@@ -304,6 +304,7 @@ _SERVES: Final[Mapping[str, type | tuple[type, ...]]] = {
     "attributes": EmpiricalAttributeGenerator,
     "performance": MarkovModel,
     "backfill_transfer": (GroupRateModel, EntityModel),
+    "promotion": EntityModel,
 }
 
 

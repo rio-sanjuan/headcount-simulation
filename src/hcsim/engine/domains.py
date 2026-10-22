@@ -156,7 +156,7 @@ class StepContext:
 Handler = Callable[[SimulationState, StepContext], DomainResult]
 
 
-def _draw(
+def draw(
     p: Probabilities,
     rows: Buffer,
     layout: BufferLayout,
@@ -210,7 +210,7 @@ def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     p = ctx.config.models.attrition.compute_probability(rows)
     p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p))
     p = np.where(known, 0.0, p)
-    sampled, quotas = _draw(
+    sampled, quotas = draw(
         p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION), known
     )
     index = np.flatnonzero(sampled | known)
@@ -308,7 +308,7 @@ def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
     row_of = np.repeat(np.arange(len(reqs)), openings)  # one entry per fillable opening
     hazard = ctx.config.models.external_fill.compute_probability(reqs)
     p = ctx.config.resolved_eligibility.restrict(EXTERNAL_FILL, reqs, hazard)[row_of]
-    filled, quotas = _draw(
+    filled, quotas = draw(
         p, reqs[row_of], OPENING, GuidanceCategory.EXTERNAL_HIRES, ctx, ctx.rng(EXTERNAL_FILL)
     )
     source = row_of[filled]

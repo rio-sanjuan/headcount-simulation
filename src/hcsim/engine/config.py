@@ -157,6 +157,8 @@ class DomainModels:
     performance: MarkovModel | None = None
     #: Backfill for transfers out. Without it, the departure backfill model serves both.
     backfill_transfer: GroupRateModel | EntityModel | None = None
+    #: Scores employee rows for promotion. Without it, only known promotions happen.
+    promotion: EntityModel | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -187,9 +189,10 @@ MODEL_FIELDS: Final = (
     "attributes",
     "performance",
     "backfill_transfer",
+    "promotion",
 )
 #: The model fields a run may leave empty.
-OPTIONAL_MODELS: Final = frozenset({"performance", "backfill_transfer"})
+OPTIONAL_MODELS: Final = frozenset({"performance", "backfill_transfer", "promotion"})
 #: The artifact domain a model field loads from, where it isn't the field's own name.
 ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
 
@@ -263,6 +266,9 @@ class SimulationConfig:
     # promotion
     promotion_cycle_months: tuple[int, ...] = setting(
         "promotion", (3, 9), "the calendar months promotions take effect"
+    )
+    promotion_gate_probability: float = setting(
+        "promotion", 1.0, "the chance a cycle month's promotions happen at all"
     )
     # pending starts
     pending_starts_staleness_days: int = setting(
@@ -429,6 +435,13 @@ class SimulationConfig:
             (
                 ("promotion_cycle_months",),
                 lambda: _months("promotion_cycle_months", self.promotion_cycle_months, 1, 12),
+            ),
+            (
+                ("promotion_gate_probability",),
+                lambda: _when(
+                    not 0.0 <= self.promotion_gate_probability <= 1.0,
+                    "promotion_gate_probability must lie in [0, 1]",
+                ),
             ),
             (
                 ("pending_starts_staleness_days",),
