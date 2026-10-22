@@ -95,7 +95,7 @@ def test_a_run_forecasts_composed_categories(con: duckdb.DuckDBPyConnection) -> 
     result = run(con, config)
     assert result.artifact.categories == frozenset({C.HEADCOUNT, C.ATTRITION, C.HIRES})
     gave = {s["step"]: s["gave"] for s in result.report["steps"]}
-    assert gave["ingest"] == ["series"]
+    assert gave["ingest"] == ["series", "grain"]
     assert gave["validate"] == ["series", "covariates"]
 
 
