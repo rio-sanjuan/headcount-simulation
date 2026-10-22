@@ -163,6 +163,10 @@ def test_a_scale_change_relabels_ratings_from_its_first_year() -> None:
     expected = np.where(before, original + 1, np.asarray(change.mapping)[original] + 1)
     assert (b.tables["rating"]["rating_rank"].to_numpy() == expected).all()
     assert b.truth["config"]["ratings"]["scale_change"]["first_year"] == 2023
+    dimension = b.tables["dim_rating"]
+    assert dimension.loc[dimension["rating_scale"] == "revised", "rating"].tolist() == list(
+        change.scale
+    )
 
 
 def test_without_a_change_every_rating_is_on_the_original_scale(world: World) -> None:

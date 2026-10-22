@@ -95,7 +95,7 @@ def test_unsupported_groupings_are_refused(con: duckdb.DuckDBPyConnection) -> No
 def test_an_empty_warehouse_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "empty.duckdb"
     world = generate_world(preset("tiny", seed=1))
-    for name in ("workforce_txn", "req_interval"):
+    for name in ("workforce_txn", "workforce_agg", "req_interval"):
         world.tables[name] = world.tables[name].iloc[0:0]
     write_world(world, path)
     with (

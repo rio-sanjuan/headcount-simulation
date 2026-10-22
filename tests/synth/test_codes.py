@@ -79,10 +79,11 @@ def unknown_code_world(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("codes") / "world.duckdb"
     write_world(generate_world(preset("tiny", seed=2)), path)
     with duckdb.connect(str(path)) as con:
-        con.execute(
-            "INSERT INTO workforce_txn SELECT * REPLACE ('MYSTERY' AS trans_type) "
-            "FROM workforce_txn LIMIT 1"
-        )
+        for table in ("workforce_txn", "workforce_agg"):
+            con.execute(
+                f"INSERT INTO {table} SELECT * REPLACE ('MYSTERY' AS trans_type) "
+                f"FROM {table} LIMIT 1"
+            )
     return path
 
 

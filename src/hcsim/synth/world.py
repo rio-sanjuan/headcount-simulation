@@ -258,6 +258,48 @@ def _ratings(ratings: RatingProcess, config: WorldConfig) -> pd.DataFrame:
     )
 
 
+AGG_KEYS = [
+    "period",
+    "cost_center",
+    "job_family",
+    "job_level",
+    "location",
+    "company",
+    "account",
+    "trans_type",
+]
+
+
+def _aggregate(txn: pd.DataFrame, jobs: pd.DataFrame) -> pd.DataFrame:
+    """`workforce_agg`: the transactions pre-summed by month, org and job attributes, account,
+    and code. `headcount` counts rows and `amount` sums their signed amounts. A month is the
+    event's month, and `period` is its month-end."""
+    job = jobs.set_index("job_code")
+    keyed = txn.assign(
+        period=txn["event_date"].dt.to_period("M").dt.end_time.dt.normalize(),
+        job_family=txn["job_code"].map(job["job_family"]),
+        job_level=txn["job_code"].map(job["job_level"]),
+    )
+    agg = keyed.groupby(AGG_KEYS, observed=True).agg(
+        headcount=("employee_id", "size"), amount=("amount", "sum")
+    )
+    return agg.reset_index()
+
+
+def _rating_dimension(config: WorldConfig) -> pd.DataFrame:
+    """Every rating label with its rank on its scale, and the scale it belongs to."""
+    rows = [
+        {"rating": label, "rating_rank": k + 1, "rating_scale": "original"}
+        for k, label in enumerate(config.ratings.scale)
+    ]
+    if config.ratings.scale_change is not None:
+        rows += [
+            {"rating": label, "rating_rank": k + 1, "rating_scale": "revised"}
+            for k, label in enumerate(config.ratings.scale_change.scale)
+        ]
+    return pd.DataFrame(rows)
+
+
 def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
     """Plain `datetime.date` values, for the equity world's per-award arithmetic."""
     return frame.assign(**{c: frame[c].dt.date for c in columns})
@@ -320,6 +362,8 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels, reporting_rng)
     world.tables["workforce_txn"] = txn
+    world.tables["workforce_agg"] = _aggregate(txn, world.tables["dim_job"])
+    world.tables["dim_rating"] = _rating_dimension(config)
     world.tables["req_interval"] = _requisitions(book, labels)
     world.tables["pending_start"] = _pending_starts(offers, book, labels)
     world.tables["calendar"] = pd.DataFrame({"month_end": [d.date() for d in ends]})
