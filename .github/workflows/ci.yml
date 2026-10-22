@@ -193,7 +193,7 @@ jobs:
   extras:
     name: extras
     needs: changes
-    if: contains(needs.changes.outputs.tests, 'tests/guidance')
+    if: needs.changes.outputs.tests == 'tests' || contains(needs.changes.outputs.tests, 'tests/guidance')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

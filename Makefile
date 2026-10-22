@@ -58,8 +58,12 @@ test-cov: ## Fast tests with coverage, for the diff-coverage gate
 
 # CI: coverage of the lines a PR changes since $BASE. hcsim.financial carries the accounting, so
 # its bar is higher. Run after test-cov.
+# The adapters for optional extras run only where their extra is installed, in the extras job.
+EXTRA_ONLY := src/hcsim/guidance/adapters/darts.py src/hcsim/guidance/adapters/sktime.py \
+	src/hcsim/guidance/adapters/prophet.py
 diff-coverage: ## Changed-line coverage: 90%, and 95% in hcsim.financial
-	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=90
+	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=90 \
+		--exclude $(EXTRA_ONLY)
 	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=95 \
 		--include 'src/hcsim/financial/*'
 
