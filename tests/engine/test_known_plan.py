@@ -48,7 +48,7 @@ def test_each_dropped_event_is_counted_under_its_first_cause() -> None:
             event(P, 1, 1),  # before the exit: kept
             event(C, 2, 2),
             event(T, 4, 2),  # after the conversion out
-            event(R, 0, 99),  # not in the seed
+            event(P, 0, 99),  # not in the seed
         )
     )
     plan = sanitize(events, employees=[1, 2], requisitions=[])
@@ -117,3 +117,14 @@ def test_a_world_s_known_events_sanitize_against_its_seed(tmp_path: Path) -> Non
     assert 0 < len(on_seeded) <= len(starts)
     assert sum(len(v) for v in plan.reservations.values()) == len(on_seeded)
     assert plan.fillable(state.live_openings, 0).min() >= 0
+
+
+def test_a_reorganization_from_outside_the_seed_crosses_the_boundary_in() -> None:
+    joining = KnownEvent(
+        R, 2, Source.DECLARED, employee_id=99, destination={"cost_center": "CC-01"}
+    )
+    plan = sanitize(KnownEvents((joining,)), employees=[1], requisitions=[])
+    (kept,) = plan.events.events
+    assert kept.destination == {"cost_center": "CC-01", "boundary": "in"}
+    assert plan.dropped == {}
+    assert plan.excluded(0).tolist() == [99]  # held until they arrive

@@ -20,6 +20,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.config import SimulationConfig
+from hcsim.engine.known_events import EventKind
+from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -62,10 +64,25 @@ class StepContext:
     trajectory: int
     seeds: SeedManager
     departures: list[Buffer] = field(default_factory=list)
+    #: The run's known events, resolved, and the log of those fired.
+    known: ResolvedPlan | None = None
+    fired: FiringLog = field(default_factory=FiringLog)
     _quotas: dict[GuidanceCategory, Ints] = field(default_factory=dict)
 
     def rng(self, domain: str) -> np.random.Generator:
         return self.seeds.generator(self.trajectory, domain)
+
+    def known_at(self, kind: EventKind) -> list[ResolvedEvent]:
+        """This step's known events of `kind`."""
+        return [] if self.known is None else self.known.at(self.step, kind)
+
+    def sampled(self, rows: Buffer, p: Probabilities) -> Probabilities:
+        """`p` with every employee waiting on a known event set to zero, so no sampled draw
+        takes them first."""
+        if self.known is None:
+            return p
+        result: Probabilities = np.where(self.known.plan.sampled(rows, self.step), p, 0.0)
+        return result
 
     def guided(self, category: GuidanceCategory) -> bool:
         return self.config.guidance is not None and self.config.guidance.covers(category)
@@ -139,7 +156,7 @@ def _requisitions(n: int, cost_centers: Ints, req_type: int, step: int) -> Buffe
 def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     rows = state.live_employees
     p = ctx.config.models.attrition.compute_probability(rows)
-    p = ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p)
+    p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p))
     leave, quotas = _draw(p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION))
     index = np.flatnonzero(leave)
     return DomainResult(

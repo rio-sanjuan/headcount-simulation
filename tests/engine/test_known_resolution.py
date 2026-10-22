@@ -161,3 +161,33 @@ def test_a_world_s_known_events_resolve(tmp_path: Path) -> None:
     assert starts
     assert all(EmployeeColumn.JOB_FAMILY in e.codes for e in starts)
     assert set(jobs[next(iter(jobs))]) == {"job_family", "job_level", "tech_indicator"}
+
+
+def test_a_boundary_crossing_is_checked() -> None:
+    def reorg(person: int, destination: dict[str, str]) -> KnownEvent:
+        return KnownEvent(EventKind.REORGANIZATION, 0, Source.DECLARED, person, None, destination)
+
+    out = resolve_plan(_plan(reorg(1, {"boundary": "out"})), SCHEMA)
+    assert out.events[0].boundary == "out"
+    assert dict(out.events[0].codes) == {}
+    bad = [
+        reorg(1, {"boundary": "out", "cost_center": "CC-01"}),
+        reorg(2, {"boundary": "sideways"}),
+        KnownEvent(EventKind.CONVERSION_OUT, 0, Source.DECLARED, 3, None, {"boundary": "out"}),
+    ]
+    with pytest.raises(KnownEventError) as caught:
+        resolve_plan(_plan(*bad), SCHEMA)
+    assert caught.value.problems == [
+        "conversion_out of 3 at step 0: only a reorganization crosses the run's boundary",
+        "reorganization of 1 at step 0: a reorganization out of the run sets nothing else",
+        "reorganization of 2 at step 0: a boundary is in or out, not 'sideways'",
+    ]
+    # Someone from outside the seed crosses in, and needs a whole role.
+    joining = sanitize(
+        KnownEvents((reorg(77, {"cost_center": "CC-01"}),)), employees=[], requisitions=[]
+    )
+    with pytest.raises(KnownEventError, match="needs a whole role, not"):
+        resolve_plan(joining, SCHEMA)
+    thin = SimulationSchema.build({COST_CENTER: ["CC-01"]})
+    with pytest.raises(KnownEventError, match="the schema has no location vocabulary"):
+        resolve_plan(_plan(reorg(1, {"location": "L1"})), thin)

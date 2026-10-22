@@ -97,6 +97,9 @@ class DomainResult:
     ledger: Mapping[str, Ints] = field(default_factory=dict)
     #: Accounting for guided draws, by category.
     quotas: Mapping[str, QuotaRecord] = field(default_factory=dict)
+    #: Flows per cost center, by symbol, for a domain with more than one. A domain with one
+    #: flow leaves this empty, and the loop reads its flow from what the apply step changed.
+    flows: Mapping[str, Ints] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.employees.layout is not EMPLOYEE or self.openings.layout is not OPENING:
