@@ -58,8 +58,13 @@ test-cov: ## Fast tests with coverage, for the diff-coverage gate
 
 # CI: coverage of the lines a PR changes since $BASE. hcsim.financial carries the accounting, so
 # its bar is higher. Run after test-cov.
+# The adapters for optional extras run only where their extra is installed, in the extras job.
+# diff-cover matches its patterns against whole paths, so each starts with a wildcard.
+EXTRA_ONLY := '*/guidance/adapters/darts.py' '*/guidance/adapters/sktime.py' \
+	'*/guidance/adapters/prophet.py'
 diff-coverage: ## Changed-line coverage: 90%, and 95% in hcsim.financial
-	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=90
+	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=90 \
+		--exclude $(EXTRA_ONLY)
 	$(UV_RUN) diff-cover $(COVERAGE_XML) --compare-branch="$$BASE" --fail-under=95 \
 		--include 'src/hcsim/financial/*'
 
@@ -71,6 +76,13 @@ memory: ## Peak-memory limits (pytest-memray)
 # pytest exits 5 when it selects no tests, which is expected until the first heavy test lands.
 test-heavy: ## Slow, acceptance, and e2e tests
 	$(UV_RUN) pytest -n auto -m "$(HEAVY)" $(TESTS) || [ $$? -eq 5 ]
+
+# The adapters' optional extras. darts-deep stays out: PyTorch on Linux brings CUDA with it, so
+# the deep models are checked where it's installed, and skip elsewhere.
+EXTRAS := darts
+test-extras: ## The optional extras' adapter tests, with the extras installed
+	$(UV_RUN) $(foreach extra,$(EXTRAS),--extra $(extra)) pytest -n auto -m extras $(TESTS) \
+		|| [ $$? -eq 5 ]
 
 # Each preset in its own process, timed, with its peak memory. Timing is recorded, never gated.
 # The memory limit stops a preset too big for the machine before it swaps.

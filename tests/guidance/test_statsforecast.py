@@ -64,7 +64,7 @@ def test_a_model_that_can_t_forecast_raises_a_forecast_error() -> None:
     model = build("statsforecast.AutoETS")
     with pytest.raises(ForecastError, match="fit before"):
         model.predict(3)
-    with pytest.raises(ForecastError, match="at least two months"):
+    with pytest.raises(ForecastError, match="at least 2 months"):
         model.fit(np.ones(1))
     broken = np.r_[SEASONAL[:24], np.nan, SEASONAL[25:]]
     with pytest.raises(ForecastError, match=r"statsforecast\.AutoETS"):

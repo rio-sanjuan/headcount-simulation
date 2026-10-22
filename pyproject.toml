@@ -22,7 +22,10 @@ dependencies = [
 hcsim = "hcsim.cli:main"
 
 [project.optional-dependencies]
-darts = ["darts>=0.36"]
+darts = [
+    "darts>=0.36",
+    "lightgbm>=4.5",
+]
 darts-deep = ["darts[torch]>=0.36"]
 sktime = ["sktime>=0.38"]
 prophet = ["prophet>=1.1.6"]
@@ -123,6 +126,7 @@ markers = [
     "slow: long-running tests, run in the heavy CI jobs",
     "acceptance: statistical checks over many trajectories",
     "e2e: end-to-end runs through every layer",
+    "extras: tests of an optional extra's adapter, run in the extras CI job",
 ]
 
 # Layer contracts from section 3.2 of the plan. The study-module contracts ("no study imports
