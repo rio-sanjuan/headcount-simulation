@@ -38,10 +38,15 @@ def main(argv: Sequence[str]) -> int:
     write_world(world, args.out)
     elapsed = time.perf_counter() - started
     print(f"wrote the {args.preset!r} world (seed {args.seed}) to {args.out} in {elapsed:.1f}s")
-    for name, frame in sorted(world.tables.items()):
-        print(f"  {name:26} {len(frame):>8} rows")
-    for name, frame in sorted(world.truth_tables.items()):
-        print(f"  {'truth.' + name:26} {len(frame):>8} rows")
+    with duckdb.connect(str(args.out), read_only=True) as con:
+        listed = con.execute(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_type = 'BASE TABLE' ORDER BY table_schema, table_name"
+        ).fetchall()
+        for schema, name in listed:
+            (rows,) = con.execute(f'SELECT count(*) FROM {schema}."{name}"').fetchone() or (0,)
+            label = name if schema == "main" else f"{schema}.{name}"
+            print(f"  {label:26} {rows:>8} rows")
     return 0
 
 

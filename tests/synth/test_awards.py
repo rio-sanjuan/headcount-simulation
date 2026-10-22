@@ -165,7 +165,8 @@ def test_executives_new_hire_and_annual_awards_use_the_executive_schedule(
     ].isin(["new_hire", "annual"])
     assert executive.any()
     assert (award.loc[executive, "schedule"] == "executive").all()
-    assert (award.loc[~executive, "schedule"] == award.loc[~executive, "award_type"]).all()
+    others = award.loc[~executive, ["schedule", "award_type"]].astype(str)
+    assert (others["schedule"] == others["award_type"]).all()
 
 
 def _quarter_ends(world: World) -> pd.Series:

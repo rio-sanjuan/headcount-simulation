@@ -45,6 +45,9 @@ def test_an_event_log_concatenates_chunks_and_checks_their_columns() -> None:
     with pytest.raises(KeyError, match="missing \\['b'\\]"):
         log.add(1, a=[1])
     assert EventLog(["a"]).collect({"a": np.int64})["a"].size == 0
+    released = log.collect({"a": np.int64, "b": np.int8}, release=True)
+    assert {k: v.tolist() for k, v in released.items()} == {k: v.tolist() for k, v in out.items()}
+    assert len(log) == 0  # released: the chunks are gone
 
 
 def test_vector_hazards_match_the_scalar_definitions() -> None:

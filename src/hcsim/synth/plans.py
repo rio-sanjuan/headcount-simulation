@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.synth.columns import categorical as label
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 
@@ -90,8 +91,12 @@ def vintages(
     first = pd.Period(config.start_month, freq="M")
     n, families = len(cost_centers), len(config.families)
     dominant = np.arange(n) % families
+    # Labels are categoricals built from codes: at scale, strings per row would dwarf the plan.
+    names = [str(p) for p in publications(config)]
+    places = [*cost_centers, *(f"HEDGE-{o}" for o in org_names)]
+
     frames = []
-    for published in publications(config):
+    for v, published in enumerate(publications(config)):
         k0 = (published - first).n
         span = np.arange(k0, k0 + t.horizon_months)
         regime = rng.choice(len(REGIMES), size=n, p=list(t.regime_shares))
@@ -109,15 +114,22 @@ def vintages(
         months = np.array(
             [(first + int(k)).end_time.normalize().date() for k in span], dtype="datetime64[D]"
         )
+        rows = n * families * len(span)
         frames.append(
             pd.DataFrame(
                 {
-                    "vintage": str(published),
-                    "published_date": published.start_time.date(),
-                    "cost_center": np.tile(np.repeat(np.array(cost_centers), families), len(span)),
-                    "job_family": np.tile(np.array(config.families), n * len(span)),
+                    "vintage": label(np.full(rows, v), names),
+                    "published_date": np.full(rows, published.start_time.to_datetime64()),
+                    "cost_center": label(
+                        np.tile(np.repeat(np.arange(n), families), len(span)), places
+                    ),
+                    "job_family": label(
+                        np.tile(np.arange(families), n * len(span)), list(config.families)
+                    ),
                     "month_end": np.repeat(months, n * families),
-                    "regime": np.tile(np.repeat(np.array(REGIMES)[regime], families), len(span)),
+                    "regime": label(
+                        np.tile(np.repeat(regime, families), len(span)), [*REGIMES, "hedge"]
+                    ),
                     "is_hedge": False,
                     "target_headcount": cells.ravel().round(4),
                 }
@@ -128,20 +140,21 @@ def vintages(
             [target[:, org_of_cost_center == o].sum(axis=1) for o in range(len(org_names))], axis=1
         )
         hedge = org_total * rng.normal(t.hedge_share, t.hedge_sigma, len(org_names))
+        rows = len(org_names) * len(span)
         frames.append(
             pd.DataFrame(
                 {
-                    "vintage": str(published),
-                    "published_date": published.start_time.date(),
-                    "cost_center": np.tile(np.array([f"HEDGE-{o}" for o in org_names]), len(span)),
-                    "job_family": None,
+                    "vintage": label(np.full(rows, v), names),
+                    "published_date": np.full(rows, published.start_time.to_datetime64()),
+                    "cost_center": label(np.tile(n + np.arange(len(org_names)), len(span)), places),
+                    "job_family": label(np.full(rows, -1), list(config.families)),
                     "month_end": np.repeat(months, len(org_names)),
-                    "regime": "hedge",
+                    "regime": label(np.full(rows, len(REGIMES)), [*REGIMES, "hedge"]),
                     "is_hedge": True,
                     "target_headcount": hedge.ravel().round(4),
                 }
             )
         )
-    frame = pd.concat(frames, ignore_index=True)
-    # Cells with no plan in them carry nothing, and the fact leaves them out.
-    return frame[frame["target_headcount"] != 0].reset_index(drop=True)
+        # Cells with no plan in them carry nothing, and the fact leaves them out.
+        frames = [*frames[:-2], *(f[f["target_headcount"] != 0] for f in frames[-2:])]
+    return pd.concat(frames, ignore_index=True)

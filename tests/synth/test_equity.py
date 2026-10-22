@@ -126,7 +126,7 @@ def test_the_ledger_recognizes_exactly_the_vested_value(world: World) -> None:
     awards, vests, ledger = (
         world.tables["equity_award"],
         world.tables["equity_vest"],
-        world.tables["equity_expense"],
+        world.table("equity_expense"),
     )
     last_vest = pd.to_datetime(vests.groupby("award_id")["vest_date"].max())
     closed = last_vest[last_vest <= pd.Timestamp(WORLD_END)].index
@@ -146,7 +146,7 @@ def test_the_ledger_recognizes_exactly_the_vested_value(world: World) -> None:
 
 
 def test_ledger_signs(world: World) -> None:
-    ledger = world.tables["equity_expense"]
+    ledger = world.table("equity_expense")
     assert (ledger["gross"] >= 0).all()
     assert (ledger["net"] <= ledger["gross"] + 1e-9).all()  # net of the forfeiture estimate
     assert (ledger["trueup_attrition"] <= 1e-9).all()
@@ -162,7 +162,7 @@ def _estimates(world: World) -> pd.DataFrame:
 
 
 def test_net_is_gross_less_the_cohort_s_estimate_in_effect(world: World) -> None:
-    ledger = world.tables["equity_expense"]
+    ledger = world.table("equity_expense")
     awards = world.tables["equity_award"].set_index("award_id")
     rows = ledger[ledger["gross"] > 0].assign(
         cohort=lambda f: pd.to_datetime(f["award_id"].map(awards["award_date"])).dt.year,
@@ -176,7 +176,7 @@ def test_net_is_gross_less_the_cohort_s_estimate_in_effect(world: World) -> None
 
 
 def test_rate_true_ups_fall_only_on_january_revisions(world: World) -> None:
-    ledger = world.tables["equity_expense"]
+    ledger = world.table("equity_expense")
     moved = ledger[ledger["trueup_rate"].abs() > 1e-9]
     assert len(moved) > 0
     assert set(pd.to_datetime(moved["period"]).dt.month) == {1}
@@ -214,7 +214,7 @@ def test_every_settled_tranche_ties_out_in_a_larger_world(small_world: World) ->
     """The accounting identity on a small world: every award whose tranches have all settled
     inside the window recognizes exactly its vested value, rate true-ups and all."""
     awards, vests = small_world.tables["equity_award"], small_world.tables["equity_vest"]
-    ledger = small_world.tables["equity_expense"]
+    ledger = small_world.table("equity_expense")
     settled = (
         vests.assign(
             done=(vests["status"] == "forfeited")

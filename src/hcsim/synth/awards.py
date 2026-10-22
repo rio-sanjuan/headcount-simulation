@@ -22,13 +22,15 @@ engine's calculator can be scored against it: a loop per award, straight-line pe
 from __future__ import annotations
 
 import datetime as dt
-from typing import Final
+from collections.abc import Iterator
+from typing import Any, Final
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth.config import WorldConfig
+from hcsim.synth.columns import categorical
+from hcsim.synth.config import GrantTruth, WorldConfig
 
 LEDGER_COLUMNS: Final = [
     "award_id",
@@ -74,33 +76,61 @@ def _business_day(dates: NDArray[np.datetime64]) -> NDArray[np.datetime64]:
 
 
 class _History:
-    """What the triggers read from the world's tables, in plain columns."""
+    """What the triggers read from the world's tables, in plain columns.
+
+    Only the events are copied: the month-end stocks, nearly every row of the transactions,
+    are read from the table itself through an index by month-end, since a copy of them would
+    cost gigabytes at the larger presets.
+    """
+
+    #: The events the triggers, forfeitures, and holder links read.
+    EVENTS: Final = ("HIRE", "PROMO", "XFER_IN", "REORG_IN", "CONV_IN", *EXITS)
 
     def __init__(self, txn: pd.DataFrame, ratings: pd.DataFrame, jobs: pd.DataFrame) -> None:
-        level = jobs.set_index("job_code")["job_level"]
-        # Labels stay categorical: copying millions of rows as Python strings would cost
-        # gigabytes at the larger presets.
-        self.txn = pd.DataFrame(
-            {
-                "employee_id": txn["employee_id"].to_numpy(),
-                "trans_type": txn["trans_type"],
-                "date": txn["event_date"].to_numpy().astype("datetime64[D]"),
-                "cost_center": txn["cost_center"],
-                "company": txn["company"],
-                "job_level": txn["job_code"].map(level).to_numpy(np.int64),
-                "account": txn["account"],
-                "hire_date": txn["hire_date"].to_numpy().astype("datetime64[D]"),
-            }
-        )
+        self._level = jobs.set_index("job_code")["job_level"]
+        self._source = txn
+        codes = txn["trans_type"]
+        self.txn = self._plain(txn[codes.isin(self.EVENTS).to_numpy()])
         exits = self.txn[self.txn["trans_type"].isin(EXITS)]
         self.exits = exits[["employee_id", "date"]].rename(columns={"date": "exit_date"})
         self.ratings = ratings.sort_values("cycle_date")
+        # Stock rows grouped by month-end, each group in the table's own order.
+        active = np.flatnonzero((codes == "ACTIVE").to_numpy())
+        dates = txn["event_date"].to_numpy()[active]
+        order = np.argsort(dates, kind="stable")
+        self._stock_rows = active[order]
+        days, first = np.unique(dates[order], return_index=True)
+        self._stock_span = dict(
+            zip(
+                days.astype("datetime64[D]").tolist(),
+                zip(first.tolist(), [*first[1:].tolist(), len(order)], strict=True),
+                strict=True,
+            )
+        )
+
+    def _plain(self, rows: pd.DataFrame) -> pd.DataFrame:
+        # Labels stay categorical: copying millions of rows as Python strings would cost
+        # gigabytes at the larger presets.
+        return pd.DataFrame(
+            {
+                "employee_id": rows["employee_id"].to_numpy(),
+                "trans_type": rows["trans_type"],
+                "date": rows["event_date"].to_numpy().astype("datetime64[D]"),
+                "cost_center": rows["cost_center"],
+                "company": rows["company"],
+                "job_level": rows["job_code"].map(self._level).to_numpy(np.int64),
+                "account": rows["account"],
+                "hire_date": rows["hire_date"].to_numpy().astype("datetime64[D]"),
+            },
+            index=rows.index,
+        )
 
     def events(self, code: str) -> pd.DataFrame:
         return self.txn[self.txn["trans_type"] == code]
 
     def stock(self, month_end: np.datetime64, regular: str) -> pd.DataFrame:
-        rows = self.txn[(self.txn["trans_type"] == "ACTIVE") & (self.txn["date"] == month_end)]
+        lo, hi = self._stock_span.get(month_end.astype("datetime64[D]").item(), (0, 0))
+        rows = self._plain(self._source.iloc[self._stock_rows[lo:hi]])
         return rows[rows["account"] == regular]
 
     def rating_on(self, frame: pd.DataFrame, when: str) -> NDArray[np.int64]:
@@ -303,8 +333,10 @@ def make_awards(
         plan=plan,
         schedule=schedule,
     )
-    vests = _vests(config, awards, history)
-    settles = _settle_dates(awards, vests, history, world_end)
+    # A holder's next exit is the same for every tranche of an award: find it once per award.
+    left = history.next_exit(awards, "award_date")
+    vests = _vests(config, awards, left)
+    settles = _settle_dates(awards, vests, left, world_end)
     return {
         "equity_award": _frame(awards),
         "equity_vest": vests,
@@ -315,12 +347,14 @@ def make_awards(
 
 
 def _settle_dates(
-    awards: pd.DataFrame, vests: pd.DataFrame, history: _History, world_end: np.datetime64
+    awards: pd.DataFrame,
+    vests: pd.DataFrame,
+    left: NDArray[np.datetime64],
+    world_end: np.datetime64,
 ) -> NDArray[np.datetime64]:
-    """When each award stops being held: its last vest, its holder's exit, or the world's end,
-    whichever comes first."""
+    """When each award stops being held: its last vest, its holder's exit (`left`), or the
+    world's end, whichever comes first."""
     last_vest = vests.groupby("award_id")["vest_date"].max().reindex(awards["award_id"]).to_numpy()
-    left = history.next_exit(awards, "award_date")
     end = np.minimum(last_vest.astype("datetime64[D]"), world_end)
     result: NDArray[np.datetime64] = np.where(~np.isnat(left) & (left < end), left, end)
     return result
@@ -356,8 +390,10 @@ def _valuations(
         }
     )
     frames = [f for f in (grant, remeasured) if len(f)]
-    return pd.concat(frames, ignore_index=True).sort_values(
-        ["award_id", "valuation_date"], ignore_index=True
+    return (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["award_id", "valuation_date"], ignore_index=True)
+        .astype({"basis": pd.CategoricalDtype(["grant_date_fair_value", "appraisal"])})
     )
 
 
@@ -393,8 +429,8 @@ def _holders(
         {
             "award_id": links["award_id"],
             "employee_id": links["employee_id"],
-            "cost_center": links["cost_center"].astype(str),
-            "company": links["company"].astype(str),
+            "cost_center": links["cost_center"].astype("category"),
+            "company": links["company"].astype("category"),
             "valid_from": links["valid_from"].to_numpy().astype("datetime64[s]"),
             "valid_to": pd.to_datetime(valid_to).to_numpy().astype("datetime64[s]"),
         }
@@ -406,66 +442,79 @@ def _frame(awards: pd.DataFrame) -> pd.DataFrame:
         {
             "award_id": awards["award_id"],
             "employee_id": awards["employee_id"],
-            "award_type": awards["award_type"],
+            "award_type": pd.Categorical(awards["award_type"], categories=list(GrantTruth.TYPES)),
             "award_date": awards["award_date"].to_numpy().astype("datetime64[s]"),
             "shares": awards["shares"],
             "fair_value": awards["fair_value"],
             "cost_center": awards["cost_center"],
             "company": awards["company"],
             "job_level": awards["job_level"].astype(np.int64),
-            "plan": awards["plan"],
-            "schedule": awards["schedule"],
-        }
-    )
-
-
-def _vests(config: WorldConfig, awards: pd.DataFrame, history: _History) -> pd.DataFrame:
-    """One row per tranche, with its status: vested, forfeited (the holder left first), or
-    still unvested at the world's end."""
-    parts = []
-    for name, (vest_months, vest_shares) in schedules(config).items():
-        mine = awards[awards["schedule"] == name]
-        k = len(vest_months)
-        shares = mine["shares"].to_numpy()
-        split = np.floor(np.outer(shares, vest_shares)).astype(np.int64)
-        split[:, -1] += shares - split.sum(axis=1)  # the last tranche absorbs rounding
-        if mine.empty:
-            continue
-        dates = np.repeat(mine["award_date"].to_numpy().astype("datetime64[D]"), k)
-        vest_dates = add_months(dates, np.tile(np.asarray(vest_months), len(mine)))
-        parts.append(
-            pd.DataFrame(
-                {
-                    "award_id": np.repeat(mine["award_id"].to_numpy(), k),
-                    "employee_id": np.repeat(mine["employee_id"].to_numpy(), k),
-                    "award_date": dates.astype("datetime64[s]"),
-                    "vest_number": np.tile(np.arange(1, k + 1), len(mine)),
-                    "vest_date": vest_dates.astype("datetime64[s]"),
-                    "shares": split.ravel(),
-                }
-            )
-        )
-    vests = pd.concat(parts, ignore_index=True).sort_values(
-        ["award_id", "vest_number"], ignore_index=True
-    )
-    world_end = _world_end(config)
-    left = history.next_exit(vests, "award_date")
-    vest_date = vests["vest_date"].to_numpy().astype("datetime64[D]")
-    forfeited = ~np.isnat(left) & (left < vest_date)
-    status = np.where(
-        forfeited, "forfeited", np.where(vest_date <= world_end, "vested", "unvested")
-    )
-    return pd.DataFrame(
-        {
-            "award_id": vests["award_id"],
-            "vest_number": vests["vest_number"],
-            "vest_date": vest_date.astype("datetime64[s]"),
-            "shares": vests["shares"],
-            "status": status,
-            "forfeit_date": np.where(forfeited, left, np.datetime64("NaT", "D")).astype(
-                "datetime64[s]"
+            "plan": pd.Categorical(awards["plan"], categories=["primary", "offline"]),
+            "schedule": pd.Categorical(
+                awards["schedule"], categories=[*GrantTruth.TYPES, "executive"]
             ),
         }
+    )
+
+
+#: Tranches whose vest dates are computed at a time, to bound the working arrays.
+_VEST_BLOCK: Final = 1_000_000
+
+
+def _vests(config: WorldConfig, awards: pd.DataFrame, left: NDArray[np.datetime64]) -> pd.DataFrame:
+    """One row per tranche, with its status: vested, forfeited (the holder left first), or
+    still unvested at the world's end. `left` is each award's holder's next exit, or NaT.
+
+    Tranches are built in award order straight from each schedule's table of months and
+    shares, so there's nothing to sort, and no array outlives its use: at scale, the working
+    arrays would otherwise cost several times the finished table."""
+    plans = schedules(config)
+    names = list(plans)
+    widest = max(len(months) for months, _ in plans.values())
+    months_of = np.zeros((len(names), widest), dtype=np.int64)
+    share_of = np.zeros((len(names), widest), dtype=np.float64)
+    for row, (months, shares) in enumerate(plans.values()):
+        months_of[row, : len(months)] = months
+        share_of[row, : len(shares)] = shares
+    count = np.array([len(months) for months, _ in plans.values()], dtype=np.int64)
+    code = pd.Categorical(awards["schedule"], categories=names).codes
+    k = count[code]  # tranches per award
+    first = np.cumsum(k) - k  # each award's first tranche
+    position = np.repeat(np.arange(len(awards), dtype=np.int64), k)
+    number = np.arange(len(position), dtype=np.int64) - first[position] + 1
+    plan = code[position]
+    award_shares = awards["shares"].to_numpy(np.int64)
+    split = np.floor(award_shares[position] * share_of[plan, number - 1]).astype(np.int64)
+    if len(split):  # the last tranche absorbs rounding
+        split[first + k - 1] += award_shares - np.add.reduceat(split, first)
+    award_dates = awards["award_date"].to_numpy().astype("datetime64[D]")
+    vest_date = np.empty(len(position), dtype="datetime64[D]")
+    for lo in range(0, len(position), _VEST_BLOCK):
+        hi = lo + _VEST_BLOCK
+        vest_date[lo:hi] = add_months(
+            award_dates[position[lo:hi]], months_of[plan[lo:hi], number[lo:hi] - 1]
+        )
+    del plan
+    world_end = _world_end(config)
+    exit_date = left[position]
+    forfeited = ~np.isnat(exit_date) & (exit_date < vest_date)
+    status = categorical(
+        np.where(forfeited, 2, np.where(vest_date <= world_end, 0, 1)).astype(np.int8),
+        ["vested", "unvested", "forfeited"],
+    )
+    exit_date[~forfeited] = np.datetime64("NaT", "D")
+    award_id = awards["award_id"].to_numpy(np.int64)[position]
+    del position, forfeited
+    return pd.DataFrame(
+        {
+            "award_id": award_id,
+            "vest_number": number,
+            "vest_date": vest_date.astype("datetime64[s]"),
+            "shares": split,
+            "status": status,
+            "forfeit_date": exit_date.astype("datetime64[s]"),
+        },
+        copy=False,
     )
 
 
@@ -479,24 +528,30 @@ def forfeiture_estimates(
     with a weight that rises to one over the credibility years, capped at the cap.
     """
     g = config.grants
-    cohort = pd.to_datetime(awards.set_index("award_id")["award_date"]).dt.year
-    tranche = vests.assign(cohort=vests["award_id"].map(cohort))
-    first, last = int(cohort.min()), config_last_year(config)
+    # Plain arrays: a copy of the tranche table per cohort would cost gigabytes at scale.
+    award_ids = awards["award_id"].to_numpy(np.int64)
+    years = pd.to_datetime(awards["award_date"]).dt.year.to_numpy(np.int64)
+    order = np.argsort(award_ids, kind="stable")
+    cohort = years[order][np.searchsorted(award_ids[order], vests["award_id"].to_numpy(np.int64))]
+    shares = vests["shares"].to_numpy(np.int64)
+    forfeit = vests["forfeit_date"].to_numpy().astype("datetime64[D]")
+    first, last = int(years.min()), config_last_year(config)
     rows = []
     for c in range(first, last + 1):
-        mine = tranche[tranche["cohort"] == c]
-        total = float(mine["shares"].sum())
+        mine = cohort == c
+        mine_shares, mine_forfeit = shares[mine], forfeit[mine]
+        total = float(mine_shares.sum())
         rows.append(
             {"cohort": c, "effective_date": dt.date(c, 1, 1), "estimate": g.forfeiture_prior}
         )
         for year in range(c + 1, last + 1):
-            revision = pd.Timestamp(year, 1, 1)
-            lost = float(mine.loc[pd.to_datetime(mine["forfeit_date"]) < revision, "shares"].sum())
+            revision = np.datetime64(dt.date(year, 1, 1), "D")
+            lost = float(mine_shares[mine_forfeit < revision].sum())
             observed = lost / total if total else 0.0
             weight = min(1.0, (year - c) / g.forfeiture_credibility_years)
             estimate = min(g.forfeiture_cap, (1 - weight) * g.forfeiture_prior + weight * observed)
             rows.append(
-                {"cohort": c, "effective_date": revision.date(), "estimate": round(estimate, 6)}
+                {"cohort": c, "effective_date": dt.date(year, 1, 1), "estimate": round(estimate, 6)}
             )
     return pd.DataFrame(rows)
 
@@ -505,14 +560,30 @@ def config_last_year(config: WorldConfig) -> int:
     return int((pd.Period(config.start_month, freq="M") + config.months - 1).year)
 
 
-def reference_ledger(
+def _month_index(values: pd.Series, first: pd.Period) -> NDArray[np.int64]:
+    """Months from `first` to each date's month."""
+    dates = pd.DatetimeIndex(pd.to_datetime(values))
+    months: NDArray[np.int64] = (
+        (dates.year.to_numpy(np.int64) - first.year) * 12
+        + dates.month.to_numpy(np.int64)
+        - first.month
+    )
+    return months
+
+
+#: Awards per chunk of the ledger. A chunk's working arrays stay small however big the world.
+LEDGER_CHUNK_AWARDS: Final = 20_000
+
+
+def ledger_chunks(
     config: WorldConfig,
     awards: pd.DataFrame,
     vests: pd.DataFrame,
     estimates: pd.DataFrame,
     month_ends: list[pd.Timestamp],
-) -> pd.DataFrame:
-    """Monthly ASC 718 expense per award, from a plain loop per award.
+    chunk_awards: int = LEDGER_CHUNK_AWARDS,
+) -> Iterator[dict[str, NDArray[Any]]]:
+    """The reference ledger's columns, a chunk of awards at a time, in award order.
 
     For each tranche, worth its shares times the award's grant value per share:
 
@@ -529,83 +600,98 @@ def reference_ledger(
     """
     first = pd.Period(month_ends[0], freq="M")
     window = len(month_ends)
-
-    def month_of(values: pd.Series) -> NDArray[np.int64]:
-        months = pd.DatetimeIndex(pd.to_datetime(values)).to_period("M")
-        result: NDArray[np.int64] = np.array([(m - first).n for m in months], dtype=np.int64)
-        return result
-
-    award_month = dict(zip(awards["award_id"], month_of(awards["award_date"]), strict=True))
-    grant_value = dict(zip(awards["award_id"], awards["fair_value"], strict=True))
-    years = pd.to_datetime(awards["award_date"]).dt.year
-    cohort_of = {int(a): int(y) for a, y in zip(awards["award_id"], years, strict=True)}
+    award_ids = awards["award_id"].to_numpy(np.int64)
+    order = np.argsort(award_ids, kind="stable")
+    sorted_ids = award_ids[order]
+    award_month = _month_index(awards["award_date"], first)[order]
+    grant_value = awards["fair_value"].to_numpy(np.float64)[order]
+    cohort_of = pd.to_datetime(awards["award_date"]).dt.year.to_numpy(np.int64)[order]
     # The estimate in effect for each cohort and month index.
-    horizon = int(month_of(vests["vest_date"]).max(initial=0)) + 1
+    vest_month = _month_index(vests["vest_date"], first)
+    horizon = int(vest_month.max(initial=0)) + 1
     rate: dict[int, NDArray[np.float64]] = {}
     for c, rows in estimates.groupby("cohort"):
         series = np.full(max(horizon, window) + 1, float(rows["estimate"].iloc[0]))
         for effective, estimate in zip(
-            month_of(rows["effective_date"]), rows["estimate"], strict=True
+            _month_index(rows["effective_date"], first), rows["estimate"], strict=True
         ):
             series[max(int(effective), 0) :] = float(estimate)
         rate[int(str(c))] = series
     forfeit = vests["forfeit_date"]
-    vests = vests.assign(
-        vest_month=month_of(vests["vest_date"]),
-        forfeit_month=np.where(
-            forfeit.isna(), -1, month_of(forfeit.fillna(pd.Timestamp(month_ends[0])))
-        ),
+    forfeit_month = np.where(
+        forfeit.isna(), -1, _month_index(forfeit.fillna(pd.Timestamp(month_ends[0])), first)
     )
-    parts: dict[str, list[NDArray[np.float64]]] = {
-        k: [] for k in ("gross", "net", "trueup_attrition", "trueup_rate", "trueup_vesting")
-    }
-    ids: list[NDArray[np.int64]] = []
-    months: list[NDArray[np.int64]] = []
-    for award_id, tranches in vests.groupby("award_id", sort=True):
-        a = int(award_month[award_id])
-        value = tranches["shares"].to_numpy() * float(grant_value[award_id])
-        vest = tranches["vest_month"].to_numpy()
-        lost_at = tranches["forfeit_month"].to_numpy()
-        lost = lost_at >= 0
-        last = np.where(lost, lost_at, vest)
-        span = np.arange(a, int(max(last.max(), vest.max())) + 1)
-        e = rate[cohort_of[int(str(award_id))]][np.clip(span, 0, None)]
-        accrues = (span[None, :] <= last[:, None]).astype(np.float64)
-        per_month = value / (vest - a + 1)
-        gross = accrues * per_month[:, None]
-        net = gross * (1 - e)[None, :]
-        cum_gross_before = np.cumsum(gross, axis=1) - gross
-        drop = np.r_[0.0, e[:-1] - e[1:]]  # the estimate's fall at each month
-        rate_up = cum_gross_before * drop[None, :] * accrues
-        booked = np.cumsum(net + rate_up, axis=1)
-        column = last - a
-        at = np.arange(len(value))
-        attrition = np.zeros_like(gross)
-        attrition[at[lost], column[lost]] = -booked[at[lost], column[lost]]
-        vesting = np.zeros_like(gross)
-        vesting[at[~lost], column[~lost]] = value[~lost] - booked[at[~lost], column[~lost]]
-        inside = (span >= 0) & (span < window)
-        ids.append(np.full(int(inside.sum()), award_id, dtype=np.int64))
-        months.append(span[inside])
-        for name, matrix in (
-            ("gross", gross),
-            ("net", net),
-            ("trueup_attrition", attrition),
-            ("trueup_rate", rate_up),
-            ("trueup_vesting", vesting),
-        ):
-            parts[name].append(matrix.sum(axis=0)[inside])
-    if not ids:
-        return pd.DataFrame(columns=LEDGER_COLUMNS)
-    period = np.array([d.date() for d in month_ends], dtype="datetime64[D]")
-    frame = pd.DataFrame(
-        {
+    # Tranches grouped by award, in award order, each award's tranches in their own order.
+    tranche_ids = vests["award_id"].to_numpy(np.int64)
+    by_award = np.argsort(tranche_ids, kind="stable")
+    grouped = tranche_ids[by_award]
+    starts = np.flatnonzero(np.r_[True, grouped[1:] != grouped[:-1]][: len(grouped)])
+    bounds = np.r_[starts, len(grouped)].astype(np.int64)
+    position = np.searchsorted(sorted_ids, grouped[bounds[:-1]])
+    shares = vests["shares"].to_numpy()[by_award]
+    vest_month, forfeit_month = vest_month[by_award], forfeit_month[by_award]
+    period = np.array([d.date() for d in month_ends], dtype="datetime64[D]").astype("datetime64[s]")
+    names = ("gross", "net", "trueup_attrition", "trueup_rate", "trueup_vesting")
+    for begin in range(0, len(bounds) - 1, chunk_awards):
+        parts: dict[str, list[NDArray[np.float64]]] = {k: [] for k in names}
+        ids: list[NDArray[np.int64]] = []
+        months: list[NDArray[np.int64]] = []
+        for g in range(begin, min(begin + chunk_awards, len(bounds) - 1)):
+            lo, hi, k = bounds[g], bounds[g + 1], position[g]
+            award_id = int(sorted_ids[k])
+            a = int(award_month[k])
+            value = shares[lo:hi] * float(grant_value[k])
+            vest = vest_month[lo:hi]
+            lost_at = forfeit_month[lo:hi]
+            lost = lost_at >= 0
+            last = np.where(lost, lost_at, vest)
+            span = np.arange(a, int(max(last.max(), vest.max())) + 1)
+            e = rate[int(cohort_of[k])][np.clip(span, 0, None)]
+            accrues = (span[None, :] <= last[:, None]).astype(np.float64)
+            per_month = value / (vest - a + 1)
+            gross = accrues * per_month[:, None]
+            net = gross * (1 - e)[None, :]
+            cum_gross_before = np.cumsum(gross, axis=1) - gross
+            drop = np.r_[0.0, e[:-1] - e[1:]]  # the estimate's fall at each month
+            rate_up = cum_gross_before * drop[None, :] * accrues
+            booked = np.cumsum(net + rate_up, axis=1)
+            column = last - a
+            at = np.arange(len(value))
+            attrition = np.zeros_like(gross)
+            attrition[at[lost], column[lost]] = -booked[at[lost], column[lost]]
+            vesting = np.zeros_like(gross)
+            vesting[at[~lost], column[~lost]] = value[~lost] - booked[at[~lost], column[~lost]]
+            inside = (span >= 0) & (span < window)
+            ids.append(np.full(int(inside.sum()), award_id, dtype=np.int64))
+            months.append(span[inside])
+            for name, matrix in zip(names, (gross, net, attrition, rate_up, vesting), strict=True):
+                parts[name].append(matrix.sum(axis=0)[inside])
+        chunk: dict[str, NDArray[Any]] = {
             "award_id": np.concatenate(ids),
-            "period": period[np.concatenate(months)].astype("datetime64[s]"),
+            "period": period[np.concatenate(months)],
             **{name: np.concatenate(values) for name, values in parts.items()},
         }
-    )
-    frame["recognized"] = (
-        frame["net"] + frame["trueup_attrition"] + frame["trueup_rate"] + frame["trueup_vesting"]
-    )
-    return frame[LEDGER_COLUMNS]
+        chunk["recognized"] = (
+            chunk["net"]
+            + chunk["trueup_attrition"]
+            + chunk["trueup_rate"]
+            + chunk["trueup_vesting"]
+        )
+        yield chunk
+
+
+def ledger_frames(
+    config: WorldConfig,
+    awards: pd.DataFrame,
+    vests: pd.DataFrame,
+    estimates: pd.DataFrame,
+    month_ends: list[pd.Timestamp],
+) -> Iterator[pd.DataFrame]:
+    """The reference ledger as frames, a chunk of awards each, and one empty frame if there
+    are no awards."""
+    empty = True
+    for chunk in ledger_chunks(config, awards, vests, estimates, month_ends):
+        empty = False
+        yield pd.DataFrame({name: chunk[name] for name in LEDGER_COLUMNS}, copy=False)
+    if empty:
+        yield pd.DataFrame(columns=LEDGER_COLUMNS)

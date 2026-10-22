@@ -8,8 +8,10 @@ emitted, so the monthly loop works on arrays of any size.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 import numpy as np
+import pandas as pd
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 Index = NDArray[np.int64]
@@ -81,13 +83,29 @@ class EventLog:
     def __len__(self) -> int:
         return sum(len(chunk[self.columns[0]]) for chunk in self._chunks)
 
-    def collect(self, dtypes: Mapping[str, DTypeLike]) -> dict[str, np.ndarray]:
-        """Every column, concatenated, in the given dtypes."""
-        return {
-            name: (
-                np.concatenate([chunk[name] for chunk in self._chunks]).astype(dtypes[name])
-                if self._chunks
+    def collect(
+        self, dtypes: Mapping[str, DTypeLike], release: bool = False
+    ) -> dict[str, np.ndarray]:
+        """Every column, concatenated, in the given dtypes. With `release`, the log empties
+        column by column as it goes, so the chunks and the columns are never held twice."""
+        result: dict[str, np.ndarray] = {}
+        for name in self.columns:
+            parts = [chunk.pop(name) if release else chunk[name] for chunk in self._chunks]
+            result[name] = (
+                np.concatenate(parts).astype(dtypes[name], copy=False)
+                if parts
                 else np.zeros(0, dtype=dtypes[name])
             )
-            for name in self.columns
-        }
+            del parts
+        if release:
+            self._chunks = []
+        return result
+
+
+def categorical(codes: NDArray[np.integer], labels: Sequence[str]) -> pd.Categorical:
+    """Labels from integer codes, with -1 for missing. Building from codes never makes a string
+    per row, which at scale would dwarf the table."""
+    # The stubs want a Sequence; an integer array is the fast path pandas takes anyway.
+    return pd.Categorical.from_codes(
+        cast("Sequence[int]", np.asarray(codes)), categories=pd.Index(list(labels))
+    )

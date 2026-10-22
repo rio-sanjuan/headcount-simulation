@@ -30,13 +30,14 @@ def written(tmp_path_factory: pytest.TempPathFactory) -> tuple[World, Path, Prof
 def test_the_profile_lists_every_table_and_its_size(written: tuple[World, Path, Profile]) -> None:
     world, _, result = written
     tables = result.sections["Tables"].set_index("table")
-    for name, frame in world.tables.items():
+    for name in world.table_names:
+        frame = world.table(name)
         assert tables.loc[name, "rows"] == len(frame)
         assert tables.loc[name, "columns"] == len(frame.columns)
     assert tables.loc["req_snapshot", "kind"] == "view"
     truth = set(result.sections["Truth"]["table"])
     assert truth == {f"truth.{name}" for name in ["manifest", *world.truth_tables]}
-    assert set(result.columns) == set(world.tables)  # views have no column profile
+    assert set(result.columns) == set(world.table_names)  # views have no column profile
 
 
 def test_the_workforce_section_counts_regular_flows(written: tuple[World, Path, Profile]) -> None:
