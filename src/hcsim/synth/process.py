@@ -7,7 +7,7 @@ Each month, in order:
    reorganization batches (see `movements`) and termination programs (see `programs`).
 1. Every active employee may leave, with the true departure hazard. A departure may open a
    backfill requisition for the same role.
-2. Each cost center opens growth requisitions at its own Poisson rate.
+2. Each cost center opens growth requisitions toward its latent plan (see `growth`).
 3. Every open requisition, including this month's, may fill externally (a hazard by age), fill
    by transfer when an internal candidate exists, fill by converting a contingent worker, exit
    unfilled, or stay open. A transfer
@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.dates import MonthDays
+from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
 from hcsim.synth.population import draw_roles
 from hcsim.synth.programs import TerminationPrograms
@@ -143,7 +144,6 @@ def simulate(
     attrition, reqs = config.attrition, config.requisitions
     n = config.cost_centers
     cc_effect = np.exp(rng.normal(0, attrition.cost_center_sigma, n))
-    growth_rate = reqs.growth_requisitions_per_month * np.exp(rng.normal(0, reqs.growth_sigma, n))
     growth_levels = np.array(list(reqs.growth_level_mix))
     growth_p = np.array(list(reqs.growth_level_mix.values()))
     orgs = (
@@ -153,6 +153,10 @@ def simulate(
     )
     shocks = Shocks(config, orgs)
     workforce.snapshot(np.datetime64(month_ends[0].date(), "D"))
+    start = np.bincount(workforce.column("cost_center")[workforce.active()], minlength=n)
+    plan = LatentPlan(
+        config.growth, start.astype(np.int64), [pd.Period(e, freq="M") for e in month_ends], rng
+    )
 
     if ratings is not None:
         ratings.seed(pd.Period(month_ends[0], freq="M"))
@@ -196,8 +200,11 @@ def simulate(
         if movements is not None:
             movements.contingent(month)
 
-        # 2. Growth requisitions.
-        cost_centers = np.repeat(np.arange(n), rng.poisson(growth_rate))
+        # 2. Growth requisitions, closing part of each cost center's gap to its latent plan.
+        committed = np.bincount(
+            workforce.column("cost_center")[workforce.active()], minlength=n
+        ) + np.bincount(book.column("cost_center")[book.open_requisitions()], minlength=n)
+        cost_centers = np.repeat(np.arange(n), plan.openings(m, committed, rng))
         levels = rng.choice(growth_levels, size=len(cost_centers), p=growth_p)
         roles = draw_roles(config, cost_centers, levels, rng)
         book.open("growth", roles, days.sample("business", len(cost_centers), rng), m)
@@ -242,9 +249,7 @@ def simulate(
                 {"start": months[m - 1], "org": tops[org]} for m, org in shocks.org_shocks
             ],
         },
-        "requisitions": {
-            "growth_rate": dict(zip(names, growth_rate.round(6).tolist(), strict=True))
-        },
+        "plan": plan,
     }
 
 
