@@ -3,11 +3,24 @@
 Each pending start fires in its start month, before the month's fills, and the person joins
 under their own id, with a new-hire grant:
 
-- **matched**: when their requisition is open in the run, they fill it, taking its role and
+- **matched**: when it names a requisition open in the run, they fill it, taking its role and
   one of its openings, the one reserved for them since the run began. They count as `F_pend`;
-- **unmatched**: when it isn't, because it wasn't seeded or has closed, they still join, in
-  the role their offer names. No opening is consumed, so they count as a boundary fill,
-  `F_bdy`.
+- **unmatched**: when it names none, or one the run doesn't hold, they still join, in the role
+  their offer names. No opening is consumed, so they count as a boundary fill, `F_bdy`.
+
+**Offers accepted before the run.** History closes an opening on the day its offer is
+accepted. The seed reads requisitions at the month-end before the run, so its openings already
+exclude every offer accepted by then. A start on such an offer names no requisition: it takes
+no opening and reserves none, and joins as a boundary fill. Taking one of its requisition's
+remaining openings would count the offer twice, once in the opening history closed and again
+in the one it took, and leave the run too few to fill. So the run starts with history's
+openings, and no offer the seed already counted takes one. This holds in every run mode: it
+covers every start from the warehouse's pending starts (`known_events.from_pending_starts`),
+and in replay, every realized hire whose offer was accepted before the run
+(`known_events.from_replay`). Only a start on an offer accepted during the run, which only
+replay knows of, names a requisition. Until it starts, an offer accepted before the run is in
+neither the headcount nor the openings, so committed strength (`S = H + O`) leaves it out, as
+history's does: it's a known inflow, not an opening.
 
 In replay, a realized hire is a pending start into the requisition it filled, when its offer
 was accepted during the run. One whose requisition the run doesn't hold, or whose offer was

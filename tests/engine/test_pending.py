@@ -9,6 +9,7 @@ from typing import Any
 import duckdb
 import numpy as np
 
+from hcsim.engine.config import DomainModels, ForecastScope, SimulationConfig
 from hcsim.engine.domains import StepContext
 from hcsim.engine.fills import fills
 from hcsim.engine.known_events import (
@@ -17,13 +18,19 @@ from hcsim.engine.known_events import (
     KnownEvents,
     Source,
     from_pending_starts,
+    known_events,
 )
 from hcsim.engine.known_plan import sanitize
-from hcsim.engine.known_resolution import ResolvedPlan, resolve_plan
+from hcsim.engine.known_resolution import ResolvedPlan, jobs_from_world, resolve_plan
 from hcsim.engine.loop import FLOW_SYMBOLS, HEADCOUNT_IDENTITY, OPENING_IDENTITY, simulate
 from hcsim.engine.pending import pending_starts
+from hcsim.engine.seeding import schema_from_world, seed_state
 from hcsim.engine.seeds import SeedManager
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
+from hcsim.model.core.schema import COST_CENTER
+from hcsim.model.ml.entity import ConstantModel
+from hcsim.model.ml.generative import EmpiricalAttributeGenerator
+from hcsim.model.ml.group import BackfillRateModel, PoissonGrowthModel
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
 from tests.engine.test_loop import SCHEMA, config, guidance, initial_state, models
@@ -126,3 +133,64 @@ def test_an_offer_recently_due_is_still_expected(tmp_path: Path) -> None:
         ).fetchone() or (0,)
     assert len(lenient) == len(due) + late
     assert min(e.step for e in lenient) == 0
+
+
+def still(n: int) -> DomainModels:
+    """Models under which nothing is sampled: no one leaves, and no opening opens, fills, or
+    exits."""
+    return DomainModels(
+        attrition=ConstantModel(0.0),
+        external_fill=ConstantModel(0.0),
+        cancellation=ConstantModel(0.0),
+        backfill=BackfillRateModel.constant(0.0, n),
+        growth=PoissonGrowthModel(n, min_months=1).fit(np.zeros((1, n))),
+        attributes=EmpiricalAttributeGenerator(min_rows=1).fit(
+            np.zeros(1, dtype=np.int64), np.zeros((1, 6), dtype=np.int64)
+        ),
+    )
+
+
+def test_starts_on_offers_from_before_the_run_leave_the_seeded_openings_whole(
+    tmp_path: Path,
+) -> None:
+    """History closed each pending offer's opening on the day it was accepted, so the seed's
+    openings already exclude it. A start on it, even when the seed holds its requisition open
+    with other openings, reserves none of them and takes none: it's a boundary fill, and the
+    run's openings stay as the seed has them."""
+    path = tmp_path / "w.duckdb"
+    write_world(generate_world(preset("small", seed=6)), path)
+    run = dt.date(2025, 1, 1)
+    with duckdb.connect(str(path), read_only=True) as con:
+        schema = schema_from_world(con)
+        state, report = seed_state(con, schema, run)
+        reqs = state.live_openings[:, OpeningColumn.REQ_ID].astype(np.int64).tolist()
+        (shared,) = con.execute(
+            "SELECT count(*) FROM pending_start WHERE snapshot_date = $snapshot "
+            "AND req_id IN (SELECT unnest($reqs))",
+            {"snapshot": report.snapshot_date, "reqs": reqs},
+        ).fetchone() or (0,)
+        employees = state.live_employees[:, EmployeeColumn.EMPLOYEE_ID].astype(int).tolist()
+        events = known_events(con, run, 6, history=False)
+        known = resolve_plan(sanitize(events, employees, reqs), schema, jobs_from_world(con))
+    assert shared > 0  # offers whose requisition the seed holds open, with other openings
+    openings = state.live_openings
+    assert dict(known.plan.reservations) == {}
+    seeded = openings[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
+    assert known.plan.fillable(openings, 0).tolist() == seeded.tolist()
+
+    config = SimulationConfig(
+        run_date=run,
+        schema=schema,
+        models=still(len(schema.vocabulary(COST_CENTER))),
+        simulation_months=6,
+        num_trajectories=1,
+        seed=1,
+        forecast_scope=ForecastScope.HEADCOUNT,
+    )
+    (t,) = simulate(config, state, known=known, validate=True).trajectories
+    starts = sum(e.event.kind is EventKind.PENDING_START for e in known.events)
+    assert t.known_fired == {"pending_start": starts}
+    assert (t.open_openings == state.open_openings).all()  # every month, the seed's
+    assert int(t.flows["F_pend"].sum()) == 0
+    assert int(t.flows["F_bdy"].sum()) == starts
+    assert int((t.headcount[-1] - t.headcount[0]).sum()) == starts

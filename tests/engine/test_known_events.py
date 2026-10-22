@@ -64,16 +64,29 @@ def test_notices_given_before_the_run_become_terminations(
     assert (len(events),) == expected
 
 
-def test_pending_starts_fill_their_requisitions(con: duckdb.DuckDBPyConnection) -> None:
+def test_pending_starts_name_no_requisition(con: duckdb.DuckDBPyConnection) -> None:
+    """Each offer closed its opening before the run, so its start names no requisition, and
+    carries its requisition's manager flag instead."""
     events = from_pending_starts(con, RUN)
     assert events
     for e in events:
         assert e.kind is EventKind.PENDING_START
-        assert e.req_id is not None
+        assert e.req_id is None
         assert e.employee_id is not None
-        assert set(e.destination) == {"cost_center", "job_code", "location", "company"}
+        roles = {"cost_center", "job_code", "location", "company", "is_manager"}
+        assert set(e.destination) == roles
         assert e.destination["cost_center"].startswith("CC-")
         assert e.step >= 0
+    managers = {e.employee_id for e in events if e.destination["is_manager"] == "true"}
+    expected = con.execute(
+        "SELECT p.employee_id FROM pending_start p JOIN req_interval r USING (req_id) "
+        "WHERE r.interval_number = 1 AND r.is_manager AND p.start_date >= $run "
+        "AND p.snapshot_date = (SELECT max(snapshot_date) FROM pending_start "
+        "                       WHERE snapshot_date < $run)",
+        {"run": RUN},
+    ).fetchall()
+    assert managers == {employee for (employee,) in expected}
+    assert managers
 
 
 def test_declared_movements_and_programs_name_their_people() -> None:

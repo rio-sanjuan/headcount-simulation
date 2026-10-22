@@ -129,10 +129,11 @@ def test_a_world_s_known_events_sanitize_against_its_seed(tmp_path: Path) -> Non
     assert notices  # people who gave notice are in the seed until they leave
     assert set(plan.excluded(0).tolist()) == {e.employee_id for e in notices}
     starts = [e for e in plan.events.events if e.kind is EventKind.PENDING_START]
-    on_seeded = [e for e in starts if e.req_id in set(reqs.tolist())]
-    assert 0 < len(on_seeded) <= len(starts)
-    assert sum(len(v) for v in plan.reservations.values()) == len(on_seeded)
-    assert plan.fillable(state.live_openings, 0).min() >= 0
+    assert starts
+    # Their offers closed their openings before the seed's snapshot, so none reserves one.
+    assert dict(plan.reservations) == {}
+    openings = state.live_openings[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
+    assert plan.fillable(state.live_openings, 0).tolist() == openings.tolist()
 
 
 def test_a_reorganization_from_outside_the_seed_crosses_the_boundary_in() -> None:

@@ -25,9 +25,13 @@ before the event's own domain in that month mustn't take the person first. From 
 after their last known event, they're sampled again.
 
 **Reservations.** A pending start whose requisition is in the seed reserves one of its openings
-up to and including the month it starts, so fills can't take it. A pending start whose
-requisition isn't in the seed reserves nothing; pending starts (M4.10) decide what becomes of
-it.
+up to and including the month it starts, so fills can't take it. Only a start on an offer
+accepted during the run names a requisition, so only replay reserves. A start on an offer
+accepted before the run names none, since history closed its opening on the offer day, before
+the seed's snapshot: the seed's openings already exclude it, and reserving one of them would
+count the offer twice. So outside replay, every seeded opening is fillable from the first
+month. A pending start that names no requisition, or one the seed doesn't hold, reserves
+nothing; pending starts (M4.10) decide what becomes of it.
 """
 
 from __future__ import annotations
