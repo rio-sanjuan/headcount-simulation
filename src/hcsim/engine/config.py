@@ -217,6 +217,15 @@ class SimulationConfig:
     seeding_max_openings: int = setting(
         "seeding", 10, "the most openings a seeded requisition keeps; more are clipped"
     )
+    seeding_employee_headroom: float = setting(
+        "seeding", 0.5, "spare employee rows, as a share of the seed per year of the run"
+    )
+    seeding_opening_headroom: float = setting(
+        "seeding", 0.5, "opening rows beyond the seed, as a share of the employee capacity"
+    )
+    seeding_min_spare_rows: int = setting(
+        "seeding", 500, "the fewest spare rows either buffer gets"
+    )
     # performance
     performance_cycle_month: int = setting(
         "performance", 3, "the calendar month a rating cycle takes effect"
@@ -344,6 +353,19 @@ class SimulationConfig:
                 ("seeding_max_openings",),
                 lambda: _when(
                     self.seeding_max_openings < 1, "seeding_max_openings must be at least 1"
+                ),
+            ),
+            (
+                ("seeding_employee_headroom", "seeding_opening_headroom"),
+                lambda: _when(
+                    min(self.seeding_employee_headroom, self.seeding_opening_headroom) < 0,
+                    "seeding headrooms must be non-negative",
+                ),
+            ),
+            (
+                ("seeding_min_spare_rows",),
+                lambda: _when(
+                    self.seeding_min_spare_rows < 0, "seeding_min_spare_rows must be non-negative"
                 ),
             ),
             (

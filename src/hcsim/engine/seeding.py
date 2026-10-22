@@ -21,6 +21,10 @@ intervals is open at the snapshot. Its type is mapped from the warehouse's label
 spacing ignored, to one of the engine's three, and an unmapped type is pruned as unknown. Its
 openings are clipped to 1 through the configured maximum.
 
+Buffers are sized once, by a `CapacityRule`, since they never grow. `seed_for` seeds the run a
+configuration describes, with its seeding settings, and skips the opening buffer when the
+configuration says to: a run then opens every requisition itself.
+
 Tenure and age are seeded as negative steps: `HIRE_STEP` and `CREATION_STEP` are months relative
 to the run's first month, so `step - HIRE_STEP` is real tenure. Simulated hires and
 requisitions get ids from a high base, so they never collide with the world's ids.
@@ -29,6 +33,7 @@ requisitions get ids from a high base, so they never collide with the world's id
 from __future__ import annotations
 
 import datetime as dt
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -38,6 +43,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from hcsim.engine.config import SimulationConfig
 from hcsim.engine.state import SimulationState
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.tracker import HolderLedger
@@ -96,6 +102,32 @@ _OPENING_CODES = {
 
 class SeedingError(ValueError):
     """A warehouse that can't seed a run."""
+
+
+@dataclass(frozen=True)
+class CapacityRule:
+    """How large the buffers are. They never grow, and a drop frees its row, so each must hold
+    the most rows live at once over the run:
+
+    - employees: the seed, plus `employee_headroom` of it for every year of the run (at least
+      one), and never fewer than `min_spare_rows` spare;
+    - openings: the seed, plus `opening_headroom` of the employee capacity, since open
+      requisitions scale with the workforce, and never fewer than `min_spare_rows` spare.
+    """
+
+    employee_headroom: float = 0.5
+    opening_headroom: float = 0.5
+    min_spare_rows: int = 500
+
+    def sizes(self, employees: int, openings: int, months: int) -> tuple[int, int]:
+        years = max(months, 12) / 12
+        spare = math.ceil(employees * self.employee_headroom * years)
+        employee = employees + max(self.min_spare_rows, spare)
+        opening = openings + max(self.min_spare_rows, math.ceil(employee * self.opening_headroom))
+        return employee, opening
+
+
+DEFAULT_CAPACITY: Final = CapacityRule()
 
 
 @dataclass(frozen=True)
@@ -245,7 +277,8 @@ def seed_state(
     include_openings: bool = True,
     max_openings: int = MAX_OPENINGS_PER_REQUISITION,
     req_types: Mapping[str, str] = REQ_TYPE_MAP,
-    opening_ceiling: int | None = None,
+    capacity: CapacityRule = DEFAULT_CAPACITY,
+    months: int = 12,
     with_ledger: bool = False,
 ) -> tuple[SimulationState, SeedReport]:
     check_transaction_codes(con)
@@ -280,10 +313,7 @@ def seed_state(
     req_rows[:, OpeningColumn.NUM_OPENINGS] = clipped
     openings = req_rows[req_keep]
 
-    # Capacity: the seed plus room for the horizon. Buffers never grow.
-    employee_capacity = n_employees + max(1_000, n_employees // 10)
-    ceiling = n_employees if opening_ceiling is None else opening_ceiling
-    opening_capacity = len(openings) + ceiling + max(500, len(openings) // 5)
+    employee_capacity, opening_capacity = capacity.sizes(n_employees, len(openings), months)
     employee_buffer = EMPLOYEE.empty(employee_capacity)
     employee_buffer[:n_employees] = employees
     opening_buffer = OPENING.empty(opening_capacity)
@@ -312,6 +342,34 @@ def seed_state(
         opening_causes=MappingProxyType(opening_causes),
     )
     return state, report
+
+
+def seed_for(
+    con: duckdb.DuckDBPyConnection,
+    config: SimulationConfig,
+    *,
+    population: PopulationSpec = REGULAR_POPULATION,
+    subset: SubsetSpec | None = None,
+    req_types: Mapping[str, str] = REQ_TYPE_MAP,
+) -> tuple[SimulationState, SeedReport]:
+    """Seed the run `config` describes, with its seeding settings."""
+    return seed_state(
+        con,
+        config.schema,
+        config.run_date,
+        population=population,
+        subset=subset,
+        include_openings=config.seeding_include_opening_buffer,
+        max_openings=config.seeding_max_openings,
+        req_types=req_types,
+        capacity=CapacityRule(
+            config.seeding_employee_headroom,
+            config.seeding_opening_headroom,
+            config.seeding_min_spare_rows,
+        ),
+        months=config.simulation_months,
+        with_ledger=config.computes_sbc,
+    )
 
 
 def range_table_from_world(con: duckdb.DuckDBPyConnection, schema: SimulationSchema) -> RangeTable:
