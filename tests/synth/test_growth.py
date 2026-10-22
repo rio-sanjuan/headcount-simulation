@@ -48,7 +48,7 @@ def test_a_cost_center_at_plan_opens_nothing() -> None:
 
 def test_the_world_records_its_plan_and_follows_it(small_world: World) -> None:
     plan = small_world.tables["truth_latent_plan"]
-    assert len(plan) == 250 * 60
+    assert len(plan) == 250 * (60 + 24)  # the plan runs two years past the world's end
     txn = small_world.tables["workforce_txn"]
     regular = txn[(txn["trans_type"] == "ACTIVE") & (txn["account"] == "ACCT-100")]
     start = regular[regular["event_date"] == regular["event_date"].min()]

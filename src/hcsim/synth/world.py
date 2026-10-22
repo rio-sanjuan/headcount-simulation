@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth import codes, equity, population, process, structure
+from hcsim.synth import codes, equity, plans, population, process, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -308,7 +308,7 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(11)
+    streams = np.random.SeedSequence(config.seed).spawn(12)
     (
         population_rng,
         process_rng,
@@ -321,6 +321,7 @@ def generate_world(config: WorldConfig) -> World:
         program_rng,
         offer_rng,
         reporting_rng,
+        plan_rng,
     ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
@@ -357,7 +358,10 @@ def generate_world(config: WorldConfig) -> World:
         offers,
     )
     plan: LatentPlan = process_truth.pop("plan")
-    world.tables["truth_latent_plan"] = plan.frame(structure.cost_center_names(config))
+    headcount = process_truth.pop("headcount")
+    names = structure.cost_center_names(config)
+    world.tables["truth_latent_plan"] = plan.frame(names)
+    world.tables["plan_headcount"] = plans.vintages(config, plan, headcount, names, plan_rng)
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels, reporting_rng)

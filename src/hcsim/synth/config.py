@@ -711,6 +711,41 @@ class OfferTruth:
         return found
 
 
+@dataclass(frozen=True)
+class PlanTruth:
+    """Plan vintages: published headcount plans derived from the latent plan. Invented, round
+    values.
+
+    A vintage is published at the start of each `publication_months` month, from the world's
+    second year on, and covers `horizon_months` from then. Each cost center in a vintage
+    follows one regime: `planned` tracks the latent plan with a vintage's own noise, `flat`
+    holds the headcount at publication, and `decaying` starts from the latent plan and decays
+    toward flat with time constant `decay_months`. The latent plan runs `future_months` past
+    the world's end, so the last vintages cover months the world hasn't reached.
+    """
+
+    publication_months: tuple[int, ...] = (1, 7)
+    horizon_months: int = 18
+    regime_shares: tuple[float, float, float] = (0.7, 0.2, 0.1)
+    vintage_noise_sigma: float = 0.03
+    decay_months: float = 6.0
+    future_months: int = 24
+
+    def problems(self) -> list[str]:
+        found = []
+        if not self.publication_months or any(
+            m not in range(1, 13) for m in self.publication_months
+        ):
+            found.append("plans.publication_months must be calendar months 1-12")
+        if self.horizon_months < 1 or self.future_months < self.horizon_months:
+            found.append("plans need a positive horizon within future_months")
+        if not np.isclose(sum(self.regime_shares), 1) or min(self.regime_shares) < 0:
+            found.append("plans.regime_shares must be a distribution over three regimes")
+        if self.vintage_noise_sigma < 0 or self.decay_months <= 0:
+            found.append("plans need non-negative noise and a positive decay time")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -781,6 +816,7 @@ class WorldConfig:
     campus: CampusTruth = field(default_factory=CampusTruth)
     openings: OpeningsTruth = field(default_factory=OpeningsTruth)
     offers: OfferTruth = field(default_factory=OfferTruth)
+    plans: PlanTruth = field(default_factory=PlanTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -849,6 +885,7 @@ class WorldConfig:
         problems += self.campus.problems(self.levels)
         problems += self.openings.problems()
         problems += self.offers.problems()
+        problems += self.plans.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:
