@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 from hcsim.engine.apply import Applied, apply, per_cost_center
 from hcsim.engine.campus import CAMPUS, campus
 from hcsim.engine.config import SimulationConfig
+from hcsim.engine.digest import digest
 from hcsim.engine.domains import (
     ATTRITION,
     BACKFILL,
@@ -64,6 +65,7 @@ from hcsim.engine.promotion import PROMOTION, promotion
 from hcsim.engine.replay import REPLAY_REQUISITIONS, ReplayedRequisitions, replay_requisitions
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
+from hcsim.engine.snapshots import Snapshot, snapshot_frame
 from hcsim.engine.state import SimulationState
 from hcsim.engine.transfers import TRANSFERS_DOMAIN as TRANSFERS
 from hcsim.engine.transfers import transfers
@@ -214,27 +216,53 @@ class TrajectoryResult:
     event_cells: Ints = field(default_factory=no_cells)
     #: Grants each domain emitted that the run's award settings had no sizer for.
     unsized_grants: Mapping[str, int] = field(default_factory=dict)
+    #: The buffers at the start of each step the run keeps, and at the end as step `months`.
+    snapshots: Mapping[int, Snapshot] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SimulationResult:
     config: SimulationConfig
+    #: Every trajectory's result; none, for a streamed run, which hands each to its sink.
     trajectories: tuple[TrajectoryResult, ...]
     #: Domains no registration gate admitted.
     unregistered: tuple[str, ...] = ()
+    #: For a streamed run, each trajectory's digest, in trajectory order.
+    streamed: tuple[str, ...] = ()
 
     @property
     def headcount(self) -> Ints:
         """(trajectories, months + 1, cost centers)."""
-        return np.stack([t.headcount for t in self.trajectories])
+        return np.stack([t.headcount for t in self._of(None)])
 
     @property
     def open_openings(self) -> Ints:
-        return np.stack([t.open_openings for t in self.trajectories])
+        return np.stack([t.open_openings for t in self._of(None)])
 
     def flow(self, symbol: str) -> Ints:
         """(trajectories, months, cost centers) for one flow symbol."""
-        return np.stack([t.flows[symbol] for t in self.trajectories])
+        return np.stack([t.flows[symbol] for t in self._of(None)])
+
+    def digests(self) -> tuple[str, ...]:
+        """Each trajectory's digest (see `digest`): a streamed run's as it recorded them, and
+        a standard run's from its results, so the two compare bit for bit."""
+        return self.streamed or tuple(digest(t) for t in self.trajectories)
+
+    def snapshot(
+        self,
+        step: int,
+        buffer: str = "employee",
+        *,
+        decoded: bool = False,
+        trajectory: int | None = None,
+    ) -> pd.DataFrame:
+        """The live rows of `buffer` (`employee` or `opening`) at the start of `step`, as
+        the run kept them, one row per trajectory and buffer row."""
+        if step not in self.config.results_snapshot_steps:
+            kept = list(self.config.results_snapshot_steps)
+            raise KeyError(f"the run kept no snapshot of step {step}; it kept {kept}")
+        snapshots = [(t.trajectory, t.snapshots[step]) for t in self._of(trajectory)]
+        return snapshot_frame(snapshots, buffer, self.config.schema, decoded=decoded)
 
     def shortfalls(self) -> pd.DataFrame:
         """Every group a guided draw left short of its quota: one row per trajectory, step,
@@ -305,6 +333,8 @@ class SimulationResult:
         return pd.DataFrame(rows, columns=["trajectory", "kind", "name", "count"])
 
     def _of(self, trajectory: int | None) -> list[TrajectoryResult]:
+        if self.streamed and not self.trajectories:
+            raise ValueError("a streamed run holds no trajectories; its sink received them")
         if trajectory is None:
             return list(self.trajectories)
         chosen = [t for t in self.trajectories if t.trajectory == trajectory]
@@ -391,8 +421,12 @@ def run_trajectory(
     diagnostics: dict[str, Ints] = {}
     cells = EventCells(config.schema)
     unsized = dict.fromkeys(registered.domains, 0)
+    keep = set(config.results_snapshot_steps)
+    snapshots: dict[int, Snapshot] = {}
 
     for step in range(months):
+        if step in keep:
+            snapshots[step] = Snapshot.of(state)
         if state.price is not None:
             state.price.step(calendar_month(config.run_date, step))
             prices[step] = state.price.price
@@ -422,6 +456,8 @@ def run_trajectory(
                 flows[FLOWS[domain]][step] += _flow(domain, applied, n)
             quotas += [QuotaRow(step, domain, c, r) for c, r in result.quotas.items()]
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
+    if months in keep:
+        snapshots[months] = Snapshot.of(state)
 
     known_fired: dict[str, int] = {}
     if known is not None:
@@ -443,6 +479,7 @@ def run_trajectory(
             diagnostics=diagnostics,
             event_cells=cells.array(),
             unsized_grants=unsized,
+            snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
     if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
@@ -463,23 +500,24 @@ def run_trajectory(
         diagnostics,
         cells.array(),
         unsized,
+        snapshots,
     )
 
 
-def simulate(
+def stream(
     config: SimulationConfig,
     initial: SimulationState,
     *,
     known: ResolvedPlan | None = None,
     replay: ReplayedRequisitions | None = None,
     validate: bool = False,
-) -> SimulationResult:
-    """Run every trajectory of `config` from the seeded state `initial`, which stays untouched,
-    with the run's resolved known events and, in replay, its realized requisitions."""
+) -> Iterator[TrajectoryResult]:
+    """Every trajectory of `config`, one at a time, each run as it's asked for. A trajectory
+    draws only from its own streams, so these are the trajectories `simulate` holds."""
     seeds = SeedManager(config.seed)
     registered = _register(config)
-    trajectories = tuple(
-        run_trajectory(
+    for j in range(config.num_trajectories):
+        yield run_trajectory(
             config,
             initial,
             j,
@@ -489,9 +527,37 @@ def simulate(
             known=known,
             replay=replay,
         )
-        for j in range(config.num_trajectories)
-    )
-    return SimulationResult(config, trajectories, registered.unregistered)
+
+
+def simulate(
+    config: SimulationConfig,
+    initial: SimulationState,
+    *,
+    known: ResolvedPlan | None = None,
+    replay: ReplayedRequisitions | None = None,
+    validate: bool = False,
+    sink: Callable[[TrajectoryResult], None] | None = None,
+) -> SimulationResult:
+    """Run every trajectory of `config` from the seeded state `initial`, which stays untouched,
+    with the run's resolved known events and, in replay, its realized requisitions.
+
+    With `results_streaming`, each trajectory goes to `sink` as it finishes and isn't held: the
+    result records each one's digest instead, so a run's memory holds one trajectory at a time.
+    """
+    streaming = config.results_streaming
+    if streaming and sink is None:
+        raise ValueError("a streaming run needs a sink for its trajectories")
+    if sink is not None and not streaming:
+        raise ValueError("a sink takes trajectories only from a run with results_streaming")
+    unregistered = _register(config).unregistered
+    runs = stream(config, initial, known=known, replay=replay, validate=validate)
+    if sink is None:
+        return SimulationResult(config, tuple(runs), unregistered)
+    digests = []
+    for result in runs:
+        digests.append(digest(result))
+        sink(result)
+    return SimulationResult(config, (), unregistered, tuple(digests))
 
 
 def _register(config: SimulationConfig) -> Registered:
