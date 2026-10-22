@@ -10,13 +10,15 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
 4. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
-The context starts with two slots: `source`, the warehouse connection, and `config`.
+The context starts with two slots: `source`, where the warehouse tables are read from (see
+`sources`), and `config`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 import duckdb
@@ -29,6 +31,7 @@ from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.models import ForecastError
 from hcsim.guidance.reconcile import RECONCILERS
 from hcsim.guidance.selection import forecast
+from hcsim.guidance.sources import Source, SourceError, as_source
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory, coherency_terms
 from hcsim.model.core.guidance import GuidanceForecast
 
@@ -54,13 +57,23 @@ class Ingest:
     gives: tuple[str, ...] = ("series",)
 
     def validate(self, ctx: Context) -> list[str]:
-        if not isinstance(ctx["source"], duckdb.DuckDBPyConnection):
-            return [f"the source must be a DuckDB connection, not {type(ctx['source']).__name__}"]
-        return ingestion.problems(ctx["source"], ctx["config"].grouping)
+        try:
+            source = as_source(ctx["source"])
+            with source.connect() as con:
+                return ingestion.problems(con, ctx["config"].grouping)
+        except SourceError as error:
+            return [str(error)]
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
-        series = ingestion.ingest(ctx["source"], ctx["config"].grouping)
-        ctx.note(self.name, snapshot=str(series.snapshot), grouping=series.grouping)
+        source = as_source(ctx["source"])
+        with source.connect() as con:
+            series = ingestion.ingest(con, ctx["config"].grouping)
+        ctx.note(
+            self.name,
+            source=source.description,
+            snapshot=str(series.snapshot),
+            grouping=series.grouping,
+        )
         return {"series": series}
 
 
@@ -180,9 +193,13 @@ def pipeline(config: GuidanceConfig) -> Pipeline:
     return Pipeline((Ingest(), Forecast(), *middle, Format()))
 
 
-def run(con: duckdb.DuckDBPyConnection, config: GuidanceConfig | None = None) -> PipelineResult:
+def run(
+    source: Source | duckdb.DuckDBPyConnection | Path, config: GuidanceConfig | None = None
+) -> PipelineResult:
+    """Run the pipeline on `source`: a `Source`, a DuckDB connection, or a path to a DuckDB
+    file or a directory of table files."""
     config = config or GuidanceConfig()
-    ctx = pipeline(config).run(Context({"source": con, "config": config}))
+    ctx = pipeline(config).run(Context({"source": source, "config": config}))
     artifact: GuidanceForecast = ctx["artifact"]
     sections = ctx.report
     report = {

@@ -11,16 +11,18 @@ all are trimmed, because they usually mark months not yet loaded.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
 import duckdb
 import pandas as pd
 
+from hcsim.guidance.sources import TABLES, missing_tables
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
-from hcsim.model.core.measures import CATEGORY_MEASURES, Measure, MeasureError
+from hcsim.model.core.measures import CATEGORY_MEASURES, Measure, MeasureError, consolidated_sql
 from hcsim.model.core.transactions import TransTypeCatalog, TransTypeError
 from hcsim.model.sql.catalog import CatalogError, Use, is_org_level, require
 
@@ -107,14 +109,21 @@ def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
     return column.expression
 
 
-def problems(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> list[str]:
+def problems(
+    con: duckdb.DuckDBPyConnection,
+    grouping: str = "cost_center",
+    measures: Mapping[GuidanceCategory, Measure] = MEASURES,
+) -> list[str]:
     """Everything that keeps the warehouse from yielding series grouped by `grouping`."""
+    missing = missing_tables(con)
+    if missing:
+        return [f"the source has no {', '.join(missing)}: ingestion reads {', '.join(TABLES)}"]
     found = []
     try:
         catalog = TransTypeCatalog.from_warehouse(con)
         used = con.execute("SELECT DISTINCT trans_type FROM workforce_agg").fetchall()
         catalog.check(row[0] for row in used)
-        for measure in MEASURES.values():
+        for measure in measures.values():
             measure.check(catalog)
     except (TransTypeError, MeasureError) as error:
         found.append(str(error))
@@ -125,27 +134,31 @@ def problems(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> l
     return found
 
 
-def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
-    found = problems(con, grouping)
+def ingest(
+    con: duckdb.DuckDBPyConnection,
+    grouping: str = "cost_center",
+    measures: Mapping[GuidanceCategory, Measure] = MEASURES,
+) -> Series:
+    """Every category's monthly series per group, counted in one query: the transaction
+    measures in one pass over the aggregate fact, and the template measures beside them."""
+    found = problems(con, grouping, measures)
     if found:
         raise IngestionError("; ".join(found))
     group = _group_expression(con, grouping)
-    parts = []
-    for category, measure in MEASURES.items():
-        sql = measure.sql(role_column(con, measure.table))
-        frame = con.execute(
-            f"""
-            SELECT m.month, {group} AS "group", sum(m.value)::DOUBLE AS value
-            FROM ({sql}) m
-            LEFT JOIN dim_org o USING (cost_center)
-            GROUP BY ALL
-            """
-        ).df()
-        if not frame.empty:
-            parts.append(frame.assign(category=category.value))
-    if not parts:
+    tables = {m.table for m in measures.values()}
+    sql = consolidated_sql(list(measures.values()), {t: role_column(con, t) for t in tables})
+    raw = con.execute(
+        f"""
+        SELECT m.month, {group} AS "group", m.measure AS category, sum(m.value)::DOUBLE AS value
+        FROM ({sql}) m
+        LEFT JOIN dim_org o USING (cost_center)
+        GROUP BY ALL
+        """
+    ).df()
+    if raw.empty:
         raise IngestionError("the warehouse holds no workforce or requisition data")
-    raw = pd.concat(parts, ignore_index=True)
+    names = {m.name: c.value for c, m in measures.items()}
+    raw[CATEGORY] = raw[CATEGORY].map(names)
     raw[MONTH] = pd.to_datetime(raw[MONTH]).dt.to_period("M")
 
     # The snapshot is the last month any measure observed. Later months are trimmed.
@@ -153,7 +166,7 @@ def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Ser
     months = pd.period_range(raw[MONTH].min(), snapshot, freq="M")
     groups = sorted(raw["group"].dropna().unique())
     grid = pd.MultiIndex.from_product(
-        [months, groups, [c.value for c in MEASURES]], names=[MONTH, GROUP, CATEGORY]
+        [months, groups, [c.value for c in measures]], names=[MONTH, GROUP, CATEGORY]
     )
     frame = (
         raw.dropna(subset=["group"])
