@@ -39,7 +39,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.financial.ranges import RangeField, RangeTable
-from hcsim.financial.vesting import VestTemplate
+from hcsim.financial.vesting import Template
 from hcsim.model.core.layouts import Buffer, EmployeeColumn
 
 Floats = NDArray[np.float64]
@@ -153,12 +153,13 @@ def size(
     ranges: RangeTable,
     ratings: RatingTable,
     prices: Sequence[float] | Floats,
-    template: VestTemplate,
+    template: Template,
     existing: Floats | None = None,
+    calendar_month: int = 1,
 ) -> Sized:
     """Size one grant per recipient over the template's forward years, at `prices`, the
     projected price of each forward year, net of `existing`, the shares each already vests per
-    forward year."""
+    forward year. A calendar-keyed template lays out from the award's `calendar_month`."""
     years = template.n_years
     price = np.asarray(prices, dtype=np.float64)
     if price.shape != (years,):
@@ -199,7 +200,8 @@ def size(
     # 7. Whole shares.
     _refuse(recipients.ids, {"target": target, "base": base, "gap": gap, "shares": shares_float})
     shares = np.rint(shares_float).astype(np.int64)
-    return Sized(cells, p, target, base, gap, shares_float, shares, template.expand(shares))
+    schedule = template.expand(shares, calendar_month)
+    return Sized(cells, p, target, base, gap, shares_float, shares, schedule)
 
 
 def _named(ids: Ints) -> str:
