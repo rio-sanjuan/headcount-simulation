@@ -45,6 +45,10 @@ TRANS_TYPES: Final = (
     "RIF",
     "TERM_PENDING",
     "ADMIN",
+    # Emitted only by the data quirks (see `quirks`), never by the world's processes.
+    "HIRE_REV",
+    "TERM_REV",
+    "HIRE_PENDING",
 )
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
