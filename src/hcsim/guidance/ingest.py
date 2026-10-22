@@ -1,8 +1,14 @@
 """Ingestion: read the warehouse, compose guidance categories, and aggregate to series.
 
-Measures are composed into categories here, before any model is fitted, so a forecaster's
-output is the category's forecast. Adding forecasts after fitting would be invalid for anything
-but point values.
+Categories are composed here, before any model is fitted, so a forecaster's output is the
+category's forecast. Adding forecasts after fitting would be invalid for anything but point
+values. Composition works at two levels:
+
+- each counted category is its measure: signed sums of transaction codes, or a template's own
+  count (see `model.core.measures`);
+- an inner node of the fill tree, `hires` or `fills`, isn't counted on its own. Its series is
+  the sum of its leaves' series, so the series a forecast starts from are coherent by
+  construction.
 
 The result is long-form: one row per month, group, and category. The grid is complete: every
 group has every month, with zeros where nothing happened, and trailing months with no data at
@@ -11,7 +17,7 @@ all are trimmed, because they usually mark months not yet loaded.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -22,6 +28,7 @@ from hcsim.guidance.sources import TABLES, missing_tables
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
+from hcsim.model.core.fill_tree import leaves
 from hcsim.model.core.measures import CATEGORY_MEASURES, Measure, MeasureError, consolidated_sql
 from hcsim.model.core.transactions import TransTypeCatalog, TransTypeError
 from hcsim.model.sql.catalog import CatalogError, Use, is_org_level, require
@@ -36,19 +43,28 @@ VALUE: Final = "value"
 #: center, so nothing finer or unrelated to the org can group them.
 GROUPINGS: Final = ("cost_center", "org_level<k>", TOPLINE)
 
-# Each category is counted by one measure, a SQL query yielding (month, cost_center, value).
+# Each counted category is one measure, a SQL query yielding (month, cost_center, value).
 # Workforce measures read the pre-summed fact, `workforce_agg`, as the data contract intends
 # for the guidance pipeline, and count regular employees only.
-# The skeleton forecasts these four; the full set arrives with the complete pipeline.
+#: The categories a configuration forecasts by default: the walking skeleton's four.
+DEFAULT_CATEGORIES: Final = (
+    GuidanceCategory.ATTRITION,
+    GuidanceCategory.EXTERNAL_HIRES,
+    GuidanceCategory.HEADCOUNT,
+    GuidanceCategory.REQUISITIONS_OPENED,
+)
 MEASURES: Final[dict[GuidanceCategory, Measure]] = {
-    c: CATEGORY_MEASURES[c]
-    for c in (
-        GuidanceCategory.ATTRITION,
-        GuidanceCategory.EXTERNAL_HIRES,
-        GuidanceCategory.HEADCOUNT,
-        GuidanceCategory.REQUISITIONS_OPENED,
-    )
+    c: CATEGORY_MEASURES[c] for c in DEFAULT_CATEGORIES
 }
+
+
+def counted(categories: Sequence[GuidanceCategory]) -> list[GuidanceCategory]:
+    """The categories counted by their own measure, for `categories`: each one, but an inner
+    fill-tree node is its leaves."""
+    found: list[GuidanceCategory] = []
+    for category in categories:
+        found += [leaf for leaf in leaves(category) if leaf not in found]
+    return found
 
 
 class IngestionError(ValueError):
@@ -112,9 +128,10 @@ def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
 def problems(
     con: duckdb.DuckDBPyConnection,
     grouping: str = "cost_center",
-    measures: Mapping[GuidanceCategory, Measure] = MEASURES,
+    categories: Sequence[GuidanceCategory] = DEFAULT_CATEGORIES,
 ) -> list[str]:
-    """Everything that keeps the warehouse from yielding series grouped by `grouping`."""
+    """Everything that keeps the warehouse from yielding `categories` grouped by `grouping`."""
+    measures = {c: CATEGORY_MEASURES[c] for c in counted(categories)}
     missing = missing_tables(con)
     if missing:
         return [f"the source has no {', '.join(missing)}: ingestion reads {', '.join(TABLES)}"]
@@ -137,11 +154,13 @@ def problems(
 def ingest(
     con: duckdb.DuckDBPyConnection,
     grouping: str = "cost_center",
-    measures: Mapping[GuidanceCategory, Measure] = MEASURES,
+    categories: Sequence[GuidanceCategory] = DEFAULT_CATEGORIES,
 ) -> Series:
-    """Every category's monthly series per group, counted in one query: the transaction
-    measures in one pass over the aggregate fact, and the template measures beside them."""
-    found = problems(con, grouping, measures)
+    """Each of `categories`' monthly series per group. The counted categories come from one
+    query: the transaction measures in one pass over the aggregate fact, and the template
+    measures beside them. An inner fill-tree node is then the sum of its leaves."""
+    measures = {c: CATEGORY_MEASURES[c] for c in counted(categories)}
+    found = problems(con, grouping, categories)
     if found:
         raise IngestionError("; ".join(found))
     group = _group_expression(con, grouping)
@@ -175,4 +194,16 @@ def ingest(
         .reindex(grid, fill_value=0.0)
         .reset_index()
     )
+    frame = _compose(frame, categories)
     return Series(frame, grouping, snapshot)
+
+
+def _compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.DataFrame:
+    """The requested categories, each inner fill-tree node the sum of its leaves."""
+    wide = frame.pivot(index=[MONTH, GROUP], columns=CATEGORY, values=VALUE)
+    parts = []
+    for category in categories:
+        values = wide[[leaf.value for leaf in leaves(category)]].sum(axis=1)
+        parts.append(values.rename(VALUE).reset_index().assign(**{CATEGORY: category.value}))
+    composed = pd.concat(parts, ignore_index=True)[[MONTH, GROUP, CATEGORY, VALUE]]
+    return composed.sort_values([MONTH, GROUP, CATEGORY], ignore_index=True)
