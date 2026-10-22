@@ -315,6 +315,9 @@ class SimulationConfig:
     transfers_availability_factor: float = setting(
         "transfers", 1.0, "the share of each employee cell available to transfer"
     )
+    transfers_level_band: int = setting(
+        "transfers", 1, "how many levels from an opening's own a transfer may come from"
+    )
     # replay
     replay_boundary_fill: bool = setting(
         "replay", True, "inject boundary fills for hires replay can't trace to a requisition"
@@ -502,6 +505,12 @@ class SimulationConfig:
                 lambda: _when(
                     not 0.0 <= self.transfers_availability_factor <= 1.0,
                     "transfers_availability_factor must lie in [0, 1]",
+                ),
+            ),
+            (
+                ("transfers_level_band",),
+                lambda: _when(
+                    self.transfers_level_band < 0, "transfers_level_band must be non-negative"
                 ),
             ),
             (
