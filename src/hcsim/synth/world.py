@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 
 from hcsim.synth import equity, population, process, structure
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
@@ -223,6 +224,8 @@ def generate_world(config: WorldConfig) -> World:
         movements,
         TerminationPrograms(config, workforce, org_of_cost_center, program_rng),
     )
+    plan: LatentPlan = process_truth.pop("plan")
+    world.tables["truth_latent_plan"] = plan.frame(structure.cost_center_names(config))
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels)

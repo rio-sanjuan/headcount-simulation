@@ -189,8 +189,6 @@ class AttritionTruth:
 @dataclass(frozen=True)
 class RequisitionTruth:
     backfill_probability: float = 0.6
-    growth_requisitions_per_month: float = 0.25
-    growth_sigma: float = 0.3
     growth_level_mix: dict[int, float] = field(default_factory=lambda: {1: 0.5, 2: 0.3, 3: 0.2})
     #: Monthly external-fill hazard by age in months: 0, 1, 2, then 3 and older.
     external_fill_hazard: tuple[float, ...] = (0.15, 0.30, 0.30, 0.25)
@@ -457,6 +455,41 @@ class DateTruth:
         return found
 
 
+@dataclass(frozen=True)
+class GrowthTruth:
+    """Growth requisitions, driven by a latent plan per cost center. Invented, round values.
+
+    Each cost center plans a headcount path from its starting headcount. It grows at an annual
+    rate drawn per cost center, revised each January by a random-walk step. Each month a cost
+    center opens growth requisitions with a negative-binomial count whose mean is a share of
+    its gap to plan (the target less committed strength, headcount plus open openings), times
+    a seasonal factor. A cost center at or above plan opens none.
+    """
+
+    plan_growth_mean: float = 0.05
+    plan_growth_sigma: float = 0.08
+    plan_revision_sigma: float = 0.04
+    gap_closing_rate: float = 0.15
+    #: Negative-binomial shape: the count's variance is mean + mean^2 / dispersion.
+    dispersion: float = 2.0
+    seasonal_amplitude: float = 0.3
+    seasonal_peak_month: int = 1
+
+    def problems(self) -> list[str]:
+        found = []
+        if not 0 < self.gap_closing_rate <= 1:
+            found.append("growth.gap_closing_rate must lie in (0, 1]")
+        if self.dispersion <= 0:
+            found.append("growth.dispersion must be positive")
+        if not 0 <= self.seasonal_amplitude < 1:
+            found.append("growth.seasonal_amplitude must lie in [0, 1)")
+        if self.seasonal_peak_month not in range(1, 13):
+            found.append("growth.seasonal_peak_month must be a calendar month 1-12")
+        if min(self.plan_growth_sigma, self.plan_revision_sigma) < 0:
+            found.append("growth plan spreads must be non-negative")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -522,6 +555,7 @@ class WorldConfig:
     movements: MovementTruth = field(default_factory=MovementTruth)
     programs: ProgramTruth = field(default_factory=ProgramTruth)
     dates: DateTruth = field(default_factory=DateTruth)
+    growth: GrowthTruth = field(default_factory=GrowthTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -584,6 +618,7 @@ class WorldConfig:
         problems += self.movements.problems()
         problems += self.programs.problems(len(self.ratings.scale))
         problems += self.dates.problems()
+        problems += self.growth.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:
