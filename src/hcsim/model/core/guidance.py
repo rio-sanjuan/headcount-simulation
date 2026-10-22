@@ -113,7 +113,9 @@ class GuidanceForecast:
             raise GuidanceArtifactError("values must be finite")
         if (values < 0).any():
             raise GuidanceArtifactError(
-                f"{int((values < 0).sum())} negative cells; writers clamp at write time"
+                f"{int((values < 0).sum())} negative cells, such as "
+                f"{_cells(frame, values < 0, values, self.grouping_column)}; writers clamp at "
+                "write time, so a negative cell means a defect upstream"
             )
         if self.horizon < 1:
             raise GuidanceArtifactError("horizon must be at least 1")
@@ -260,8 +262,11 @@ class GuidanceForecast:
         if not np.isfinite(values).all():
             raise GuidanceArtifactError("quantiles must be finite")
         if (values < 0).any():
+            lowest = values.min(axis=1)
             raise GuidanceArtifactError(
-                f"{int((values < 0).sum())} negative quantiles; writers clamp at write time"
+                f"{int((values < 0).sum())} negative quantiles, such as "
+                f"{_cells(frame, lowest < 0, lowest, self.grouping_column)}; writers clamp at "
+                "write time"
             )
         crossing = int((np.diff(values, axis=1) < 0).any(axis=1).sum())
         if crossing:
@@ -487,3 +492,16 @@ def _stamp_text(value: str | None) -> str | None:
         return str(population(value).stamp)
     except PopulationError as error:
         raise GuidanceArtifactError(str(error)) from None
+
+
+def _cells(
+    frame: pd.DataFrame, mask: NDArray[np.bool_], values: NDArray[np.float64], group: str
+) -> str:
+    """The most negative cells under `mask`, by step, group, and category."""
+    rows = np.flatnonzero(mask)
+    worst = rows[np.argsort(values[rows], kind="stable")][:WORST_CELLS]
+    return ", ".join(
+        f"{frame[CATEGORY].iloc[i]} at step {frame[FORECAST_MONTH].iloc[i]} in "
+        f"{frame[group].iloc[i]} ({values[i]:g})"
+        for i in worst
+    )
