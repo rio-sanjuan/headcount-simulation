@@ -22,11 +22,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from hcsim.model.data.grain import Placement
+from hcsim.model.data.grain import GrainRelation, Placement
 
 Floats = NDArray[np.float64]
 
@@ -49,6 +50,69 @@ class ShareBasis(StrEnum):
 
 class QuotaError(ValueError):
     """Quotas, shares, or margins that can't be combined."""
+
+
+class Refusal(StrEnum):
+    """Combinations of a derivation and a run that are refused by name."""
+
+    UNCHANGED_FOR_SUBSET = "unchanged_for_subset"
+    SUBSET_DERIVATION_WITHOUT_SUBSET = "subset_derivation_without_subset"
+    RESTRICT_CROSSING = "restrict_crossing"
+    NO_GROUP_REACHES = "no_group_reaches"
+    DISAGGREGATE_NOT_COARSER = "disaggregate_not_coarser"
+
+
+class QuotaRefused(QuotaError):
+    """A derivation refused for this run, with the refusal's name."""
+
+    def __init__(self, refusal: Refusal, message: str) -> None:
+        super().__init__(f"{refusal.value}: {message}")
+        self.refusal = refusal
+
+
+_SUBSET_DERIVATIONS: Final = frozenset({Derivation.RESTRICT, Derivation.RESHARE})
+
+
+def check_derivation(
+    derivation: Derivation, placement: Placement | None, *, coarser: bool = False
+) -> None:
+    """Refuse a derivation that can't serve this run. `placement` is None for a run of the
+    whole population. `coarser` says the artifact groups more coarsely than the run needs."""
+    if placement is None:
+        if derivation in _SUBSET_DERIVATIONS:
+            raise QuotaRefused(
+                Refusal.SUBSET_DERIVATION_WITHOUT_SUBSET,
+                f"{derivation.value} reads a subset's part of the quotas, but this run has no "
+                "subset; use unchanged",
+            )
+    elif derivation is Derivation.UNCHANGED:
+        raise QuotaRefused(
+            Refusal.UNCHANGED_FOR_SUBSET,
+            "unchanged quotas are the whole population's, so a subset would realize events "
+            "meant for people outside it; use restrict, reshare, disaggregate, refit, or "
+            "unguided",
+        )
+    elif placement.relation is GrainRelation.UNREACHABLE and derivation not in (
+        Derivation.REFIT,
+        Derivation.UNGUIDED,
+    ):
+        raise QuotaRefused(
+            Refusal.NO_GROUP_REACHES,
+            f"no group of the artifact reaches the subset, so {derivation.value} has nothing "
+            "to read; use refit or unguided",
+        )
+    elif derivation is Derivation.RESTRICT and placement.relation is GrainRelation.CROSSING:
+        raise QuotaRefused(
+            Refusal.RESTRICT_CROSSING,
+            f"groups {list(placement.crossing)} cross the subset's boundary, so restricting "
+            "would keep their whole quotas or drop them; use reshare",
+        )
+    if derivation is Derivation.DISAGGREGATE and not coarser:
+        raise QuotaRefused(
+            Refusal.DISAGGREGATE_NOT_COARSER,
+            "the artifact already groups at the run's grain, so there's nothing to split; "
+            "use unchanged, restrict, or reshare",
+        )
 
 
 def _counts(values: ArrayLike, what: str) -> Floats:
@@ -75,12 +139,16 @@ def inside_shares(inside: ArrayLike, total: ArrayLike) -> Floats:
 def derive(
     quota: ArrayLike,
     groups: tuple[str, ...],
-    placement: Placement,
+    placement: Placement | None,
     derivation: Derivation,
     shares: ArrayLike | None = None,
 ) -> Floats | None:
-    """The subset's quota per group, in `groups` order, or None when it runs unguided or
-    refits. `shares` gives each crossing group's share inside, in `groups` order."""
+    """The run's quota per group, in `groups` order, or None when it runs unguided or refits.
+    `placement` is None for a whole-population run. `shares` gives each crossing group's
+    share inside, in `groups` order. A refused combination raises `QuotaRefused`."""
+    if derivation is Derivation.DISAGGREGATE:
+        raise QuotaError("disaggregate isn't a per-group derivation; use disaggregate()")
+    check_derivation(derivation, placement)
     q = _counts(quota, "quotas")
     if q.shape[-1] != len(groups):
         raise QuotaError(f"quotas have {q.shape[-1]} groups, the artifact {len(groups)}")
@@ -88,6 +156,8 @@ def derive(
         return None
     if derivation is Derivation.UNCHANGED:
         return q.copy()
+    if placement is None:  # pragma: no cover - check_derivation refuses these first
+        raise QuotaError(f"{derivation.value} needs a subset's placement")
     keep = np.array([g in placement.inside for g in groups], dtype=np.float64)
     if derivation is Derivation.RESTRICT:
         return q * keep
@@ -99,7 +169,7 @@ def derive(
             raise QuotaError("shares need one value in [0, 1] per group")
         crossing = np.array([g in placement.crossing for g in groups], dtype=np.float64)
         return q * (keep + crossing * s)
-    raise QuotaError(f"{derivation.value} isn't a per-group derivation; use disaggregate()")
+    raise QuotaError(f"no derivation {derivation!r}")  # pragma: no cover - the enum is closed
 
 
 def disaggregate(quota: ArrayLike, parent: ArrayLike, basis: ArrayLike) -> Floats:
