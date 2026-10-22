@@ -59,6 +59,7 @@ from hcsim.engine.modes import RunMode
 from hcsim.engine.pending import PENDING_STARTS, pending_starts
 from hcsim.engine.performance import PERFORMANCE, performance
 from hcsim.engine.promotion import PROMOTION, promotion
+from hcsim.engine.replay import REPLAY_REQUISITIONS, ReplayedRequisitions, replay_requisitions
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -126,6 +127,7 @@ OPENING_IDENTITY: Final[Mapping[str, int]] = {
 }
 #: Every domain, in step order: the known-event domains, then the sampled ones.
 STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
+    (REPLAY_REQUISITIONS, replay_requisitions),  # replay's realized requisitions open first
     (CONVERSION_OUT, conversion_out),
     (REORGANIZATION, reorganization),
     (OTHER_MOVEMENT, other_movement),
@@ -144,10 +146,12 @@ FIRES: Final[Mapping[str, EventKind]] = {
     PROMOTION: EventKind.PROMOTION,
     ATTRITION: EventKind.TERMINATION,
     PENDING_STARTS: EventKind.PENDING_START,
+    TRANSFERS: EventKind.TRANSFER,
 }
 #: Gates every run has: other movement comes only from replayed history.
 DEFAULT_GATES: Final = (
     RegistrationGate(OTHER_MOVEMENT, modes=(RunMode.REPLAY,), reason="replay only"),
+    RegistrationGate(REPLAY_REQUISITIONS, modes=(RunMode.REPLAY,), reason="replay only"),
 )
 
 
@@ -280,6 +284,7 @@ def run_trajectory(
     validate: bool = False,
     registered: Registered | None = None,
     known: ResolvedPlan | None = None,
+    replay: ReplayedRequisitions | None = None,
 ) -> TrajectoryResult:
     """Run one trajectory from a copy of `initial`. `validate` recounts state after every
     domain, which costs a pass over both buffers each time."""
@@ -307,7 +312,7 @@ def run_trajectory(
             state.price.step(calendar_month(config.run_date, step))
             prices[step] = state.price.price
         state.category_ledger = {}
-        ctx = StepContext(config, step, trajectory, seeds, known=known, fired=fired)
+        ctx = StepContext(config, step, trajectory, seeds, known=known, fired=fired, replay=replay)
         month = calendar_month(config.run_date, step)
         for domain in registered.domains:
             if not registered.opens(domain, month, ctx.rng(f"gate:{domain}")):
@@ -375,15 +380,23 @@ def simulate(
     initial: SimulationState,
     *,
     known: ResolvedPlan | None = None,
+    replay: ReplayedRequisitions | None = None,
     validate: bool = False,
 ) -> SimulationResult:
     """Run every trajectory of `config` from the seeded state `initial`, which stays untouched,
-    with the run's resolved known events."""
+    with the run's resolved known events and, in replay, its realized requisitions."""
     seeds = SeedManager(config.seed)
     registered = _register(config)
     trajectories = tuple(
         run_trajectory(
-            config, initial, j, seeds, validate=validate, registered=registered, known=known
+            config,
+            initial,
+            j,
+            seeds,
+            validate=validate,
+            registered=registered,
+            known=known,
+            replay=replay,
         )
         for j in range(config.num_trajectories)
     )
@@ -394,7 +407,8 @@ def _register(config: SimulationConfig) -> Registered:
     mode = config.run_mode or RunMode.UNGUIDED
     names = [name for name, _ in STEP_ORDER]
     defaults = [g for g in DEFAULT_GATES if g.domain in names]
-    if config.campus is None and CAMPUS in names:
+    replaying = config.run_mode is RunMode.REPLAY
+    if (config.campus is None or replaying) and CAMPUS in names:
         defaults.append(RegistrationGate(CAMPUS, enabled=False, reason="no campus schedule"))
     if config.models.performance is None and PERFORMANCE in names:
         defaults.append(RegistrationGate(PERFORMANCE, enabled=False, reason="no model"))

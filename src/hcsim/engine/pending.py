@@ -9,6 +9,10 @@ under their own id, with a new-hire grant:
   the role their offer names. No opening is consumed, so they count as a boundary fill,
   `F_bdy`.
 
+In replay, a realized hire is a pending start into the requisition it filled. One whose
+requisition the run doesn't hold is a boundary fill only when `replay_boundary_fill` allows;
+otherwise it's left out.
+
 An offer whose start passed before the run started is still expected for
 `pending_starts_staleness_days`, and starts in the run's first month; an older one is stale and
 never becomes a known event.
@@ -26,7 +30,7 @@ from typing import Final
 import numpy as np
 
 from hcsim.engine.domains import StepContext
-from hcsim.engine.known_events import EventKind
+from hcsim.engine.known_events import EventKind, Source
 from hcsim.engine.results import DomainResult, Grant, RowChange
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.categories import GuidanceCategory
@@ -50,18 +54,22 @@ def pending_starts(state: SimulationState, ctx: StepContext) -> DomainResult:
     remaining = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64).copy()
     hires = EMPLOYEE.empty(len(events))
     matched = np.zeros(len(events), dtype=bool)
+    joining = np.ones(len(events), dtype=bool)
     for k, e in enumerate(events):
         row = None if e.event.req_id is None else where.get(int(e.event.req_id))
         if row is not None and remaining[row] >= 1:
             copy_role(reqs[row : row + 1], hires[k : k + 1])
             remaining[row] -= 1
             matched[k] = True
+        elif e.event.source is Source.REPLAY and not ctx.config.replay_boundary_fill:
+            joining[k] = False  # a replayed hire with no requisition, and no boundary fills
         else:
             for column, code in e.codes.items():
                 hires[k, column] = code
         hires[k, EmployeeColumn.EMPLOYEE_ID] = e.event.employee_id
         hires[k, EmployeeColumn.HIRE_STEP] = ctx.step
         ctx.fired.record(e.event)
+    hires, matched = hires[joining], matched[joining]
     total = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
     touched = np.flatnonzero(remaining < total)
     closed = touched[remaining[touched] == 0]

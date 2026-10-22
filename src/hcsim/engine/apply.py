@@ -181,14 +181,22 @@ def apply(
             positions = np.arange(first, state.n_employees) if grant.rows == "appended" else written
             if not len(positions):
                 continue
-            sizer = awards.sizer(grant.award_type)
-            if sizer is None:
-                unsized += len(positions)
-                continue
             if state.price is None:
                 raise RuntimeError("a run that sizes awards needs a price model in its state")
             rows = state.employees[positions]
-            batch = sizer.size(rows, state.price)
+            recorded_batch = (
+                None
+                if awards.replayed is None
+                else awards.replayed.batch(rows, step, grant.award_type, state.price)
+            )
+            sizer = awards.sizer(grant.award_type)
+            if recorded_batch is not None:
+                batch = recorded_batch
+            elif sizer is not None:
+                batch = sizer.size(rows, state.price)
+            else:
+                unsized += len(positions)
+                continue
             state.employees[positions, EmployeeColumn.BASE_SALARY] = batch.base_salary
             recorded += state.ledger.record(
                 rows[:, EmployeeColumn.VEST_INDEX].astype(np.int64),

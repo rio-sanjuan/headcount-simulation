@@ -25,6 +25,8 @@ from hcsim.engine.config import BackfillSource, SimulationConfig
 from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
+from hcsim.engine.modes import RunMode
+from hcsim.engine.replay import ReplayedRequisitions
 from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
 from hcsim.engine.roles import DEGENERATE_ROWS, fill_roles
 from hcsim.engine.seeds import SeedManager
@@ -83,6 +85,8 @@ class StepContext:
     #: The run's known events, resolved, and the log of those fired.
     known: ResolvedPlan | None = None
     fired: FiringLog = field(default_factory=FiringLog)
+    #: The realized requisitions a replay opens and closes.
+    replay: ReplayedRequisitions | None = None
     _quotas: dict[GuidanceCategory, Ints] = field(default_factory=dict)
 
     def rng(self, domain: str) -> np.random.Generator:
@@ -131,9 +135,16 @@ class StepContext:
                 self.fired.record(e.event)
         return taken
 
+    @property
+    def pinned(self) -> bool:
+        """Whether every movement is pinned to history, as in replay: then nothing is sampled."""
+        return self.config.run_mode is RunMode.REPLAY
+
     def sampled(self, rows: Buffer, p: Probabilities) -> Probabilities:
         """`p` with every employee waiting on a known event set to zero, so no sampled draw
-        takes them first."""
+        takes them first; and all of it zero in replay."""
+        if self.pinned:
+            return np.zeros(len(rows))
         if self.known is None:
             return p
         result: Probabilities = np.where(self.known.plan.sampled(rows, self.step), p, 0.0)
@@ -265,6 +276,8 @@ def _backfill(
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
     p = _backfill_probability(departed, ctx, model, state.n_cost_centers)
     p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, p)
+    if ctx.pinned:  # replay opens its realized backfills itself
+        p = np.zeros(len(departed))
     if not ctx.config.backfill_anticipated_terminations:
         p = np.where(anticipated, 0.0, p)
     rng = ctx.rng(domain)
@@ -331,6 +344,8 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
     p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
     p = np.where(is_campus(reqs, ctx), 0.0, p)  # a campus requisition fills on its schedule
+    if ctx.pinned:  # replay closes its realized exits itself
+        p = np.zeros(len(reqs))
     rng = ctx.rng(CANCELLATION)
     exits = bernoulli(p, rng)
     quotas: dict[str, QuotaRecord] = {}
@@ -407,13 +422,16 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
     n = state.n_cost_centers
     rng = ctx.rng(GROWTH)
     counts = rate_counts(ctx.config.models.growth, n, rng)
+    if ctx.pinned:  # replay opens its realized requisitions itself
+        counts[:] = 0
     regime = regimes(state, ctx)
     strength = state.headcount + state.open_openings
     target = ctx.config.ceiling.targets(ctx.config.run_date, ctx.step)
     seeking = regime == Regime.TARGET
     gap = np.nan_to_num(target - strength, nan=0.0)
     supply = np.maximum(0, np.ceil(ctx.config.requisitions_supply_gain * gap)).astype(np.int64)
-    counts[seeking] = supply[seeking]
+    if not ctx.pinned:
+        counts[seeking] = supply[seeking]
     ledger: dict[str, Ints] = {}
     quotas: dict[str, QuotaRecord] = {}
     guided = regime == Regime.GUIDED
