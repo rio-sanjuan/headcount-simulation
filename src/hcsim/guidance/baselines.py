@@ -1,0 +1,174 @@
+"""Fixed-form baselines: models whose form is chosen, not searched for.
+
+- **Log-count ARIMA** (`native.LogCountARIMA`) fits ARIMA(1,0,0)(1,0,0)[12] with a mean to
+  `log(1 + count)` and forecasts back through the inverse, so a forecast is never negative.
+- **Logit-rate ARIMA** (`native.LogitRateARIMA`) models a flow as a share of its exposure, as
+  attrition is a share of headcount. It fits the same ARIMA to the logit of the share, clipped
+  away from 0 and 1, and forecasts the share times the exposure's forecast. It's an
+  `ExposureModel`: it needs the exposure's history to fit and its forecast to predict.
+- **Poisson and negative-binomial GLMs with harmonics** (`native.PoissonGLM`,
+  `native.NegativeBinomialGLM`) regress the count, through a log link, on a level, a linear trend,
+  and the first two annual harmonics. Both harmonics' sine and cosine are fitted, so the
+  season's phase is learned whatever month the series starts in. The negative binomial
+  estimates its dispersion, so it fits overdispersed counts the Poisson can't. The number of
+  harmonics, one to three, is tunable. Both sample paths from their fitted distribution.
+
+The ARIMAs run on statsforecast and the GLMs on statsmodels, both in the core install and
+imported when a model first fits. Fitting, forecasting, and failing work as for every adapter
+(see `adapters.base`).
+"""
+
+from __future__ import annotations
+
+import importlib
+from types import MappingProxyType
+from typing import Any, ClassVar, Final, Self
+
+import numpy as np
+
+from hcsim.guidance.adapters.base import Floats, LibraryModel
+from hcsim.guidance.errors import ForecastError
+from hcsim.guidance.tuning import IntParam, Space
+from hcsim.model.interface import ProbabilisticOutput
+
+SEASON: Final = 12
+#: How close to 0 or 1 a share may come before its logit.
+EPSILON: Final = 1e-4
+_POINT = frozenset({ProbabilisticOutput.NONE})
+_PARAMETRIC = frozenset(
+    {ProbabilisticOutput.NONE, ProbabilisticOutput.PARAMETRIC, ProbabilisticOutput.SAMPLE_PATHS}
+)
+
+
+def _arima(values: Floats) -> Any:
+    models = importlib.import_module("statsforecast.models")
+    model = models.ARIMA(
+        order=(1, 0, 0), seasonal_order=(1, 0, 0), season_length=SEASON, include_mean=True
+    )
+    return model.fit(y=values)
+
+
+class LogCountARIMA(LibraryModel):
+    NAME: ClassVar[str] = "native.LogCountARIMA"
+    OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _POINT
+    MIN_MONTHS: ClassVar[int] = 2 * SEASON
+
+    def _fit(self, values: Floats) -> Any:
+        if (values < 0).any():
+            raise ForecastError(f"{self.NAME} fits counts, which can't be negative")
+        return _arima(np.log1p(values))
+
+    def _predict(self, fitted: Any, horizon: int) -> Any:
+        return np.maximum(np.expm1(fitted.predict(h=horizon)["mean"]), 0.0)
+
+
+class LogitRateARIMA(LibraryModel):
+    NAME: ClassVar[str] = "native.LogitRateARIMA"
+    OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _POINT
+    MIN_MONTHS: ClassVar[int] = 2 * SEASON
+
+    def __init__(self, **parameters: Any) -> None:
+        super().__init__(**parameters)
+        self._past: Floats | None = None
+        self._future: Floats | None = None
+
+    def expose(self, past: Floats, future: Floats | None) -> None:
+        self._past = np.asarray(past, dtype=np.float64)
+        self._future = None if future is None else np.asarray(future, dtype=np.float64)
+
+    def _fit(self, values: Floats) -> Any:
+        if self._past is None:
+            raise ForecastError(f"{self.NAME} needs the series' exposure, and has none")
+        if self._past.shape != values.shape:
+            raise ForecastError(f"{self.NAME} needs one exposure value per month of history")
+        if (self._past <= 0).any():
+            raise ForecastError(f"{self.NAME} needs a positive exposure in every month")
+        share = np.clip(values / self._past, EPSILON, 1 - EPSILON)
+        return _arima(np.log(share / (1 - share)))
+
+    def _predict(self, fitted: Any, horizon: int) -> Any:
+        if self._future is None or len(self._future) < horizon:
+            raise ForecastError(f"{self.NAME} needs the exposure's forecast for {horizon} months")
+        logit = np.asarray(fitted.predict(h=horizon)["mean"], dtype=np.float64)
+        return self._future[:horizon] / (1 + np.exp(-logit))
+
+
+def _design(start: int, months: int, harmonics: int = 2) -> Floats:
+    """The level, the trend in years, and the first `harmonics` annual harmonics, by month."""
+    t = np.arange(start, start + months, dtype=np.float64)
+    angle = 2 * np.pi * t / SEASON
+    columns = [np.ones(months), t / SEASON]
+    for k in range(1, harmonics + 1):
+        columns += [np.sin(k * angle), np.cos(k * angle)]
+    return np.column_stack(columns)
+
+
+class _HarmonicGLM(LibraryModel):
+    OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _PARAMETRIC
+    MIN_MONTHS: ClassVar[int] = 2 * SEASON
+    SPACE: ClassVar[Space] = MappingProxyType({"harmonics": IntParam(1, 3)})
+
+    @property
+    def harmonics(self) -> int:
+        return int(self.parameters.get("harmonics", 2))
+
+    def __init__(self, **parameters: Any) -> None:
+        super().__init__(**parameters)
+        self._months = 0
+
+    def _model(self, counts: Floats, design: Floats) -> Any:
+        raise NotImplementedError
+
+    def fit(self, history: Floats) -> Self:
+        self._months = len(history)
+        return super().fit(history)
+
+    def _fit(self, values: Floats) -> Any:
+        if (values < 0).any():
+            raise ForecastError(f"{self.NAME} fits counts, which can't be negative")
+        if not values.any():
+            raise ForecastError(f"{self.NAME} can't fit a series that's zero throughout")
+        return self._model(values, _design(0, len(values), self.harmonics))
+
+    def _predict(self, fitted: Any, horizon: int) -> Any:
+        design = _design(self._months, horizon, self.harmonics)
+        return np.exp(design @ np.asarray(fitted.params, dtype=np.float64)[: design.shape[1]])
+
+
+class PoissonGLM(_HarmonicGLM):
+    NAME: ClassVar[str] = "native.PoissonGLM"
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Poisson draws around the forecast mean, month by month."""
+        mean = self.predict(horizon)
+        return rng.poisson(np.broadcast_to(mean, (paths, horizon))).astype(np.float64)
+
+    def _model(self, counts: Floats, design: Floats) -> Any:
+        sm = importlib.import_module("statsmodels.api")
+        return sm.GLM(counts, design, family=sm.families.Poisson()).fit()
+
+
+class NegativeBinomialGLM(_HarmonicGLM):
+    NAME: ClassVar[str] = "native.NegativeBinomialGLM"
+
+    def _model(self, counts: Floats, design: Floats) -> Any:
+        sm = importlib.import_module("statsmodels.api")
+        return sm.NegativeBinomial(counts, design).fit(disp=0)
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Negative-binomial draws around the forecast mean, at the fitted dispersion."""
+        mean = np.broadcast_to(self.predict(horizon), (paths, horizon))
+        alpha = max(self.dispersion, 1e-8)
+        size = 1.0 / alpha
+        return rng.negative_binomial(size, size / (size + mean)).astype(np.float64)
+
+    @property
+    def dispersion(self) -> float:
+        """The fitted NB2 dispersion `alpha`: the variance is `mu + alpha * mu**2`."""
+        if self._fitted is None:
+            raise ForecastError("fit before reading the dispersion")
+        return float(np.asarray(self._fitted.params)[-1])
+
+
+#: Every fixed-form baseline.
+BASELINES: Final = (LogCountARIMA, LogitRateARIMA, PoissonGLM, NegativeBinomialGLM)

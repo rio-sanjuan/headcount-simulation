@@ -8,7 +8,8 @@ configuration, collecting every problem before it refuses:
 - every component it names, against its registry (see `registry`): the models, the combination
   method, and the reconciliation method. An unknown name lists the known ones, and a name from
   an uninstalled extra gives the command that installs it;
-- the grouping, against the column catalog.
+- the grouping, against the column catalog;
+- the categories: each once, and the headcount anchor among them when reconciling.
 
 A configuration that loads names only components the pipeline can build.
 """
@@ -16,15 +17,20 @@ A configuration that loads names only components the pipeline can build.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from hcsim.guidance.ingest import grouping_problems
-from hcsim.guidance.models import MODELS
+from hcsim.guidance.combination import COMBINERS
+from hcsim.guidance.evaluation import EvaluationConfig, space_of
+from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
+from hcsim.guidance.models import MODELS, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
-from hcsim.guidance.selection import COMBINERS, EvaluationConfig, SelectionConfig
+from hcsim.guidance.selection import SelectionConfig, UncertaintySettings
+from hcsim.guidance.tuning import TuningSettings
+from hcsim.model.core.categories import ANCHOR, GuidanceCategory
+from hcsim.model.interface import ProbabilisticOutput
 
 
 class GuidanceConfigError(ValueError):
@@ -36,19 +42,36 @@ class _Strict(BaseModel):
 
 
 class Evaluation(_Strict):
-    """Rolling-origin backtesting: how many folds, how long, and how far apart."""
+    """Rolling-origin backtesting: how many folds, how long, how far apart, and the metric a
+    model's score averages (see `evaluation`)."""
 
     n_splits: int = Field(default=5, ge=1)
     test_months: int = Field(default=6, ge=1)
     step_months: int = Field(default=2, ge=1)
     min_train_months: int = Field(default=36, ge=1)
+    metric: Literal["wape", "mape"] = "wape"
+
+
+class Tuning(_Strict):
+    """Nested TPE tuning of the models that declare a search space (see `tuning`). Off by
+    default, which leaves every model its defaults."""
+
+    enabled: bool = False
+    trials: int = Field(default=20, ge=1)
+    seed: int = Field(default=0, ge=0)
+    inner_splits: int = Field(default=2, ge=1)
+    inner_min_train_months: int = Field(default=24, ge=1)
 
 
 class Combination(_Strict):
-    """How the scored models combine into one forecast."""
+    """How the scored models combine into one forecast (see `combination`)."""
 
     method: str = "inverse_error"
     top_k: int = Field(default=2, ge=1)
+    #: Tried in order when the method can't weigh the candidates.
+    fallbacks: tuple[str, ...] = ("equal",)
+    temperature: float = Field(default=0.1, gt=0)
+    ridge_alpha: float = Field(default=1.0, ge=0)
 
 
 class Reconciliation(_Strict):
@@ -58,14 +81,43 @@ class Reconciliation(_Strict):
     tolerance: float = Field(default=1.0, ge=0.0)
 
 
+class Validation(_Strict):
+    """How the series are settled before fitting (see `validation`)."""
+
+    #: The last month of the history, as `YYYY-MM`. None applies the snapshot rule.
+    snapshot: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    #: What a month with no rows at all inside the history is: refused, or zeros.
+    gaps: Literal["refuse", "zero"] = "refuse"
+    #: Whether a series that's zero throughout is dropped rather than forecast.
+    drop_all_zero: bool = True
+
+
+class Uncertainty(_Strict):
+    """Sample paths, and the quantiles read from them, for the artifact (see `generation`).
+    Off by default, which writes point forecasts only."""
+
+    enabled: bool = False
+    paths: int = Field(default=200, ge=10)
+    #: The quantile levels the artifact carries, in percent.
+    quantiles: tuple[int, ...] = (10, 50, 90)
+    seed: int = Field(default=0, ge=0)
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
     #: The population's stamp, `name@digest`, or a built-in population's name.
     population: str | None = None
-    models: tuple[str, ...] = Field(default=("seasonal_naive", "historical_average"), min_length=1)
+    #: The categories to forecast. An inner fill-tree node is composed from its leaves.
+    categories: tuple[GuidanceCategory, ...] = Field(default=DEFAULT_CATEGORIES, min_length=1)
+    models: tuple[str, ...] = Field(
+        default=("native.SeasonalNaive", "native.HistoricalAverage"), min_length=1
+    )
     combination: Combination = Combination()
     evaluation: Evaluation = Evaluation()
+    validation: Validation = Validation()
+    tuning: Tuning = Tuning()
+    uncertainty: Uncertainty = Uncertainty()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")
@@ -83,10 +135,45 @@ class GuidanceConfig(_Strict):
         if repeated:
             found.append(f"models: each model is named once; {repeated} repeat")
         found += [f"combination.method: {p}" for p in COMBINERS.problems([self.combination.method])]
+        found += [
+            f"combination.fallbacks: {p}" for p in COMBINERS.problems(self.combination.fallbacks)
+        ]
         if self.reconciliation.method is not None:
             method = [self.reconciliation.method]
             found += [f"reconciliation.method: {p}" for p in RECONCILERS.problems(method)]
         found += [f"grouping: {p}" for p in grouping_problems(self.grouping)]
+        repeated = sorted({c.value for c in self.categories if self.categories.count(c) > 1})
+        if repeated:
+            found.append(f"categories: each category is named once; {repeated} repeat")
+        if self.tuning.enabled and not any(
+            MODELS.problems([m]) == [] and space_of(m) for m in self.models
+        ):
+            found.append(
+                "tuning: tuning is on, but no model in the suite has a search space; models "
+                "that do include native.PoissonGLM and statsforecast.WindowAverage"
+            )
+        levels = self.uncertainty.quantiles
+        if any(not 1 <= q <= 99 for q in levels) or list(levels) != sorted(set(levels)):
+            found.append(
+                f"uncertainty.quantiles: levels must be distinct, ascending, and in 1..99, "
+                f"not {list(levels)}"
+            )
+        sampling = [
+            m
+            for m in self.models
+            if MODELS.problems([m]) == []
+            and ProbabilisticOutput.SAMPLE_PATHS in capabilities(m).outputs
+        ]
+        if self.uncertainty.enabled and not sampling:
+            found.append(
+                "uncertainty: sample paths are on, but no model in the suite samples them; "
+                "models that do include native.NegativeBinomialGLM and statsforecast.AutoETS"
+            )
+        if self.reconcile and ANCHOR not in self.categories:
+            found.append(
+                f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "
+                "needs it among the categories; add it, or set reconciliation.method to null"
+            )
         return found
 
     @property
@@ -101,12 +188,26 @@ class GuidanceConfig(_Strict):
     def selection(self) -> SelectionConfig:
         """The selection settings the forecasting step reads."""
         e = self.evaluation
+        t = self.tuning
         return SelectionConfig(
             suite=self.models,
             top_k=self.combination.top_k,
             combination=self.combination.method,
+            fallbacks=self.combination.fallbacks,
+            temperature=self.combination.temperature,
+            ridge_alpha=self.combination.ridge_alpha,
             evaluation=EvaluationConfig(
-                e.n_splits, e.test_months, e.step_months, e.min_train_months
+                e.n_splits, e.test_months, e.step_months, e.min_train_months, e.metric
+            ),
+            tuning=(
+                TuningSettings(t.trials, t.seed, t.inner_splits, t.inner_min_train_months)
+                if t.enabled
+                else None
+            ),
+            uncertainty=(
+                UncertaintySettings(self.uncertainty.paths, self.uncertainty.seed)
+                if self.uncertainty.enabled
+                else None
             ),
         )
 

@@ -1,106 +1,67 @@
-"""Rolling-origin evaluation, top-k inverse-error selection, and combined forecasts.
+"""Selection: scoring the suite and weighing the best.
 
-Evaluation works backwards from the end of a series. The latest fold's test window ends at the
-last observed month, each earlier fold steps back, every training window starts at the first
-month, and a fold with too little training history is dropped. A model's score is its WAPE
-averaged across folds. WAPE suits sparse count series, where MAPE is undefined on zeros.
+Every model in the suite is scored by rolling-origin evaluation (see `evaluation`), and the
+configured combination method, or a fallback, turns the scores into weights for the
+candidates (see `combination`). Generation then refits the selected models and forecasts (see
+`generation`); `forecast` does both for one series.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.guidance.models import ForecastError, build
-from hcsim.guidance.registry import Entry, Registry
+from hcsim.guidance.combination import COMBINERS, CombinationInputs, combine, inverse_error
+from hcsim.guidance.evaluation import (
+    EvaluationConfig,
+    FoldScore,
+    backtest,
+    folds,
+    mape,
+    prepared,
+    score,
+    score_of,
+    wape,
+)
+from hcsim.guidance.models import ForecastError
+from hcsim.guidance.tuning import TuningSettings
 
 Floats = NDArray[np.float64]
 
-
-@dataclass(frozen=True)
-class EvaluationConfig:
-    n_splits: int = 5
-    test_months: int = 6
-    step_months: int = 2
-    min_train_months: int = 36
-
-    @property
-    def min_length(self) -> int:
-        """A series shorter than this gets no forecast."""
-        return self.min_train_months + self.test_months
+__all__ = ["COMBINERS", "EvaluationConfig", "folds", "mape", "prepared", "score", "wape"]
 
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    suite: tuple[str, ...] = ("seasonal_naive", "historical_average")
+    suite: tuple[str, ...] = ("native.SeasonalNaive", "native.HistoricalAverage")
     top_k: int = 2
     combination: str = "inverse_error"
+    #: The methods tried, in order, when the combination method can't weigh the candidates.
+    fallbacks: tuple[str, ...] = ("equal",)
+    #: The softmax temperature, and the ridge meta-learner's penalty.
+    temperature: float = 0.1
+    ridge_alpha: float = 1.0
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    #: How to tune the models that declare a search space; none leaves their defaults.
+    tuning: TuningSettings | None = None
+    #: How many sample paths a forecast draws, and from what seed; none draws none.
+    uncertainty: UncertaintySettings | None = None
 
 
-def folds(n_months: int, config: EvaluationConfig) -> list[tuple[int, int]]:
-    """(train end, test end) index pairs, chronological. Ends are exclusive."""
-    result = []
-    for i in range(config.n_splits):
-        test_end = n_months - i * config.step_months
-        train_end = test_end - config.test_months
-        if train_end >= config.min_train_months:
-            result.append((train_end, test_end))
-    return sorted(result)
-
-
-def wape(actual: Floats, forecast: Floats) -> float:
-    """Absolute error over absolute actuals. All-zero actuals score 0 if matched, else inf."""
-    denominator = float(np.abs(actual).sum())
-    error = float(np.abs(actual - forecast).sum())
-    if denominator == 0.0:
-        return 0.0 if error == 0.0 else float("inf")
-    return error / denominator
-
-
-def score(name: str, series: Floats, config: EvaluationConfig) -> float:
-    """Mean WAPE across folds. A model that fails a fold loses that fold."""
-    scores = []
-    for train_end, test_end in folds(len(series), config):
-        try:
-            prediction = build(name).fit(series[:train_end]).predict(test_end - train_end)
-        except ForecastError:
-            continue
-        scores.append(wape(series[train_end:test_end], prediction))
-    return float(np.mean(scores)) if scores else float("inf")
-
-
-class Combiner(Protocol):
-    """Weights for the models that combine into a forecast, from their scores."""
-
-    def __call__(self, scores: dict[str, float], top_k: int) -> dict[str, float]: ...
+@dataclass(frozen=True)
+class UncertaintySettings:
+    paths: int = 200
+    seed: int = 0
 
 
 def inverse_error_weights(scores: dict[str, float], top_k: int) -> dict[str, float]:
-    """Keep the `top_k` lowest scores, weighted by inverse error.
-
-    Perfect scores share the weight equally. With no finite score, every model shares it.
-    """
-    ranked = sorted(scores, key=lambda name: (scores[name], name))[: max(1, top_k)]
-    perfect = [name for name in ranked if scores[name] == 0.0]
-    if perfect:
-        return {name: 1.0 / len(perfect) for name in perfect}
-    finite = [name for name in ranked if np.isfinite(scores[name])]
-    if not finite:
-        return {name: 1.0 / len(ranked) for name in ranked}
-    inverse = {name: 1.0 / scores[name] for name in finite}
-    total = sum(inverse.values())
-    return {name: w / total for name, w in inverse.items()}
-
-
-#: The combination methods a configuration can name.
-COMBINERS: Registry[Combiner] = Registry(
-    "combination method", (Entry("inverse_error", lambda: inverse_error_weights),)
-)
+    """Inverse-error weights for the `top_k` best of `scores` (see `combination`)."""
+    return inverse_error(CombinationInputs(scores, {}, np.zeros(0), top_k))
 
 
 @dataclass(frozen=True)
@@ -108,20 +69,66 @@ class SeriesForecast:
     values: Floats
     scores: dict[str, float]
     weights: dict[str, float]
+    #: Each model's score on each fold.
+    folds: dict[str, list[FoldScore]] = field(default_factory=dict)
+    #: The tuned values each selected model refit with; empty for its defaults.
+    parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The combination method that weighed the forecast: the configured one, or a fallback.
+    method: str = "inverse_error"
+    #: (paths, horizon) draws from the combined predictive distribution, or none, and why.
+    paths: Floats | None = None
+    point_only: str = ""
 
 
-def forecast(
-    series: Sequence[float] | Floats, horizon: int, config: SelectionConfig
-) -> SeriesForecast:
-    """Evaluate the suite, select, refit on the full history, and combine."""
+@dataclass(frozen=True)
+class Selection:
+    """A series' suite scored and its candidates weighed, before any refit."""
+
+    scores: dict[str, float]
+    weights: dict[str, float]
+    folds: dict[str, list[FoldScore]]
+    #: The combination method that weighed it: the configured one, or a fallback.
+    method: str
+
+
+def select(
+    series: Sequence[float] | Floats,
+    config: SelectionConfig,
+    exposure: Floats | None = None,
+    calendar: pd.DataFrame | None = None,
+) -> Selection:
+    """Score every model in the suite by rolling-origin evaluation, and weigh the best.
+    `exposure` is the series' exposure, such as its group's headcount, for the models of a
+    share; `calendar` holds the calendar covariates, for the models that read them."""
     history = np.asarray(series, dtype=np.float64)
     if len(history) < config.evaluation.min_length:
         raise ForecastError(
             f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
         )
-    scores = {name: score(name, history, config.evaluation) for name in config.suite}
-    weights = COMBINERS.build(config.combination)(scores, config.top_k)
-    combined = np.zeros(horizon)
-    for name, weight in weights.items():
-        combined += weight * build(name).fit(history).predict(horizon)
-    return SeriesForecast(combined, scores, weights)
+    evaluation = config.evaluation
+    scored = {
+        name: backtest(name, history, evaluation, exposure, calendar, config.tuning)
+        for name in config.suite
+    }
+    scores = {name: score_of(f, evaluation.metric) for name, f in scored.items()}
+    inputs = CombinationInputs(
+        scores, scored, history, config.top_k, config.temperature, config.ridge_alpha
+    )
+    weights, method = combine(inputs, config.combination, config.fallbacks)
+    return Selection(scores, weights, scored, method)
+
+
+def forecast(
+    series: Sequence[float] | Floats,
+    horizon: int,
+    config: SelectionConfig,
+    exposure: Floats | None = None,
+    future_exposure: Floats | None = None,
+    calendar: pd.DataFrame | None = None,
+) -> SeriesForecast:
+    """Select, then generate (see `generation`): the whole forecast of one series."""
+    from hcsim.guidance.generation import generate
+
+    selection = select(series, config, exposure, calendar)
+    history = np.asarray(series, dtype=np.float64)
+    return generate(selection, history, horizon, config, exposure, future_exposure, calendar)

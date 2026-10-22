@@ -124,7 +124,14 @@ def test_the_report_records_the_partial_identity_and_clamping(result: PipelineRe
     assert "internal_starts" in report["reconciliation"]["missing_terms"]
     assert report["clamped_negative_cells"] >= 0
     assert len(report["selection"]) == 40
-    assert [s["step"] for s in report["steps"]] == ["ingest", "forecast", "reconcile", "format"]
+    assert [s["step"] for s in report["steps"]] == [
+        "ingest",
+        "validate",
+        "select",
+        "generate",
+        "reconcile",
+        "format",
+    ]
 
 
 def test_the_artifact_saves_and_loads(result: PipelineResult, tmp_path: Path) -> None:
@@ -168,20 +175,22 @@ def test_guidance_fit_refuses_a_grouping_the_series_can_t_take(
 ) -> None:
     args = ["guidance", "fit", "--world", str(world_path), "--out", str(tmp_path / "a")]
     with pytest.raises(SystemExit) as stop:
-        hcsim([*args, "--grouping", "job_family"])
+        hcsim([*args, "--grouping", "cost_type"])
     assert stop.value.code == 2
-    assert "can't be grouped by 'job_family'" in capsys.readouterr().err
+    assert "'cost_type' can't group by" in capsys.readouterr().err
 
 
 def test_guidance_fit_reads_a_configuration_and_its_flags_override_it(
     world_path: Path, tmp_path: Path
 ) -> None:
     config = tmp_path / "guidance.yaml"
-    config.write_text("horizon: 6\nmodels: [historical_average]\ncombination: {top_k: 1}\n")
+    config.write_text("horizon: 6\nmodels: [native.HistoricalAverage]\ncombination: {top_k: 1}\n")
     args = ["guidance", "fit", "--world", str(world_path), "--config", str(config)]
     assert hcsim([*args, "--out", str(tmp_path / "a")]) == 0
     assert GuidanceForecast.load(tmp_path / "a").horizon == 6
     report = json.loads((tmp_path / "a" / "report.json").read_text())
-    assert {s for v in report["selection"].values() for s in v["weights"]} == {"historical_average"}
+    assert {s for v in report["selection"].values() for s in v["weights"]} == {
+        "native.HistoricalAverage"
+    }
     assert hcsim([*args, "--out", str(tmp_path / "b"), "--horizon", "3"]) == 0
     assert GuidanceForecast.load(tmp_path / "b").horizon == 3

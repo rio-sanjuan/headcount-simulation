@@ -111,17 +111,28 @@ def test_a_missing_slot_names_what_the_context_holds() -> None:
 
 
 def test_the_lite_pipeline_s_steps() -> None:
-    assert pipeline(GuidanceConfig()).names == ("ingest", "forecast", "reconcile", "format")
+    assert pipeline(GuidanceConfig()).names == (
+        "ingest",
+        "validate",
+        "select",
+        "generate",
+        "reconcile",
+        "format",
+    )
     assert pipeline(GuidanceConfig(reconciliation=Reconciliation(method=None))).names == (
         "ingest",
-        "forecast",
+        "validate",
+        "select",
+        "generate",
         "format",
     )
     assert pipeline(GuidanceConfig()).check(["source", "config"]) == []
 
 
 def test_the_lite_pipeline_validates_its_source_before_reading_it() -> None:
-    with pytest.raises(PipelineError, match="must be a DuckDB connection, not str") as error:
+    with pytest.raises(
+        PipelineError, match="a source is a DuckDB connection, a path, or a Source, not str"
+    ) as error:
         pipeline(GuidanceConfig()).run(Context({"source": "warehouse", "config": GuidanceConfig()}))
     assert error.value.step == "ingest"
 
@@ -129,5 +140,5 @@ def test_the_lite_pipeline_validates_its_source_before_reading_it() -> None:
 def test_the_lite_pipeline_refuses_a_bad_horizon_before_forecasting() -> None:
     unchecked = GuidanceConfig.model_construct(horizon=0)  # past load-time validation
     ctx = Context({"source": None, "config": unchecked, "series": object()})
-    step = pipeline(GuidanceConfig()).steps[1]
+    step = pipeline(GuidanceConfig()).steps[2]
     assert step.validate(ctx) == ["the horizon must be at least 1 month, got 0"]
