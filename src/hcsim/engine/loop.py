@@ -12,8 +12,9 @@ Histories are per cost center: stocks at the start of every month plus the end o
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
-    H(t+1) = H(t) + F_ext + F_conv + F_pend + F_bdy - A - V_conv + R_in - R_out + W_in - W_out
-    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_conv - F_pend
+    H(t+1) = H(t) + F_ext + F_conv + F_tr + F_pend + F_bdy
+                  - A - V_tr - V_conv + R_in - R_out + W_in - W_out
+    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_conv - F_tr - F_pend
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ from hcsim.engine.promotion import PROMOTION, promotion
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
+from hcsim.engine.transfers import TRANSFERS_DOMAIN as TRANSFERS
+from hcsim.engine.transfers import transfers
 from hcsim.financial.expense import ExpenseResult, compute_expense, sbc_frame
 from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
@@ -79,8 +82,10 @@ FLOW_SYMBOLS: Final = (
     *FLOWS.values(),
     "F_ext",
     "F_conv",
+    "F_tr",
     "F_pend",
     "F_bdy",
+    "V_tr",
     "V_conv",
     "R_in",
     "R_out",
@@ -92,9 +97,11 @@ FLOW_SYMBOLS: Final = (
 HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "F_ext": +1,
     "F_conv": +1,
+    "F_tr": +1,
     "F_pend": +1,
     "F_bdy": +1,
     "A": -1,
+    "V_tr": -1,
     "V_conv": -1,
     "R_in": +1,
     "R_out": -1,
@@ -108,6 +115,7 @@ OPENING_IDENTITY: Final[Mapping[str, int]] = {
     "U": -1,
     "F_ext": -1,
     "F_conv": -1,
+    "F_tr": -1,
     "F_pend": -1,
 }
 #: Every domain, in step order: the known-event domains, then the sampled ones.
@@ -119,7 +127,9 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (PROMOTION, promotion),
     *DOMAINS[:2],  # attrition, then backfill for its departures
     (PENDING_STARTS, pending_starts),  # starts take their reserved openings before fills
-    *DOMAINS[2:],
+    DOMAINS[2],  # fills
+    (TRANSFERS, transfers),  # places the fills' transfer assignments
+    *DOMAINS[3:],
 )
 #: The known-event kind each domain fires.
 FIRES: Final[Mapping[str, EventKind]] = {
@@ -303,9 +313,9 @@ def run_trajectory(
                 ctx.departures.append(Departures(domain, result.departures, result.anticipated))
             if result.flows:
                 for symbol, counts in result.flows.items():
-                    flows[symbol][step] = counts
+                    flows[symbol][step] += counts
             elif domain in FLOWS:
-                flows[FLOWS[domain]][step] = _flow(domain, applied, n)
+                flows[FLOWS[domain]][step] += _flow(domain, applied, n)
             quotas += [QuotaRow(step, domain, c, r) for c, r in result.quotas.items()]
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
 
