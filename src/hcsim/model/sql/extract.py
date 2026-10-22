@@ -96,19 +96,71 @@ def seed_openings(spec: PopulationSpec, cost_center: str = '"cost_center"') -> s
 
 
 def person_months(
-    spec: PopulationSpec, codes: Sequence[str], attributes: Sequence[str] = ()
+    spec: PopulationSpec,
+    events: TransTypeMeasure | Sequence[str],
+    attributes: Sequence[str] = (),
 ) -> str:
-    """Person-months at risk, labelled by an event among `codes` the next month; binds
-    `$start` and `$end`. `attributes` are catalog columns carried as features."""
+    """Person-months at risk, labelled by the events the next month; binds `$start` and
+    `$end`. `events` is a measure, whose reversals cancel what they reverse, or codes that each
+    count one. `attributes` are catalog columns carried as features."""
+    if isinstance(events, TransTypeMeasure):
+        codes = sorted(c.value for c in events.codes)
+        net = events.expression(code="trans_type", weight="1")
+    else:
+        codes, net = sorted(set(events)), "1"
     if not codes:
         raise PopulationError("a training extract needs at least one event code")
     carried = "".join(f", {entry(a).expression} AS {identifier(a)}" for a in attributes)
     return load("person_months").render(
         source=TRANSACTIONS.sql,
         population=predicate(spec, TRANSACTIONS),
-        codes=", ".join(literal(c) for c in sorted(set(codes))),
+        codes=", ".join(literal(c) for c in codes),
+        net=net,
         attributes=carried,
     )
+
+
+def requisition_months(spec: PopulationSpec, cost_center: str = '"cost_center"') -> str:
+    """Each requisition's open months from its approval, with the month's fills and exit;
+    binds `$start` and `$end`."""
+    join = requisitions(cost_center)
+    return load("requisition_months").render(
+        source=join.sql, population=predicate(spec, join, unavailable="skip")
+    )
+
+
+def departures(spec: PopulationSpec) -> str:
+    """Terminations and transfers out, labelled by a backfill opened for them; binds `$start`
+    and `$end`."""
+    return load("departures").render(
+        source=TRANSACTIONS.sql, population=predicate(spec, TRANSACTIONS)
+    )
+
+
+def growth_openings(spec: PopulationSpec, cost_center: str = '"cost_center"') -> str:
+    """Growth requisitions opened per staffed cost center and month; binds `$start` and
+    `$end`."""
+    join = requisitions(cost_center)
+    return load("growth_openings").render(
+        stock=TRANSACTIONS.sql,
+        stock_population=predicate(spec, TRANSACTIONS),
+        source=join.sql,
+        population=predicate(spec, join, unavailable="skip"),
+    )
+
+
+def requisition_roles(spec: PopulationSpec, cost_center: str = '"cost_center"') -> str:
+    """Growth requisitions with their role and org; binds `$start` and `$end`."""
+    join = requisitions(cost_center)
+    return load("requisition_roles").render(
+        source=join.sql, population=predicate(spec, join, unavailable="skip")
+    )
+
+
+def ratings(spec: PopulationSpec) -> str:
+    """Ratings, each with the one before it and the person's role; binds `$start` and
+    `$end`."""
+    return load("ratings").render(source=TRANSACTIONS.sql, population=predicate(spec, TRANSACTIONS))
 
 
 def realized_flows(measure: TransTypeMeasure, spec: PopulationSpec, grouping: str) -> str:

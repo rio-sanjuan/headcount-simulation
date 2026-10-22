@@ -92,7 +92,17 @@ def test_person_months_are_labelled_by_next_month_s_event(con: duckdb.DuckDBPyCo
     rows = con.execute(
         person_months(REGULAR, ["TERM"], attributes=["job_level", "cost_center"]), WINDOW
     ).df()
-    assert list(rows.columns) == ["employee_id", "month_end", "job_level", "cost_center", "label"]
+    assert list(rows.columns) == [
+        "employee_id",
+        "month_end",
+        "job_level",
+        "cost_center",
+        "tenure_months",
+        "next_month",
+        "rating_rank",
+        "rating_scale",
+        "label",
+    ]
     assert rows.groupby("month_end").size().nunique() > 1  # one stock per month-end
     # Each label is a departure the next month, by someone in the stock at this month-end.
     terms = con.execute(
@@ -103,6 +113,9 @@ def test_person_months_are_labelled_by_next_month_s_event(con: duckdb.DuckDBPyCo
     nxt = pd.to_datetime(labelled["month_end"]) + pd.offsets.MonthEnd(1)
     assert all(k in keys for k in zip(labelled["employee_id"], nxt, strict=True))
     assert 0 < rows["label"].mean() < 0.1
+    # A measure labels the same months, its reversals cancelling what they reverse.
+    netted = con.execute(person_months(REGULAR, NET_DEPARTURES), WINDOW).df()
+    assert netted["label"].sum() <= rows["label"].sum()
     with pytest.raises(PopulationError, match="at least one event code"):
         person_months(REGULAR, [])
 
