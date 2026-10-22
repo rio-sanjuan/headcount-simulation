@@ -36,6 +36,7 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
+from hcsim.engine.replay import ReplayedAwards
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
@@ -241,6 +242,8 @@ class AwardSettings:
     expense: ExpenseConfig = field(default_factory=ExpenseConfig)
     #: Sizes promotion grants. Without it, promotions emit grants nobody sizes.
     promotion: NewHireGapFill | None = None
+    #: In a replay, the awards as recorded, for the grants it covers.
+    replayed: ReplayedAwards | None = None
 
     def sizer(self, award_type: str) -> NewHireGapFill | None:
         """The sizer for an award type, if the run has one."""

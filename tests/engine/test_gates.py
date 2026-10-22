@@ -92,12 +92,23 @@ def test_gates_round_trip_through_plain_data_and_records(tmp_path: Path) -> None
 
 def test_an_unregistered_domain_never_runs() -> None:
     result = run(gates=(RegistrationGate("growth", enabled=False),))
-    assert result.unregistered == ("other_movement", "performance", "campus", "growth")
+    assert result.unregistered == (
+        "replay_requisitions",
+        "other_movement",
+        "performance",
+        "campus",
+        "growth",
+    )
     assert int(result.flow("G").sum()) == 0
     assert int(run().flow("G").sum()) > 0
-    # Other movement comes only from replayed history, performance needs a model, and campus a
-    # schedule, so all three are unregistered by default.
-    assert run().unregistered == ("other_movement", "performance", "campus")
+    # Replayed requisitions and other movement come only from replayed history, performance
+    # needs a model, and campus a schedule, so all four are unregistered by default.
+    assert run().unregistered == (
+        "replay_requisitions",
+        "other_movement",
+        "performance",
+        "campus",
+    )
     assert run(run_mode="replay").unregistered == ("performance", "campus")
 
 

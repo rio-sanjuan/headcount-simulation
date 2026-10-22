@@ -341,3 +341,94 @@ def known_events(
     sources.append((Source.DECLARED, from_declarations(movements, run_date)))
     sources.append((Source.PROGRAM, from_programs(programs, run_date)))
     return collect(run_date, months, sources)
+
+
+# --- replay ------------------------------------------------------------------------------------
+
+#: Each realized code a replay routes, and the kind of event it becomes.
+REPLAYED: Final[Mapping[str, EventKind]] = MappingProxyType(
+    {
+        "TERM": EventKind.TERMINATION,
+        "RIF": EventKind.TERMINATION,
+        "CONV_OUT": EventKind.CONVERSION_OUT,
+        "REORG_IN": EventKind.REORGANIZATION,
+        "PROMO": EventKind.PROMOTION,
+        "XFER_IN": EventKind.TRANSFER,
+        "RECLASS": EventKind.OTHER_MOVEMENT,
+        "HIRE": EventKind.PENDING_START,
+        "CONV_IN": EventKind.PENDING_START,
+    }
+)
+
+
+def from_replay(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> list[KnownEvent]:
+    """Every realized movement of a regular employee on or after the run date, as a known
+    event: terminations (net of reversals), reductions, conversions out, reorganizations,
+    promotions, transfers, reclassifications, and hires. A hire or transfer carries the
+    requisition it filled, the one with that channel's close nearest its date; a hire with
+    none is a boundary fill. Movements carry their new role, in raw labels."""
+    codes = ", ".join(f"'{c}'" for c in REPLAYED)
+    rows = con.execute(
+        f"""
+        WITH moves AS (
+            SELECT t.employee_id, t.event_date, t.trans_type, t.cost_center, t.job_code,
+                   t.location, t.company, t.is_manager
+            FROM workforce_txn t
+            JOIN dim_account a ON a.account = t.account
+            WHERE t.trans_type IN ({codes}) AND t.event_date >= $run
+              AND a.account_group = 'regular'
+              AND NOT (t.trans_type = 'TERM' AND EXISTS (
+                  SELECT 1 FROM workforce_txn r
+                  WHERE r.trans_type = 'TERM_REV' AND r.employee_id = t.employee_id
+                    AND r.event_date >= t.event_date))
+        ),
+        fills AS (
+            SELECT req_id, filled_by AS employee_id, closed_date, close_reason
+            FROM req_interval WHERE filled_by IS NOT NULL
+        )
+        SELECT m.*, (
+            SELECT f.req_id FROM fills f
+            WHERE f.employee_id = m.employee_id
+              AND list_contains(
+                  CASE m.trans_type
+                      WHEN 'HIRE' THEN ['filled_external', 'filled_campus']
+                      WHEN 'CONV_IN' THEN ['filled_conversion']
+                      WHEN 'XFER_IN' THEN ['filled_transfer']
+                      ELSE []::VARCHAR[] END,
+                  f.close_reason)
+            ORDER BY abs(datediff('day', f.closed_date, m.event_date)), f.req_id
+            LIMIT 1
+        ) AS req_id
+        FROM moves m
+        ORDER BY m.event_date, m.employee_id, m.trans_type
+        """,
+        {"run": run_date},
+    ).df()
+    events = []
+    records: list[dict[Any, Any]] = rows.to_dict("records")
+    for row in records:
+        kind = REPLAYED[str(row["trans_type"])]
+        destination: dict[str, str] = {}
+        if kind is EventKind.PROMOTION:
+            destination = {"job_code": str(row["job_code"])}
+        elif kind in MOVEMENTS or kind is EventKind.PENDING_START:
+            destination = {
+                "cost_center": str(row["cost_center"]),
+                "job_code": str(row["job_code"]),
+                "location": str(row["location"]),
+                "company": str(row["company"]),
+                "is_manager": str(bool(row["is_manager"])).lower(),
+            }
+        req = None if pd.isna(row["req_id"]) else int(row["req_id"])
+        events.append(
+            KnownEvent(
+                kind,
+                step_of(run_date, row["event_date"]),
+                Source.REPLAY,
+                employee_id=int(row["employee_id"]),
+                req_id=req,
+                destination=destination,
+                reason=str(row["trans_type"]),
+            )
+        )
+    return events

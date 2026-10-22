@@ -26,6 +26,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.fills import CONVERSION, EXTERNAL, channel_hazards
+from hcsim.engine.known_events import EventKind
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.categories import GuidanceCategory
@@ -122,7 +123,12 @@ class ShortfallPolicy(StrEnum):
 
 
 def transfers(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """Place an employee in each opening this month's fills assigned to transfer.
+    """Fire the month's known transfers, then place an employee in each opening this month's
+    fills assigned to transfer.
+
+    A known transfer, as replay supplies, moves its employee to the role it names. When its
+    requisition is open in the run, it fills one of its openings (`F_tr`, `V_tr`); when it
+    isn't, the move consumes nothing and counts as another movement (`W_in`, `W_out`).
 
     A matched employee keeps their identity (id, tenure, rating, equity slot, and salary) and
     takes the opening's role, with a transfer grant; their old row is recorded as a departure
@@ -130,49 +136,88 @@ def transfers(state: SimulationState, ctx: StepContext) -> DomainResult:
     group places more than its quota. An unmatched opening follows the shortfall policy.
     """
     reqs = state.live_openings
-    rows = _slots(reqs, ctx)
-    if not len(rows):
-        return DomainResult(TRANSFERS_DOMAIN)
-    found = match(reqs, rows, state.live_employees, ctx)
-    matched = _capped(found, reqs, ctx)
     employees = state.live_employees
+    n = state.n_cost_centers
+    known_rows, known_moved, known_reqs = _known(state, ctx)
+    rows = _slots(reqs, ctx)
+    found = match(reqs, rows, employees, ctx)
+    matched = _capped(found, reqs, ctx)
     index = found.employees[matched]
     moved = employees[index].copy()
     copy_role(reqs[found.openings[matched]], moved)
     unmatched = found.openings[~matched]
     spilled, hires = _spill(reqs, unmatched, ctx)
+    filled_known = known_reqs >= 0
     used = np.bincount(
-        np.concatenate([found.openings[matched], spilled]), minlength=len(reqs)
+        np.concatenate([found.openings[matched], spilled, known_reqs[filled_known]]),
+        minlength=len(reqs),
     ).astype(np.int64)
-    n = state.n_cost_centers
     flows = {
-        "F_tr": np.bincount(
-            moved[:, EmployeeColumn.COST_CENTER].astype(np.int64), minlength=n
-        ).astype(np.int64),
-        "V_tr": np.bincount(
-            employees[index, EmployeeColumn.COST_CENTER].astype(np.int64), minlength=n
-        ).astype(np.int64),
+        "F_tr": _count(moved, n) + _count(known_moved[filled_known], n),
+        "V_tr": _count(employees[index], n) + _count(employees[known_rows[filled_known]], n),
+        "W_in": _count(known_moved[~filled_known], n),
+        "W_out": _count(employees[known_rows[~filled_known]], n),
     }
     for k, symbol in ((EXTERNAL, "F_ext"), (CONVERSION, "F_conv")):
-        chosen = hires[1] == k
-        flows[symbol] = np.bincount(
-            hires[0][chosen, EmployeeColumn.COST_CENTER].astype(np.int64), minlength=n
-        ).astype(np.int64)
+        flows[symbol] = _count(hires[0][hires[1] == k], n)
     openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
     touched = np.flatnonzero(used)
     closed = touched[used[touched] >= openings[touched]]
     partial = touched[used[touched] < openings[touched]]
     remaining = reqs[partial].copy()
     remaining[:, OpeningColumn.NUM_OPENINGS] -= used[partial]
+    write_index = np.concatenate([known_rows, index])
+    write_rows = np.concatenate([known_moved, moved])
     grants = (Grant("transfer", rows="written"), Grant("new_hire"))
     return DomainResult(
         TRANSFERS_DOMAIN,
-        employees=RowChange(EMPLOYEE, write_index=index, write_rows=moved, append=hires[0]),
+        employees=RowChange(
+            EMPLOYEE, write_index=write_index, write_rows=write_rows, append=hires[0]
+        ),
         openings=RowChange(OPENING, drop=closed, write_index=partial, write_rows=remaining),
         grants=grants,
-        departures=employees[index].copy(),
+        departures=employees[write_index].copy(),
         quotas=_record(reqs, found, matched, ctx),
         flows=flows,
+    )
+
+
+def _count(rows: Buffer, n: int) -> Ints:
+    result: Ints = np.bincount(
+        rows[:, EmployeeColumn.COST_CENTER].astype(np.int64), minlength=n
+    ).astype(np.int64)
+    return result
+
+
+def _known(state: SimulationState, ctx: StepContext) -> tuple[Ints, Buffer, Ints]:
+    """The month's known transfers: each employee's row, their row as moved, and the row of
+    the requisition they fill, or -1 where the run doesn't hold one open."""
+    events = ctx.known_at(EventKind.TRANSFER)
+    employees, reqs = state.live_employees, state.live_openings
+    people = {int(e): k for k, e in enumerate(employees[:, EmployeeColumn.EMPLOYEE_ID])}
+    openings = {int(r): k for k, r in enumerate(reqs[:, OpeningColumn.REQ_ID])}
+    left = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64).copy()
+    rows, moved, filled = [], [], []
+    for e in events:
+        row = None if e.event.employee_id is None else people.get(int(e.event.employee_id))
+        if row is None:
+            continue
+        new = employees[row].copy()
+        for column, code in e.codes.items():
+            new[column] = code
+        req = None if e.event.req_id is None else openings.get(int(e.event.req_id))
+        if req is not None and left[req] >= 1:
+            left[req] -= 1
+            filled.append(req)
+        else:
+            filled.append(-1)
+        rows.append(row)
+        moved.append(new)
+        ctx.fired.record(e.event)
+    return (
+        np.asarray(rows, dtype=np.int64),
+        np.stack(moved) if moved else EMPLOYEE.empty(0),
+        np.asarray(filled, dtype=np.int64),
     )
 
 
