@@ -114,14 +114,16 @@ def test_the_lite_pipeline_s_steps() -> None:
     assert pipeline(GuidanceConfig()).names == (
         "ingest",
         "validate",
-        "forecast",
+        "select",
+        "generate",
         "reconcile",
         "format",
     )
     assert pipeline(GuidanceConfig(reconciliation=Reconciliation(method=None))).names == (
         "ingest",
         "validate",
-        "forecast",
+        "select",
+        "generate",
         "format",
     )
     assert pipeline(GuidanceConfig()).check(["source", "config"]) == []

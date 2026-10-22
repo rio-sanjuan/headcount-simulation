@@ -1,8 +1,9 @@
-"""Selection: scoring the suite, combining the best, and the combined forecast.
+"""Selection: scoring the suite and weighing the best.
 
-Every model in the suite is scored by rolling-origin evaluation (see `evaluation`). The
-configured combination method turns the scores into weights, and the selected models refit on
-the whole history, tuned first when tuning is on, and combine into the forecast.
+Every model in the suite is scored by rolling-origin evaluation (see `evaluation`), and the
+configured combination method, or a fallback, turns the scores into weights for the
+candidates (see `combination`). Generation then refits the selected models and forecasts (see
+`generation`); `forecast` does both for one series.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from hcsim.guidance.evaluation import (
     prepared,
     score,
     score_of,
-    tuned,
     wape,
 )
 from hcsim.guidance.models import ForecastError
@@ -69,6 +69,44 @@ class SeriesForecast:
     method: str = "inverse_error"
 
 
+@dataclass(frozen=True)
+class Selection:
+    """A series' suite scored and its candidates weighed, before any refit."""
+
+    scores: dict[str, float]
+    weights: dict[str, float]
+    folds: dict[str, list[FoldScore]]
+    #: The combination method that weighed it: the configured one, or a fallback.
+    method: str
+
+
+def select(
+    series: Sequence[float] | Floats,
+    config: SelectionConfig,
+    exposure: Floats | None = None,
+    calendar: pd.DataFrame | None = None,
+) -> Selection:
+    """Score every model in the suite by rolling-origin evaluation, and weigh the best.
+    `exposure` is the series' exposure, such as its group's headcount, for the models of a
+    share; `calendar` holds the calendar covariates, for the models that read them."""
+    history = np.asarray(series, dtype=np.float64)
+    if len(history) < config.evaluation.min_length:
+        raise ForecastError(
+            f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
+        )
+    evaluation = config.evaluation
+    scored = {
+        name: backtest(name, history, evaluation, exposure, calendar, config.tuning)
+        for name in config.suite
+    }
+    scores = {name: score_of(f, evaluation.metric) for name, f in scored.items()}
+    inputs = CombinationInputs(
+        scores, scored, history, config.top_k, config.temperature, config.ridge_alpha
+    )
+    weights, method = combine(inputs, config.combination, config.fallbacks)
+    return Selection(scores, weights, scored, method)
+
+
 def forecast(
     series: Sequence[float] | Floats,
     horizon: int,
@@ -77,44 +115,9 @@ def forecast(
     future_exposure: Floats | None = None,
     calendar: pd.DataFrame | None = None,
 ) -> SeriesForecast:
-    """Evaluate the suite, select, refit on the full history, and combine. `exposure` is the
-    series' exposure, such as its group's headcount, and `future_exposure` its forecast, for
-    the models of a share. `calendar` holds the calendar covariates from the history's first
-    month through the horizon, for the models that read them. A selected model that can't
-    refit leaves the combination, and the rest share its weight."""
+    """Select, then generate (see `generation`): the whole forecast of one series."""
+    from hcsim.guidance.generation import generate
+
+    selection = select(series, config, exposure, calendar)
     history = np.asarray(series, dtype=np.float64)
-    if len(history) < config.evaluation.min_length:
-        raise ForecastError(
-            f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
-        )
-    evaluation, tuning = config.evaluation, config.tuning
-    scored = {
-        name: backtest(name, history, evaluation, exposure, calendar, tuning)
-        for name in config.suite
-    }
-    scores = {name: score_of(f, evaluation.metric) for name, f in scored.items()}
-    inputs = CombinationInputs(
-        scores, scored, history, config.top_k, config.temperature, config.ridge_alpha
-    )
-    weights, method = combine(inputs, config.combination, config.fallbacks)
-    forecasts, parameters = {}, {}
-    for name in weights:
-        values = (
-            {} if tuning is None else tuned(name, history, evaluation, tuning, exposure, calendar)
-        )
-        try:
-            model = prepared(
-                name, exposure, future_exposure, calendar, len(history), horizon, values
-            )
-            forecasts[name] = model.fit(history).predict(horizon)
-        except ForecastError:
-            continue
-        parameters[name] = values
-    if not forecasts:
-        raise ForecastError(f"none of the selected models {sorted(weights)} could refit")
-    total = sum(weights[name] for name in forecasts)
-    weights = {name: weights[name] / total for name in forecasts}
-    combined = np.zeros(horizon)
-    for name, weight in weights.items():
-        combined += weight * forecasts[name]
-    return SeriesForecast(combined, scores, weights, scored, parameters, method)
+    return generate(selection, history, horizon, config, exposure, future_exposure, calendar)
