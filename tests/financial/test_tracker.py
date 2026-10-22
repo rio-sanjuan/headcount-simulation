@@ -134,3 +134,58 @@ def test_a_cancelled_grant_recognizes_nothing() -> None:
     rows = result.rows
     assert rows[["gross", "net", "trueup_attrition", "trueup_vesting"]].to_numpy().sum() == 0
     assert result.max_identity_residual == 0
+
+
+# --- scratch -------------------------------------------------------------------------------------
+
+
+def test_a_holder_is_inside_until_they_leave_and_again_once_they_join() -> None:
+    ledger = HolderLedger()
+    ledger.leave(np.array([1]), 4)
+    ledger.join(np.array([1]), 9)
+    ledger.leave(np.array([2]), 3)
+    ledger.join(np.array([2]), 3)  # back the same month: the last change holds
+    months = np.array([3, 4, 8, 9, 3, 7])
+    holders = np.array([1, 1, 1, 1, 2, 5])
+    assert ledger.inside(holders, months).tolist() == [True, False, False, True, True, True]
+
+
+def test_tranches_move_in_and_out_of_scratch_with_their_holder() -> None:
+    ledger = HolderLedger()
+    ledger.buffer.cover(24)
+    zeros = np.zeros(2, int)
+    ledger.record(
+        np.array([1, 2]), 0, np.vstack([schedule(m20=10), schedule(m20=10)]), 0, zeros, zeros
+    )
+    ledger.leave(np.array([1]), 4)  # moves out of the subset, keeping its equity
+    ledger.join(np.array([1]), 9)
+    assert ledger.scratch(3).tolist() == [False, False]
+    assert ledger.scratch(4).tolist() == [True, False]
+    assert ledger.scratch(9).tolist() == [False, False]
+    assert ledger.tranches().forfeit_month.tolist() == [NOT_FORFEITED, NOT_FORFEITED]
+
+
+def test_a_known_future_entrant_is_in_scratch_until_they_start() -> None:
+    ledger = HolderLedger()
+    ledger.buffer.cover(24)
+    ledger.record(np.array([7]), 0, schedule(m24=10), 0, np.zeros(1, int), np.zeros(1, int))
+    ledger.leave(np.array([7]), 0)  # recorded before they start, in month 5
+    ledger.join(np.array([7]), 5)
+    assert [bool(ledger.scratch(m)[0]) for m in (0, 4, 5)] == [True, True, False]
+    ledger.forfeit(np.array([7]), 8)  # a forfeited tranche is in neither side after it
+    assert not ledger.scratch(9)[0]
+
+
+def test_scratch_is_the_unpublished_part_of_each_tranches_expense() -> None:
+    from hcsim.model.data.publication import publish
+
+    ledger = HolderLedger()
+    ledger.leave(np.array([1]), 2)
+    ledger.join(np.array([1]), 4)
+    months = np.arange(6)
+    expense = np.full((1, 6), 10.0)
+    inside = ledger.inside(np.full(6, 1), months)[None, :]
+    split = publish(expense, np.array([0]), inside)
+    assert split.published.tolist() == [[10.0, 10.0, 0.0, 0.0, 10.0, 10.0]]
+    assert split.scratch.tolist() == [[0.0, 0.0, 10.0, 10.0, 0.0, 0.0]]
+    assert np.array_equal(split.total, expense)
