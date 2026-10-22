@@ -18,9 +18,9 @@ from hcsim.engine.domains import (
     StepContext,
     backfill,
     cancellation,
-    external_fill,
     growth,
 )
+from hcsim.engine.fills import fills
 from hcsim.engine.loop import (
     FLOW_SYMBOLS,
     HEADCOUNT_IDENTITY,
@@ -178,7 +178,7 @@ def context(state: SimulationState, cfg: SimulationConfig, step: int = 0) -> Ste
 
 def test_a_fill_of_every_opening_closes_the_requisition_and_hires_into_its_role() -> None:
     state = initial_state()
-    result = external_fill(state, context(state, config(models=models(fill=1.0))))
+    result = fills(state, context(state, config(models=models(fill=1.0))))
     assert result.openings.drop.tolist() == list(range(6))
     hires = result.employees.append
     assert len(hires) == 12
@@ -191,7 +191,7 @@ def test_a_fill_of_every_opening_closes_the_requisition_and_hires_into_its_role(
 def test_a_guided_partial_fill_keeps_the_requisition_with_fewer_openings() -> None:
     state = initial_state()
     cfg = config(models=models(fill=1.0), guidance=guidance({"external_hires": {"CC-01": 2.0}}))
-    result = external_fill(state, context(state, cfg))
+    result = fills(state, context(state, cfg))
     # CC-01 fills exactly two of its four openings; the unguided cost centers fill everything.
     hires = result.employees.append[:, EmployeeColumn.COST_CENTER]
     assert np.bincount(hires.astype(int)).tolist() == [2, 4, 4]
@@ -284,7 +284,7 @@ def test_guided_draws_realize_their_quotas_exactly() -> None:
     rows = [row for t in result.trajectories for row in t.quotas]
     assert {(r.domain, r.category) for r in rows} == {
         ("attrition", "attrition"),
-        ("external_fill", "external_hires"),
+        ("fills", "external_hires"),
         ("growth", "requisitions_opened"),
     }
     binding = 0

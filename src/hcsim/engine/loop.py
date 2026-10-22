@@ -12,8 +12,8 @@ Histories are per cost center: stocks at the start of every month plus the end o
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
-    H(t+1) = H(t) + F_ext + F_pend + F_bdy - A - V_conv + R_in - R_out + W_in - W_out
-    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_pend
+    H(t+1) = H(t) + F_ext + F_conv + F_pend + F_bdy - A - V_conv + R_in - R_out + W_in - W_out
+    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_conv - F_pend
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from hcsim.engine.domains import (
     BACKFILL_TRANSFER,
     CANCELLATION,
     DOMAINS,
-    EXTERNAL_FILL,
     GROWTH,
     Departures,
     Handler,
@@ -72,13 +71,14 @@ FLOWS: Final[Mapping[str, str]] = {
     ATTRITION: "A",
     BACKFILL: "B_att",
     BACKFILL_TRANSFER: "B_tr",
-    EXTERNAL_FILL: "F_ext",
     CANCELLATION: "U",
     GROWTH: "G",
 }
 #: Every flow a run records.
 FLOW_SYMBOLS: Final = (
     *FLOWS.values(),
+    "F_ext",
+    "F_conv",
     "F_pend",
     "F_bdy",
     "V_conv",
@@ -91,6 +91,7 @@ FLOW_SYMBOLS: Final = (
 #: The runtime accounting identities: each flow's sign in the change of a stock.
 HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "F_ext": +1,
+    "F_conv": +1,
     "F_pend": +1,
     "F_bdy": +1,
     "A": -1,
@@ -106,6 +107,7 @@ OPENING_IDENTITY: Final[Mapping[str, int]] = {
     "B_tr": +1,
     "U": -1,
     "F_ext": -1,
+    "F_conv": -1,
     "F_pend": -1,
 }
 #: Every domain, in step order: the known-event domains, then the sampled ones.
@@ -197,8 +199,6 @@ def _flow(domain: str, applied: Applied, n: int) -> Ints:
     cc, openings = OpeningColumn.COST_CENTER, OpeningColumn.NUM_OPENINGS
     if domain == ATTRITION:
         return per_cost_center(applied.dropped_employees, EmployeeColumn.COST_CENTER, n)
-    if domain == EXTERNAL_FILL:
-        return per_cost_center(applied.appended_employees, EmployeeColumn.COST_CENTER, n)
     if domain == CANCELLATION:
         return per_cost_center(applied.dropped_openings, cc, n, openings)
     return per_cost_center(applied.appended_openings, cc, n, openings)  # backfill and growth
@@ -249,6 +249,8 @@ def run_trajectory(
             applied = apply(state, result, step, config.schema, awards)
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
+            for req, count in result.transfers.items():
+                ctx.transfers[req] = ctx.transfers.get(req, 0) + count
             if len(result.departures):
                 ctx.departures.append(Departures(domain, result.departures, result.anticipated))
             if result.flows:

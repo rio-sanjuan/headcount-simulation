@@ -9,7 +9,8 @@ from typing import Any
 import duckdb
 import numpy as np
 
-from hcsim.engine.domains import StepContext, external_fill
+from hcsim.engine.domains import StepContext
+from hcsim.engine.fills import fills
 from hcsim.engine.known_events import (
     EventKind,
     KnownEvent,
@@ -104,7 +105,7 @@ def test_starts_count_against_the_external_hires_quota() -> None:
     started = pending_starts(state, ctx)
     assert started.ledger["external_hires"].tolist() == [2]
     state.category_ledger = {k: v.copy() for k, v in started.ledger.items()}
-    filled = external_fill(state, ctx)
+    filled = fills(state, ctx)
     cost_centers = filled.employees.append[:, EmployeeColumn.COST_CENTER]
     assert int((cost_centers == 0).sum()) == 1  # three in all, two of them pending starts
     assert filled.quotas["external_hires"].realized.tolist() == [3]
