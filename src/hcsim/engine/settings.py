@@ -61,7 +61,7 @@ from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.generative import EmpiricalAttributeGenerator
-from hcsim.model.ml.markov import MarkovModel
+from hcsim.model.ml.markov import MarkovModel, SimilarityMatrix
 from hcsim.model.ml.persistence import ArtifactError, load_model
 
 ENV_PREFIX: Final = "HCSIM_CONFIG__"
@@ -305,6 +305,7 @@ _SERVES: Final[Mapping[str, type | tuple[type, ...]]] = {
     "performance": MarkovModel,
     "backfill_transfer": (GroupRateModel, EntityModel),
     "promotion": EntityModel,
+    "family_similarity": SimilarityMatrix,
 }
 
 

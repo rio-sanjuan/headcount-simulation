@@ -41,6 +41,8 @@ class Applied:
     appended_openings: Buffer
     forfeited_tranches: int
     recorded_tranches: int
+    #: Grant recipients no sizer covered.
+    unsized_grants: int = 0
 
 
 def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
@@ -122,8 +124,10 @@ def apply(
     state.n_employees = _drop(state.employees, state.n_employees, e.drop)
 
     # 2. Write employee rows in place.
+    written = np.zeros(0, dtype=np.int64)
     if len(e.write_index):
         index = _after_drops(e.write_index, e.drop)
+        written = index
         state.headcount -= per_cost_center(state.employees[index], ecc, n)
         state.employees[index] = e.write_rows
         state.headcount += per_cost_center(e.write_rows, ecc, n)
@@ -169,15 +173,23 @@ def apply(
         state.open_openings += per_cost_center(appended_reqs, occ, n, num)
         state.open_rows += per_cost_center(appended_reqs, occ, n)
 
-    # 7. Size and record grants for the appended employees.
-    recorded = 0
-    if result.grants and len(appended) and awards is not None and state.ledger is not None:
-        if state.price is None:
-            raise RuntimeError("a run that sizes awards needs a price model in its state")
-        rows = state.employees[state.n_employees - len(appended) : state.n_employees]
+    # 7. Size and record grants, for the appended employees or the written ones.
+    recorded = unsized = 0
+    if result.grants and awards is not None and state.ledger is not None:
+        first = state.n_employees - len(appended)
         for grant in result.grants:
-            batch = awards.new_hire.size(rows, state.price)
-            rows[:, EmployeeColumn.BASE_SALARY] = batch.base_salary
+            positions = np.arange(first, state.n_employees) if grant.rows == "appended" else written
+            if not len(positions):
+                continue
+            sizer = awards.sizer(grant.award_type)
+            if sizer is None:
+                unsized += len(positions)
+                continue
+            if state.price is None:
+                raise RuntimeError("a run that sizes awards needs a price model in its state")
+            rows = state.employees[positions]
+            batch = sizer.size(rows, state.price)
+            state.employees[positions, EmployeeColumn.BASE_SALARY] = batch.base_salary
             recorded += state.ledger.record(
                 rows[:, EmployeeColumn.VEST_INDEX].astype(np.int64),
                 step,
@@ -186,11 +198,11 @@ def apply(
                 rows[:, EmployeeColumn.LEVEL].astype(np.int64),
                 rows[:, ecc].astype(np.int64),
             )
-        appended = rows.copy()
+        appended = state.employees[first : state.n_employees].copy()
 
     # 8. The result's use of shared guidance quota.
     for category, used in result.ledger.items():
         current = state.category_ledger.get(category)
         state.category_ledger[category] = used.copy() if current is None else current + used
 
-    return Applied(dropped, appended, dropped_reqs, appended_reqs, forfeited, recorded)
+    return Applied(dropped, appended, dropped_reqs, appended_reqs, forfeited, recorded, unsized)
