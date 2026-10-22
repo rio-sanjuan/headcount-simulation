@@ -183,11 +183,13 @@ def test_guidance_fit_reads_a_configuration_and_its_flags_override_it(
     world_path: Path, tmp_path: Path
 ) -> None:
     config = tmp_path / "guidance.yaml"
-    config.write_text("horizon: 6\nmodels: [historical_average]\ncombination: {top_k: 1}\n")
+    config.write_text("horizon: 6\nmodels: [native.HistoricalAverage]\ncombination: {top_k: 1}\n")
     args = ["guidance", "fit", "--world", str(world_path), "--config", str(config)]
     assert hcsim([*args, "--out", str(tmp_path / "a")]) == 0
     assert GuidanceForecast.load(tmp_path / "a").horizon == 6
     report = json.loads((tmp_path / "a" / "report.json").read_text())
-    assert {s for v in report["selection"].values() for s in v["weights"]} == {"historical_average"}
+    assert {s for v in report["selection"].values() for s in v["weights"]} == {
+        "native.HistoricalAverage"
+    }
     assert hcsim([*args, "--out", str(tmp_path / "b"), "--horizon", "3"]) == 0
     assert GuidanceForecast.load(tmp_path / "b").horizon == 3

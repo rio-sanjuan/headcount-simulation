@@ -101,27 +101,27 @@ EVALUATION = EvaluationConfig(n_splits=3, test_months=6, step_months=6, min_trai
 def test_a_share_model_scores_only_with_an_exposure() -> None:
     exposure = 1000 + 10 * MONTHS.astype(np.float64)
     flow = np.round(0.02 * exposure)
-    assert score("logit_rate_arima", flow, EVALUATION) == float("inf")
-    assert score("logit_rate_arima", flow, EVALUATION, exposure) < 0.05
+    assert score("native.LogitRateARIMA", flow, EVALUATION) == float("inf")
+    assert score("native.LogitRateARIMA", flow, EVALUATION, exposure) < 0.05
 
 
 def test_a_selected_model_that_can_t_refit_leaves_the_combination() -> None:
     exposure = 1000 + 10 * MONTHS.astype(np.float64)
     flow = np.round(0.02 * exposure)
     config = SelectionConfig(
-        suite=("logit_rate_arima", "historical_average"), top_k=2, evaluation=EVALUATION
+        suite=("native.LogitRateARIMA", "native.HistoricalAverage"), top_k=2, evaluation=EVALUATION
     )
     both = forecast(flow, 6, config, exposure, 1600 + 10 * np.arange(6.0))
-    assert set(both.weights) == {"logit_rate_arima", "historical_average"}
+    assert set(both.weights) == {"native.LogitRateARIMA", "native.HistoricalAverage"}
     # No forecast of the exposure: the share model can't refit, and the other takes its weight.
     alone = forecast(flow, 6, config, exposure, None)
-    assert alone.weights == {"historical_average": 1.0}
+    assert alone.weights == {"native.HistoricalAverage": 1.0}
     assert np.allclose(alone.values, flow.mean())
     with pytest.raises(ForecastError, match="could refit"):
         forecast(
             flow,
             6,
-            SelectionConfig(suite=("logit_rate_arima",), top_k=1, evaluation=EVALUATION),
+            SelectionConfig(suite=("native.LogitRateARIMA",), top_k=1, evaluation=EVALUATION),
             exposure,
             None,
         )
@@ -142,15 +142,15 @@ def test_a_run_gives_each_flow_its_group_s_headcount_as_exposure(
         {
             "horizon": 6,
             "grouping": "TOPLINE",
-            "models": ["historical_average", "logit_rate_arima"],
+            "models": ["native.HistoricalAverage", "native.LogitRateARIMA"],
             "combination": {"top_k": 2},
         }
     )
     selection = run(con, config).report["selection"]
     # The anchor has no exposure, so only the flows can use the share model.
-    assert selection["ALL/headcount"]["scores"]["logit_rate_arima"] == float("inf")
-    assert np.isfinite(selection["ALL/attrition"]["scores"]["logit_rate_arima"])
-    assert "logit_rate_arima" in selection["ALL/attrition"]["weights"]
+    assert selection["ALL/headcount"]["scores"]["native.LogitRateARIMA"] == float("inf")
+    assert np.isfinite(selection["ALL/attrition"]["scores"]["native.LogitRateARIMA"])
+    assert "native.LogitRateARIMA" in selection["ALL/attrition"]["weights"]
 
 
 # --- Prophet ------------------------------------------------------------------------------------

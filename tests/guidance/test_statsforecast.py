@@ -46,10 +46,10 @@ def test_every_adapted_model_forecasts_a_monthly_series(model: str) -> None:
 
 def test_the_library_s_benchmarks_match_the_native_ones() -> None:
     for twin, native in (
-        ("Naive", "last_observed"),
-        ("SeasonalNaive", "seasonal_naive"),
-        ("HistoricAverage", "historical_average"),
-        ("RandomWalkWithDrift", "drift"),
+        ("Naive", "native.LastObserved"),
+        ("SeasonalNaive", "native.SeasonalNaive"),
+        ("HistoricAverage", "native.HistoricalAverage"),
+        ("RandomWalkWithDrift", "native.Drift"),
     ):
         adapted = build(f"statsforecast.{twin}").fit(SEASONAL).predict(12)
         assert np.allclose(adapted, build(native).fit(SEASONAL).predict(12)), twin
@@ -93,11 +93,11 @@ def test_a_run_can_forecast_with_statsforecast_models(con: duckdb.DuckDBPyConnec
         {
             "horizon": 6,
             "grouping": "TOPLINE",
-            "models": ["statsforecast.AutoETS", "statsforecast.Theta", "seasonal_naive"],
+            "models": ["statsforecast.AutoETS", "statsforecast.Theta", "native.SeasonalNaive"],
         }
     )
     result = run(con, config)
     weights = {m for s in result.report["selection"].values() for m in s["weights"]}
-    assert weights <= {"statsforecast.AutoETS", "statsforecast.Theta", "seasonal_naive"}
+    assert weights <= {"statsforecast.AutoETS", "statsforecast.Theta", "native.SeasonalNaive"}
     assert weights & {"statsforecast.AutoETS", "statsforecast.Theta"}
     assert result.artifact.horizon == 6

@@ -78,7 +78,9 @@ class GuidanceConfig(_Strict):
     population: str | None = None
     #: The categories to forecast. An inner fill-tree node is composed from its leaves.
     categories: tuple[GuidanceCategory, ...] = Field(default=DEFAULT_CATEGORIES, min_length=1)
-    models: tuple[str, ...] = Field(default=("seasonal_naive", "historical_average"), min_length=1)
+    models: tuple[str, ...] = Field(
+        default=("native.SeasonalNaive", "native.HistoricalAverage"), min_length=1
+    )
     combination: Combination = Combination()
     evaluation: Evaluation = Evaluation()
     validation: Validation = Validation()

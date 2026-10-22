@@ -84,8 +84,8 @@ def test_wape_handles_all_zero_actuals() -> None:
 
 
 def test_seasonal_naive_scores_perfectly_on_a_purely_seasonal_series() -> None:
-    assert score("seasonal_naive", SEASONAL, EvaluationConfig()) == 0.0
-    assert score("historical_average", SEASONAL, EvaluationConfig()) > 0.0
+    assert score("native.SeasonalNaive", SEASONAL, EvaluationConfig()) == 0.0
+    assert score("native.HistoricalAverage", SEASONAL, EvaluationConfig()) > 0.0
 
 
 def test_weights_favor_the_lower_error_and_handle_perfect_and_failed_scores() -> None:
@@ -98,14 +98,14 @@ def test_weights_favor_the_lower_error_and_handle_perfect_and_failed_scores() ->
 
 def test_a_seasonal_series_is_forecast_by_seasonal_naive_alone() -> None:
     result = forecast(SEASONAL, 12, SelectionConfig())
-    assert result.weights == {"seasonal_naive": 1.0}
+    assert result.weights == {"native.SeasonalNaive": 1.0}
     assert result.values.tolist() == list(range(12))
 
 
 def test_a_flat_noisy_series_blends_both_models() -> None:
     series = 5.0 + np.random.default_rng(1).normal(0, 1, 60)
     result = forecast(series, 6, SelectionConfig())
-    assert set(result.weights) == {"seasonal_naive", "historical_average"}
+    assert set(result.weights) == {"native.SeasonalNaive", "native.HistoricalAverage"}
     assert sum(result.weights.values()) == pytest.approx(1.0)
     assert len(result.values) == 6
 
@@ -116,9 +116,14 @@ def test_a_short_series_gets_no_forecast() -> None:
 
 
 def test_the_full_benchmark_suite_selects_the_rule_that_fits() -> None:
-    suite = ("last_observed", "seasonal_naive", "historical_average", "drift")
+    suite = (
+        "native.LastObserved",
+        "native.SeasonalNaive",
+        "native.HistoricalAverage",
+        "native.Drift",
+    )
     seasonal = forecast(SEASONAL, 12, SelectionConfig(suite=suite, top_k=1))
-    assert seasonal.weights == {"seasonal_naive": 1.0}
+    assert seasonal.weights == {"native.SeasonalNaive": 1.0}
     trend = forecast(np.arange(60, dtype=np.float64), 3, SelectionConfig(suite=suite, top_k=1))
-    assert trend.weights == {"drift": 1.0}
+    assert trend.weights == {"native.Drift": 1.0}
     assert trend.values.tolist() == [60.0, 61.0, 62.0]

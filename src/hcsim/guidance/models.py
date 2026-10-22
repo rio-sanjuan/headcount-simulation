@@ -1,12 +1,19 @@
-"""The native benchmark forecasters: simple rules any richer model has to beat.
+"""The model registry, and the native benchmark forecasters.
 
-- **last observed** repeats the last month;
-- **seasonal naive** repeats the last season, in phase;
-- **historical average** forecasts the mean of the history;
-- **drift** extends the line from the first month through the last, as a random walk with
-  drift forecasts it.
+The registry is namespaced: a model is named `<namespace>.<Name>`, the namespace being its
+library's (`statsforecast`, `darts`, `sktime`, or `prophet`) or `native` for the models this
+package implements. A configuration's names are checked against it when it loads.
 
-Each implements `TimeSeriesModel` and emits point forecasts only.
+The native benchmarks are simple rules any richer model has to beat:
+
+- `native.LastObserved` repeats the last month;
+- `native.SeasonalNaive` repeats the last season, in phase;
+- `native.HistoricalAverage` forecasts the mean of the history;
+- `native.Drift` extends the line from the first month through the last, as a random walk
+  with drift forecasts it.
+
+Each implements `TimeSeriesModel` and emits point forecasts only. The native fixed-form
+baselines are in `baselines`.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ Floats = NDArray[np.float64]
 class SeasonalNaive:
     """Each forecast month repeats the same month one season earlier."""
 
-    NAME: ClassVar[str] = "seasonal_naive"
+    NAME: ClassVar[str] = "native.SeasonalNaive"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
 
     def __init__(self, season: int = 12) -> None:
@@ -53,7 +60,7 @@ class SeasonalNaive:
 class HistoricalAverage:
     """Every forecast month is the mean of the history."""
 
-    NAME: ClassVar[str] = "historical_average"
+    NAME: ClassVar[str] = "native.HistoricalAverage"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
 
     def __init__(self) -> None:
@@ -75,7 +82,7 @@ class HistoricalAverage:
 class LastObserved:
     """Every forecast month repeats the last observed month."""
 
-    NAME: ClassVar[str] = "last_observed"
+    NAME: ClassVar[str] = "native.LastObserved"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
 
     def __init__(self) -> None:
@@ -97,7 +104,7 @@ class LastObserved:
 class Drift:
     """The last month plus the history's average change, once per month ahead."""
 
-    NAME: ClassVar[str] = "drift"
+    NAME: ClassVar[str] = "native.Drift"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = frozenset({ProbabilisticOutput.NONE})
 
     def __init__(self) -> None:
@@ -135,6 +142,7 @@ MODELS: Registry[Forecaster] = Registry(
         *sktime.ENTRIES,
         *prophet.ENTRIES,
     ),
+    namespaced=True,
 )
 
 
