@@ -49,9 +49,12 @@ def test_the_engine_refuses_ranges_with_missing_cells(tmp_path: Path) -> None:
     write_world(world, path)
     with (
         duckdb.connect(str(path), read_only=True) as con,
-        pytest.raises(RangeError, match="missing compensation ranges, such as"),
+        pytest.raises(RangeError) as error,
     ):
         range_table_from_world(con, schema_from_world(con))
+    # Every missing cell is named, none imputed.
+    missing = full - len(world.tables["comp_range"])
+    assert f"{missing} cells have no range, and nothing is imputed: " in str(error.value)
 
 
 @pytest.mark.parametrize(
