@@ -16,12 +16,16 @@ puts its own.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
-from collections.abc import Mapping
+import functools
+import types
+import typing
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
@@ -86,6 +90,51 @@ GROUPS: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 
+def _conform(value: Any, hint: Any) -> Any:
+    """`value` as `hint`: an enum's value becomes the enum, and a list of integers a tuple.
+    Anything else of the wrong type is refused."""
+    if isinstance(hint, types.UnionType):
+        inner = [a for a in typing.get_args(hint) if a is not type(None)]
+        return None if value is None else _conform(value, inner[0])
+    if typing.get_origin(hint) is tuple:
+        if not isinstance(value, tuple | list) or not all(
+            isinstance(v, int) and not isinstance(v, bool) for v in value
+        ):
+            raise TypeError(f"expected a list of integers, got {value!r}")
+        return tuple(value)
+    if isinstance(hint, type) and issubclass(hint, StrEnum):
+        try:
+            return hint(value)
+        except ValueError:
+            known = ", ".join(m.value for m in hint)
+            raise ValueError(f"expected one of {known}, got {value!r}") from None
+    if hint is float and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    wrong_kind = isinstance(value, bool) and hint is not bool
+    wrong_kind |= isinstance(value, dt.datetime) and hint is dt.date
+    if wrong_kind or not isinstance(value, hint):
+        raise TypeError(f"expected {getattr(hint, '__name__', hint)}, got {value!r}")
+    return value
+
+
+@functools.cache
+def _hints() -> dict[str, Any]:
+    return typing.get_type_hints(SimulationConfig)
+
+
+def _when(condition: bool, message: str) -> list[str]:
+    return [message] if condition else []
+
+
+def _months(name: str, values: tuple[int, ...], low: int, high: int) -> list[str]:
+    problems = []
+    if any(not low <= v <= high for v in values):
+        problems.append(f"{name} must lie in {low}..{high}, got {list(values)}")
+    if len(set(values)) != len(values):
+        problems.append(f"{name} repeat: {list(values)}")
+    return problems
+
+
 def setting(group: str, default: Any, doc: str) -> Any:
     """A field that loads in layers, in `group`."""
     if group not in GROUPS:
@@ -95,7 +144,8 @@ def setting(group: str, default: Any, doc: str) -> Any:
 
 @dataclass(frozen=True)
 class DomainModels:
-    """The models behind the skeleton's domains."""
+    """The models behind the skeleton's domains, and the artifact version each was loaded from,
+    where it was."""
 
     attrition: EntityModel  # scores employee rows
     external_fill: EntityModel  # scores opening rows: a monthly fill hazard
@@ -103,6 +153,32 @@ class DomainModels:
     backfill: GroupRateModel  # a rate per departure, by cost center code
     growth: GroupRateModel  # mean growth requisitions per month, by cost center code
     attributes: EmpiricalAttributeGenerator  # attributes of generated requisitions
+    #: Artifact versions, by model field.
+    versions: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        stray = sorted(set(self.versions) - set(MODEL_FIELDS))
+        if stray:
+            raise ConfigError([f"versions for models the configuration doesn't hold: {stray}"])
+        object.__setattr__(self, "versions", dict(self.versions))
+
+    @property
+    def unversioned(self) -> list[str]:
+        """The models that weren't loaded from an artifact."""
+        return [name for name in MODEL_FIELDS if name not in self.versions]
+
+
+#: The model fields, in order.
+MODEL_FIELDS: Final = (
+    "attrition",
+    "external_fill",
+    "cancellation",
+    "backfill",
+    "growth",
+    "attributes",
+)
+#: The artifact domain a model field loads from, where it isn't the field's own name.
+ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
 
 
 @dataclass(frozen=True)
@@ -181,26 +257,129 @@ class SimulationConfig:
 
     def __post_init__(self) -> None:
         problems: list[str] = []
-        if self.run_date.day != 1:
-            problems.append(f"run_date must be the first of a month, got {self.run_date}")
-        if self.simulation_months < 1:
-            problems.append("simulation_months must be at least 1")
-        if self.num_trajectories < 1:
-            problems.append("num_trajectories must be at least 1")
-        scope = ForecastScope(self.forecast_scope)
-        if scope is ForecastScope.HEADCOUNT_AND_SBC and self.awards is None:
-            problems.append("forecast_scope 'hcf+sbc' needs awards settings")
-        if scope is ForecastScope.HEADCOUNT and self.awards is not None:
-            problems.append("forecast_scope 'hcf' computes no SBC, so it refuses awards settings")
-        if self.guidance is not None:
+        typed = self._normalize(problems)
+        problems += self._check_settings(typed)
+        if self.guidance is not None and {"simulation_months", "run_date"} <= typed:
             problems += self._check_guidance(self.guidance)
         if problems:
             raise ConfigError(problems)
-        object.__setattr__(self, "forecast_scope", scope)
-        mode = self.run_mode
-        if mode is None:
+
+    def _normalize(self, problems: list[str]) -> set[str]:
+        """Check every setting holds its type, reading enum values and lists as their types.
+        Returns the settings that do: a check runs only when every setting it reads does."""
+        hints = _hints()
+        typed = set()
+        for f in dataclasses.fields(self):
+            if "group" not in f.metadata:
+                continue
+            try:
+                object.__setattr__(self, f.name, _conform(getattr(self, f.name), hints[f.name]))
+            except (TypeError, ValueError) as error:
+                problems.append(f"{f.name}: {error}")
+            else:
+                typed.add(f.name)
+        if "run_mode" in typed and self.run_mode is None:
             mode = RunMode.UNGUIDED if self.guidance is None else RunMode.GUIDED_FORECAST
-        object.__setattr__(self, "run_mode", RunMode(mode))
+            object.__setattr__(self, "run_mode", mode)
+        return typed
+
+    def _check_settings(self, typed: set[str]) -> list[str]:
+        mode = cast(RunMode, self.run_mode)
+        guided = mode in {RunMode.GUIDED_ACTUALS, RunMode.GUIDED_FORECAST}
+        sbc = self.forecast_scope is ForecastScope.HEADCOUNT_AND_SBC
+        checks: list[tuple[tuple[str, ...], Callable[[], list[str]]]] = [
+            (
+                ("run_date",),
+                lambda: _when(
+                    self.run_date.day != 1,
+                    f"run_date must be the first of a month, got {self.run_date}",
+                ),
+            ),
+            (
+                ("simulation_months",),
+                lambda: _when(self.simulation_months < 1, "simulation_months must be at least 1"),
+            ),
+            (
+                ("num_trajectories",),
+                lambda: _when(self.num_trajectories < 1, "num_trajectories must be at least 1"),
+            ),
+            (
+                ("seed",),
+                lambda: _when(self.seed is not None and self.seed < 0, "seed must be non-negative"),
+            ),
+            (
+                ("forecast_scope",),
+                lambda: (
+                    _when(
+                        sbc and self.awards is None,
+                        "forecast_scope 'hcf+sbc' needs awards settings",
+                    )
+                    + _when(
+                        not sbc and self.awards is not None,
+                        "forecast_scope 'hcf' computes no SBC, so it refuses awards settings",
+                    )
+                ),
+            ),
+            (
+                ("run_mode",),
+                lambda: (
+                    _when(guided and self.guidance is None, f"run_mode {mode} needs guidance")
+                    + _when(
+                        not guided and self.guidance is not None,
+                        f"run_mode {mode} reads no guidance; drop it",
+                    )
+                ),
+            ),
+            (
+                ("seeding_max_openings",),
+                lambda: _when(
+                    self.seeding_max_openings < 1, "seeding_max_openings must be at least 1"
+                ),
+            ),
+            (
+                ("performance_cycle_month",),
+                lambda: _when(
+                    not 1 <= self.performance_cycle_month <= 12,
+                    "performance_cycle_month must be a calendar month, 1 to 12",
+                ),
+            ),
+            (
+                ("performance_first_rating_min_tenure_months",),
+                lambda: _when(
+                    self.performance_first_rating_min_tenure_months < 0,
+                    "performance_first_rating_min_tenure_months must be non-negative",
+                ),
+            ),
+            (
+                ("promotion_cycle_months",),
+                lambda: _months("promotion_cycle_months", self.promotion_cycle_months, 1, 12),
+            ),
+            (
+                ("pending_starts_staleness_days",),
+                lambda: _when(
+                    self.pending_starts_staleness_days < 0,
+                    "pending_starts_staleness_days must be non-negative",
+                ),
+            ),
+            (
+                ("transfers_availability_factor",),
+                lambda: _when(
+                    not 0.0 <= self.transfers_availability_factor <= 1.0,
+                    "transfers_availability_factor must lie in [0, 1]",
+                ),
+            ),
+            (
+                ("results_snapshot_steps", "simulation_months"),
+                lambda: _months(
+                    "results_snapshot_steps", self.results_snapshot_steps, 0, self.simulation_months
+                ),
+            ),
+        ]
+        problems = []
+        for needs, check in checks:
+            if set(needs) <= typed:
+                problems += check()
+        return problems
 
     def _check_guidance(self, guidance: GuidanceForecast) -> list[str]:
         problems = []
