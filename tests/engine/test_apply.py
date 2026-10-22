@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,6 +17,7 @@ from hcsim.engine.state import BufferCapacityError, SimulationState
 from hcsim.financial.prices import StaticPrice
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.timing import AwardTiming, LagDistribution
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import (
@@ -392,3 +395,27 @@ def test_counters_track_the_buffers_through_any_sequence_of_results(data: st.Dat
         assert len(set(ids(state))) == state.n_employees
         assert not state.employees[state.n_employees :].any()
         assert not state.openings[state.n_openings :].any()
+
+
+def test_a_timed_grant_is_awarded_and_vests_from_its_award_month() -> None:
+    timed = dataclasses.replace(
+        awards(), timing={"new_hire": AwardTiming(LagDistribution.fixed(2))}
+    )
+    grant = (Grant("new_hire"),)
+
+    def hire(settings: AwardSettings, rng: np.random.Generator | None = None) -> HolderLedger:
+        state = make_state(ledger=True)
+        state.price = StaticPrice(100.0)
+        change = RowChange(EMPLOYEE, append=employees([0, 2], first_id=None))
+        apply(state, result(employees=change, grants=grant), 2, SCHEMA, settings, 1, rng)
+        assert state.ledger is not None
+        return state.ledger
+
+    now = hire(awards()).tranches()
+    later = hire(timed, np.random.default_rng(0)).tranches()
+    assert set(now.award_month.tolist()) == {2}
+    assert set(later.award_month.tolist()) == {4}
+    assert (later.vest_month == now.vest_month + 2).all()
+    assert later.shares.sum() == now.shares.sum()
+    with pytest.raises(RuntimeError, match="are timed, so need a random stream"):
+        hire(timed)

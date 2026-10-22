@@ -107,8 +107,10 @@ def apply(
     schema: SimulationSchema,
     awards: AwardSettings | None = None,
     calendar_month: int = 1,
+    rng: np.random.Generator | None = None,
 ) -> Applied:
-    """Apply `result` to `state` at simulation step `step`, in `calendar_month`."""
+    """Apply `result` to `state` at simulation step `step`, in `calendar_month`. `rng` draws
+    award timing, for award types with a lag."""
     n = state.n_cost_centers
     e, o = result.employees, result.openings
     _check(e, state.live_employees)
@@ -209,14 +211,23 @@ def apply(
             state.employees[positions[granted], EmployeeColumn.BASE_SALARY] = batch.base_salary[
                 granted
             ]
-            recorded += state.ledger.record(
-                rows[:, EmployeeColumn.VEST_INDEX].astype(np.int64),
-                step,
-                batch.vest_schedule,
-                schema.vocabulary(AWARD_TYPE).code(grant.award_type),
-                rows[:, EmployeeColumn.LEVEL].astype(np.int64),
-                rows[:, ecc].astype(np.int64),
-            )
+            timing = awards.timing.get(grant.award_type)
+            if timing is None or timing.immediate:
+                award_steps = np.full(len(rows), step, dtype=np.int64)
+            elif rng is None:
+                raise RuntimeError(f"{grant.award_type} awards are timed, so need a random stream")
+            else:
+                award_steps = timing.award_steps(step, calendar_month, len(rows), rng)
+            for award_step in np.unique(award_steps):
+                at = award_steps == award_step
+                recorded += state.ledger.record(
+                    rows[at, EmployeeColumn.VEST_INDEX].astype(np.int64),
+                    int(award_step),
+                    batch.vest_schedule[at],
+                    schema.vocabulary(AWARD_TYPE).code(grant.award_type),
+                    rows[at, EmployeeColumn.LEVEL].astype(np.int64),
+                    rows[at, ecc].astype(np.int64),
+                )
         appended = state.employees[first : state.n_employees].copy()
 
     # 8. The result's use of shared guidance quota.

@@ -41,6 +41,7 @@ from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.routing import HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
+from hcsim.financial.timing import AwardTiming
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
@@ -248,6 +249,9 @@ class AwardSettings:
     #: The hybrid window's last step for recorded awards: grants after it are all sized. None
     #: routes recorded awards at every step.
     replay_through: int | None = None
+    #: Per award type, when its grants are awarded after dispatch. A type without one is
+    #: awarded in its dispatch month.
+    timing: Mapping[str, AwardTiming] = field(default_factory=dict)
 
     @property
     def window(self) -> HybridWindow:
