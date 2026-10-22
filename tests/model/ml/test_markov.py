@@ -100,3 +100,13 @@ def test_bad_similarity_inputs_are_refused() -> None:
         SimilarityMatrix(2).neighbors(0, 1)
     with pytest.raises(ValueError, match=r"categories must lie in 0\.\.1"):
         SimilarityMatrix(2).fit(np.array([0]), np.array([1])).neighbors(2, 1)
+
+
+def test_sample_draws_next_states_and_entries_for_newcomers() -> None:
+    model = MarkovModel(3).fit(np.array([0, 1, 2]), np.array([1, 2, 0]), np.array([2, 2]))
+    drawn = model.sample(np.array([[0], [1], [2], [-1]]), np.random.default_rng(0))
+    assert drawn.tolist() == [1, 2, 0, 2]  # deterministic transitions, and a certain entry
+    with pytest.raises(ValueError, match="previous state first"):
+        model.sample(np.zeros(3, np.int64), np.random.default_rng(0))
+    with pytest.raises(ValueError, match=r"previous states must lie in -1\.\.2"):
+        model.sample(np.array([[3]]), np.random.default_rng(0))

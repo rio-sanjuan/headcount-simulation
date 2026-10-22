@@ -50,13 +50,21 @@ class _PooledFallback:
 
 
 class BackfillRateModel(_PooledFallback):
-    """The share of departures that open a backfill requisition, per cost center."""
+    """The share of departures that open a backfill requisition, per cost center. As a
+    classifier, it scores departure rows by the group code in `group_column`."""
 
     ALGORITHM_NAME: ClassVar[str] = "backfill_rate"
 
-    def __init__(self, n_groups: int, *, min_departures: int = 20) -> None:
+    def __init__(self, n_groups: int, *, min_departures: int = 20, group_column: int = 7) -> None:
         self.n_groups = n_groups
         self.min_departures = min_departures
+        #: The features' cost-center column: the employee buffer's, by default.
+        self.group_column = group_column
+
+    def compute_probability(self, features: Floats) -> Floats:
+        """Each departure row's backfill probability, from its group."""
+        rows = np.asarray(features, dtype=np.float64)
+        return self.rates(rows[:, self.group_column].astype(np.int64))
 
     def fit(self, departure_groups: Ints, backfilled: NDArray[np.bool_]) -> Self:
         if len(departure_groups) != len(backfilled):
