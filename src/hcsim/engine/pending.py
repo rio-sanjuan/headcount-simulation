@@ -9,9 +9,10 @@ under their own id, with a new-hire grant:
   the role their offer names. No opening is consumed, so they count as a boundary fill,
   `F_bdy`.
 
-In replay, a realized hire is a pending start into the requisition it filled. One whose
-requisition the run doesn't hold is a boundary fill only when `replay_boundary_fill` allows;
-otherwise it's left out, with the rest of their known events.
+In replay, a realized hire is a pending start into the requisition it filled, when its offer
+was accepted during the run. One whose requisition the run doesn't hold, or whose offer was
+accepted before the run, is a boundary fill only when `replay_boundary_fill` allows; otherwise
+it's left out, with the rest of their known events.
 
 An offer whose start passed before the run started is still expected for
 `pending_starts_staleness_days`, and starts in the run's first month; an older one is stale and
