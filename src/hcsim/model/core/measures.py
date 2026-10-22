@@ -1,0 +1,167 @@
+"""Measures: how a guidance series is counted from the warehouse.
+
+Each measure renders one SQL query that yields `(month, cost_center, value)`: the month as the
+first of the month, the leaf cost center, and the count.
+
+A `TransTypeMeasure` sums the aggregate fact's rows for a set of codes, each with a sign, over
+regular accounts. Net hires, for instance, are `HIRE` less `HIRE_REV`, so a hire recorded in
+error and reversed counts for nothing. A measure checks its codes against the warehouse's
+catalog: every code must be defined and measured, never excluded or ignored.
+
+A `TemplateMeasure` counts something the transaction codes can't express, from its own SQL:
+requisitions, which belong to the opening identity rather than the headcount one.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Final
+
+from hcsim.model.core.categories import Grain
+from hcsim.model.core.layouts import MAX_OPENINGS_PER_REQUISITION
+from hcsim.model.core.transactions import Disposition, TransType, TransTypeCatalog
+from hcsim.model.sql.render import Template, literal
+
+#: Regular employees only: contingent and temporary workers book to their own accounts.
+REGULAR_ACCOUNTS: Final = "SELECT account FROM dim_account WHERE account_group = 'regular'"
+
+
+class MeasureError(ValueError):
+    """A measure that can't be counted as declared."""
+
+
+_FLOW: Final = Template(
+    """
+    SELECT date_trunc('month', CAST(period AS DATE)) AS month, {{cost_center}} AS cost_center,
+           sum({{expression}}) AS value
+    FROM workforce_agg
+    WHERE trans_type IN ({{codes}})
+      AND account IN ({{regular}})
+    GROUP BY ALL
+    """,
+    "transaction measure",
+)
+
+
+@dataclass(frozen=True)
+class TransTypeMeasure:
+    """Signed sums of transaction codes. A code's sign is +1 or -1: it counts its rows, or
+    takes them away, whatever its headcount amount."""
+
+    name: str
+    terms: Mapping[TransType, int]
+    grain: Grain = Grain.HEADCOUNT
+    #: The table the measure reads, whose cost-center column `sql` takes.
+    table: str = "workforce_agg"
+
+    def __post_init__(self) -> None:
+        problems = []
+        if not self.terms:
+            problems.append("no codes")
+        bad = sorted(code.value for code, sign in self.terms.items() if sign not in (-1, 1))
+        if bad:
+            problems.append(f"signs must be +1 or -1: {bad}")
+        if self.grain is Grain.REQUISITION:
+            problems.append("transaction codes count heads, not requisitions")
+        if problems:
+            raise MeasureError(f"{self.name}: " + "; ".join(problems))
+        object.__setattr__(self, "terms", MappingProxyType(dict(self.terms)))
+
+    @property
+    def codes(self) -> frozenset[TransType]:
+        return frozenset(self.terms)
+
+    def expression(self, code: str = "trans_type", weight: str = "headcount") -> str:
+        """`weight` times each row's sign, as a SQL expression."""
+        cases = " ".join(
+            f"WHEN {literal(c.value)} THEN {sign}" for c, sign in sorted(self.terms.items())
+        )
+        return f"(CASE {code} {cases} ELSE 0 END) * {weight}"
+
+    def check(self, catalog: TransTypeCatalog) -> None:
+        """Refuse codes the catalog doesn't define, or doesn't measure."""
+        catalog.check(c.value for c in self.codes)
+        unmeasured = sorted(
+            c.value for c in self.codes if catalog.disposition(c) is not Disposition.MEASURED
+        )
+        if unmeasured:
+            raise MeasureError(f"{self.name}: codes that aren't measured: {unmeasured}")
+
+    def sql(self, cost_center: str = "cost_center") -> str:
+        codes = ", ".join(literal(c.value) for c in sorted(self.codes))
+        return _FLOW.render(
+            expression=self.expression(),
+            codes=codes,
+            regular=REGULAR_ACCOUNTS,
+            cost_center=cost_center,
+        )
+
+
+@dataclass(frozen=True)
+class TemplateMeasure:
+    """A measure with its own SQL. `{{cost_center}}` names its table's cost-center column,
+    which the data contract resolves per warehouse."""
+
+    name: str
+    grain: Grain
+    template: Template = field(repr=False)
+    table: str = "req_interval"
+
+    def check(self, catalog: TransTypeCatalog) -> None:
+        """A template reads no transaction codes, so any catalog will do."""
+
+    def sql(self, cost_center: str = "cost_center") -> str:
+        return self.template.render(cost_center=cost_center)
+
+
+Measure = TransTypeMeasure | TemplateMeasure
+
+HEADCOUNT_STOCK: Final = TransTypeMeasure("headcount", {TransType.ACTIVE: 1}, grain=Grain.STOCK)
+NET_HIRES: Final = TransTypeMeasure("hires", {TransType.HIRE: 1, TransType.HIRE_REV: -1})
+NET_DEPARTURES: Final = TransTypeMeasure("attrition", {TransType.TERM: 1, TransType.TERM_REV: -1})
+#: Promotions change a level in place: they move no one.
+PROMOTIONS_IN_PLACE: Final = TransTypeMeasure("promotions", {TransType.PROMO: 1})
+
+#: A requisition counts once, in the month of its first sighting, with the openings it opened
+#: with: the most any of its intervals carries, capped as the opening buffer caps them.
+REQUISITIONS_OPENED: Final = TemplateMeasure(
+    "requisitions_opened",
+    Grain.REQUISITION,
+    Template(
+        f"""
+        SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
+               sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
+        FROM (
+            SELECT req_id, min(opened_date) AS opened_date,
+                   any_value({{{{cost_center}}}}) AS cost_center, max(openings) AS openings
+            FROM req_interval GROUP BY req_id
+        )
+        GROUP BY ALL
+        """,
+        "requisitions opened",
+    ),
+)
+
+#: A requisition that closes unfilled counts once, in the month of its last sighting: the end
+#: of its last interval.
+REQUISITIONS_CLOSED_UNFILLED: Final = TemplateMeasure(
+    "requisitions_closed_unfilled",
+    Grain.REQUISITION,
+    Template(
+        """
+        SELECT date_trunc('month', CAST(closed_date AS DATE)) AS month, cost_center,
+               count(*) AS value
+        FROM (
+            SELECT req_id, arg_max(close_reason, interval_number) AS close_reason,
+                   max(closed_date) AS closed_date,
+                   any_value({{cost_center}}) AS cost_center
+            FROM req_interval GROUP BY req_id
+        )
+        WHERE close_reason = 'unfilled'
+        GROUP BY ALL
+        """,
+        "requisitions closed unfilled",
+    ),
+)
