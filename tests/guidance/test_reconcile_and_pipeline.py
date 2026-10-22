@@ -124,7 +124,13 @@ def test_the_report_records_the_partial_identity_and_clamping(result: PipelineRe
     assert "internal_starts" in report["reconciliation"]["missing_terms"]
     assert report["clamped_negative_cells"] >= 0
     assert len(report["selection"]) == 40
-    assert [s["step"] for s in report["steps"]] == ["ingest", "forecast", "reconcile", "format"]
+    assert [s["step"] for s in report["steps"]] == [
+        "ingest",
+        "validate",
+        "forecast",
+        "reconcile",
+        "format",
+    ]
 
 
 def test_the_artifact_saves_and_loads(result: PipelineResult, tmp_path: Path) -> None:

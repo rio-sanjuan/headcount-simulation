@@ -17,7 +17,7 @@ A configuration that loads names only components the pipeline can build.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -60,6 +60,17 @@ class Reconciliation(_Strict):
     tolerance: float = Field(default=1.0, ge=0.0)
 
 
+class Validation(_Strict):
+    """How the series are settled before fitting (see `validation`)."""
+
+    #: The last month of the history, as `YYYY-MM`. None applies the snapshot rule.
+    snapshot: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    #: What a month with no rows at all inside the history is: refused, or zeros.
+    gaps: Literal["refuse", "zero"] = "refuse"
+    #: Whether a series that's zero throughout is dropped rather than forecast.
+    drop_all_zero: bool = True
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
@@ -70,6 +81,7 @@ class GuidanceConfig(_Strict):
     models: tuple[str, ...] = Field(default=("seasonal_naive", "historical_average"), min_length=1)
     combination: Combination = Combination()
     evaluation: Evaluation = Evaluation()
+    validation: Validation = Validation()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")

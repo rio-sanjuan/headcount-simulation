@@ -94,8 +94,9 @@ def test_a_run_forecasts_composed_categories(con: duckdb.DuckDBPyConnection) -> 
     )
     result = run(con, config)
     assert result.artifact.categories == frozenset({C.HEADCOUNT, C.ATTRITION, C.HIRES})
-    ingested = [s for s in result.report["steps"] if s["step"] == "ingest"]
-    assert ingested[0]["gave"] == ["series", "covariates"]
+    gave = {s["step"]: s["gave"] for s in result.report["steps"]}
+    assert gave["ingest"] == ["series"]
+    assert gave["validate"] == ["series", "covariates"]
 
 
 # --- calendar covariates ------------------------------------------------------------------------
@@ -127,7 +128,7 @@ def test_covariates_span_the_history_and_the_horizon(con: duckdb.DuckDBPyConnect
     assert len(covariates(series, 0)) == history
 
 
-def test_the_ingest_step_gives_the_covariates(con: duckdb.DuckDBPyConnection) -> None:
+def test_the_validate_step_gives_the_covariates(con: duckdb.DuckDBPyConnection) -> None:
     config = GuidanceConfig(horizon=6, grouping="TOPLINE")
     ctx = pipeline(config).run(Context({"source": con, "config": config}))
     assert int(ctx["covariates"]["future"].sum()) == 6
