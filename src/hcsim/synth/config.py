@@ -188,7 +188,6 @@ class AttritionTruth:
 
 @dataclass(frozen=True)
 class RequisitionTruth:
-    backfill_probability: float = 0.6
     growth_level_mix: dict[int, float] = field(default_factory=lambda: {1: 0.5, 2: 0.3, 3: 0.2})
     #: Monthly external-fill hazard by age in months: 0, 1, 2, then 3 and older.
     external_fill_hazard: tuple[float, ...] = (0.15, 0.30, 0.30, 0.25)
@@ -490,6 +489,49 @@ class GrowthTruth:
         return found
 
 
+@dataclass(frozen=True)
+class BackfillTruth:
+    """Backfill requisitions for vacated roles. Invented, round values.
+
+    Every vacancy (a departure, or a role left by a transfer) opens a backfill with its own
+    probability: the logistic of `base_probability`'s logit, plus a random effect per cost
+    center and a shift per level. A share of backfills opens in another cost center of the same
+    level-1 org. A share of departures gives notice: the person leaves one to two months later,
+    and the backfill, if any, opens on the day of notice, ahead of the departure.
+    """
+
+    base_probability: float = 0.6
+    cost_center_sigma: float = 0.5
+    #: Logit shifts by level: junior roles are backfilled more often than senior ones.
+    level_shift: dict[int, float] = field(
+        default_factory=lambda: {
+            1: 0.3,
+            2: 0.2,
+            3: 0.0,
+            4: -0.1,
+            5: -0.2,
+            6: -0.4,
+            7: -0.6,
+            8: -0.8,
+        }
+    )
+    other_cost_center_share: float = 0.10
+    notice_share: float = 0.15
+    notice_months: tuple[int, int] = (1, 2)
+
+    def problems(self, levels: tuple[int, ...]) -> list[str]:
+        found = []
+        for name in ("base_probability", "other_cost_center_share", "notice_share"):
+            if not 0 <= getattr(self, name) <= 1:
+                found.append(f"backfill.{name} must lie in [0, 1]")
+        if missing := sorted(set(levels) - set(self.level_shift)):
+            found.append(f"backfill.level_shift has no value for levels {missing}")
+        low, high = self.notice_months
+        if not 1 <= low <= high:
+            found.append("backfill.notice_months must be a range of at least one month")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -556,6 +598,7 @@ class WorldConfig:
     programs: ProgramTruth = field(default_factory=ProgramTruth)
     dates: DateTruth = field(default_factory=DateTruth)
     growth: GrowthTruth = field(default_factory=GrowthTruth)
+    backfill: BackfillTruth = field(default_factory=BackfillTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -619,6 +662,7 @@ class WorldConfig:
         problems += self.programs.problems(len(self.ratings.scale))
         problems += self.dates.problems()
         problems += self.growth.problems()
+        problems += self.backfill.problems(self.levels)
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:

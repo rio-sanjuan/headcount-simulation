@@ -32,6 +32,7 @@ class RequisitionBook:
                 "closed_date": "datetime64[D]",
                 "close_reason": np.int8,
                 "filled_by": np.int64,
+                "backfill_of": np.int64,  # the person whose role a backfill replaces
             }
         )
         self.next_id = first_id
@@ -45,7 +46,14 @@ class RequisitionBook:
     def roles(self, index: Index) -> Roles:
         return {name: self.reqs.column(name)[index] for name in ROLE_DTYPES}
 
-    def open(self, req_type: str, roles: Roles, dates: NDArray[np.datetime64], month: int) -> Index:
+    def open(
+        self,
+        req_type: str,
+        roles: Roles,
+        dates: NDArray[np.datetime64],
+        month: int,
+        backfill_of: NDArray[np.int64] | None = None,
+    ) -> Index:
         n = len(dates)
         ids = self.next_id + np.arange(n, dtype=np.int64)
         self.next_id += n
@@ -57,6 +65,7 @@ class RequisitionBook:
             opened_month=month,
             close_reason=OPEN,
             filled_by=-1,
+            backfill_of=-1 if backfill_of is None else backfill_of,
             **roles,
         )
 

@@ -41,7 +41,7 @@ def test_every_parameter_lives_in_the_configuration() -> None:
     record = WorldConfig().to_dict()
     assert {"attrition", "requisitions", "compensation", "prices", "grants"} <= set(record)
     assert record["attrition"]["base_monthly_hazard"] == AttritionTruth().base_monthly_hazard
-    assert record["requisitions"]["backfill_probability"] == 0.6
+    assert record["backfill"]["base_probability"] == 0.6
 
 
 def test_the_manifest_records_the_whole_configuration() -> None:

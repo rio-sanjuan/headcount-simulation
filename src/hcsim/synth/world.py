@@ -61,6 +61,7 @@ REQ_COLUMNS = [
     "closed_date",
     "close_reason",
     "filled_by",
+    "backfill_of",
 ]
 
 
@@ -109,12 +110,11 @@ class _Labels:
 def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
     c = workforce.log.collect(TXN_DTYPES)
     config = labels.config
-    dates = labels.dates(c["event_date"])
     return pd.DataFrame(
         {
             "employee_id": c["employee_id"],
-            "reporting_date": dates,
-            "event_date": dates,
+            "reporting_date": labels.dates(c["reporting_date"]),
+            "event_date": labels.dates(c["event_date"]),
             "trans_type": labels.of(c["trans_type"], TRANS_TYPES),
             "amount": c["amount"].astype(np.int64),
             "cost_center": labels.of(c["cost_center"], labels.cost_centers),
@@ -138,6 +138,8 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
     col = book.column
     filled_by = pd.array(col("filled_by"), dtype="Int64")
     filled_by[col("filled_by") < 0] = pd.NA
+    backfill_of = pd.array(col("backfill_of"), dtype="Int64")
+    backfill_of[col("backfill_of") < 0] = pd.NA
     return pd.DataFrame(
         {
             "req_id": col("req_id"),
@@ -154,6 +156,7 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
             "closed_date": labels.dates(col("closed_date")),
             "close_reason": labels.of(col("close_reason"), CLOSE_REASONS),
             "filled_by": filled_by,
+            "backfill_of": backfill_of,
         },
         columns=REQ_COLUMNS,
     )

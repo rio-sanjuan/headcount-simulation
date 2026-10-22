@@ -5,13 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
-import numpy as np
 import pandas as pd
 import pytest
 
 from hcsim.synth.config import preset
 from hcsim.synth.world import World, generate_world, write_world
-from tests.support.stat_check import stat_check
 
 
 @pytest.fixture(scope="module")
@@ -56,17 +54,6 @@ def test_intervals_are_consistent(world: World) -> None:
     assert reqs["req_id"].is_unique
     assert (reqs["openings"] == 1).all()
     assert set(reqs["req_type"]) == {"backfill", "growth"}
-
-
-def test_backfill_opens_at_the_true_probability(world: World) -> None:
-    txn, reqs = world.tables["workforce_txn"], world.tables["req_interval"]
-    p = world.truth["config"]["requisitions"]["backfill_probability"]
-    # Every departure and every transfer fill vacates a role that may be backfilled.
-    vacated = int(
-        (txn["trans_type"] == "TERM").sum() + (reqs["close_reason"] == "filled_transfer").sum()
-    )
-    backfills = int((reqs["req_type"] == "backfill").sum())
-    stat_check(backfills, vacated * p, float(np.sqrt(vacated * p * (1 - p))), label="backfills")
 
 
 def test_the_snapshot_view_shows_requisitions_open_at_each_month_end(

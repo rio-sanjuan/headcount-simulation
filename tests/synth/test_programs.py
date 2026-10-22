@@ -8,7 +8,7 @@ import itertools
 import pandas as pd
 import pytest
 
-from hcsim.synth.config import ProgramTruth, RequisitionTruth, WorldConfig, preset
+from hcsim.synth.config import BackfillTruth, ProgramTruth, WorldConfig, preset
 from hcsim.synth.world import World, generate_world
 
 
@@ -18,7 +18,7 @@ def world() -> World:
     config = dataclasses.replace(
         preset("small", seed=5),
         programs=ProgramTruth(start_probability=0.2),
-        requisitions=RequisitionTruth(backfill_probability=1.0),
+        backfill=BackfillTruth(base_probability=1.0, notice_share=0.0),
     )
     return generate_world(config)
 
