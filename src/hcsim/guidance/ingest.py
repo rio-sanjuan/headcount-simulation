@@ -20,14 +20,7 @@ import pandas as pd
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
-from hcsim.model.core.measures import (
-    HEADCOUNT_STOCK,
-    NET_DEPARTURES,
-    NET_HIRES,
-    REQUISITIONS_OPENED,
-    Measure,
-    MeasureError,
-)
+from hcsim.model.core.measures import CATEGORY_MEASURES, Measure, MeasureError
 from hcsim.model.core.transactions import TransTypeCatalog, TransTypeError
 
 MONTH: Final = "month"
@@ -41,11 +34,15 @@ GROUPINGS: Final = ("cost_center", "org_level1", TOPLINE)
 # Each category is counted by one measure, a SQL query yielding (month, cost_center, value).
 # Workforce measures read the pre-summed fact, `workforce_agg`, as the data contract intends
 # for the guidance pipeline, and count regular employees only.
+# The skeleton forecasts these four; the full set arrives with the complete pipeline.
 MEASURES: Final[dict[GuidanceCategory, Measure]] = {
-    GuidanceCategory.ATTRITION: NET_DEPARTURES,
-    GuidanceCategory.HIRES: NET_HIRES,
-    GuidanceCategory.HEADCOUNT: HEADCOUNT_STOCK,
-    GuidanceCategory.REQUISITIONS_OPENED: REQUISITIONS_OPENED,
+    c: CATEGORY_MEASURES[c]
+    for c in (
+        GuidanceCategory.ATTRITION,
+        GuidanceCategory.EXTERNAL_HIRES,
+        GuidanceCategory.HEADCOUNT,
+        GuidanceCategory.REQUISITIONS_OPENED,
+    )
 }
 
 
@@ -64,6 +61,12 @@ class Series:
     @property
     def groups(self) -> list[str]:
         return sorted(self.frame[GROUP].unique())
+
+    @property
+    def categories(self) -> list[GuidanceCategory]:
+        """The categories the series carry, in the categories' declared order."""
+        carried = set(self.frame[CATEGORY])
+        return [c for c in GuidanceCategory if c.value in carried]
 
     def values(self, group: str, category: GuidanceCategory) -> pd.Series:
         rows = self.frame[(self.frame[GROUP] == group) & (self.frame[CATEGORY] == category.value)]

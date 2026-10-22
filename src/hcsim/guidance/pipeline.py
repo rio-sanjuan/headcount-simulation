@@ -49,7 +49,7 @@ def run(con: duckdb.DuckDBPyConnection, config: PipelineConfig | None = None) ->
     scores: dict[str, dict[str, Any]] = {}
     skipped: list[dict[str, str]] = []
     for group in series.groups:
-        for category in GuidanceCategory:
+        for category in series.categories:
             values = series.values(group, category).to_numpy()
             try:
                 result = forecast(values, config.horizon, config.selection)
@@ -95,7 +95,10 @@ def _reconcile(
     forecasts: dict[tuple[str, GuidanceCategory], np.ndarray],
     config: PipelineConfig,
 ) -> dict[str, np.ndarray]:
-    signs = {c.value: s for c, s in coherency_terms().items()}
+    # The identity's terms this run forecasts. A term with no series can't be adjusted, and the
+    # gap it leaves falls on the others.
+    forecast = {category for _, category in forecasts}
+    signs = {c.value: s for c, s in coherency_terms().items() if c in forecast}
     residuals = {}
     for group in series.groups:
         terms = [GuidanceCategory(c) for c in signs]

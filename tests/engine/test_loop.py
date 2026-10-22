@@ -135,7 +135,11 @@ def guidance(cells: dict[str, dict[str, float]], horizon: int = 12) -> GuidanceF
 
 GUIDED = {
     "attrition": {"CC-01": 2.0, "CC-02": 1.5},  # CC-03 runs unguided for attrition
-    "hires": {"CC-01": 1.0, "CC-02": 2.0, "CC-03": 50.0},  # CC-03's quota outruns its openings
+    "external_hires": {
+        "CC-01": 1.0,
+        "CC-02": 2.0,
+        "CC-03": 50.0,
+    },  # CC-03's quota outruns its openings
     "requisitions_opened": {"CC-01": 3.0, "CC-02": 2.0},
 }
 
@@ -178,7 +182,7 @@ def test_a_fill_of_every_opening_closes_the_requisition_and_hires_into_its_role(
 
 def test_a_guided_partial_fill_keeps_the_requisition_with_fewer_openings() -> None:
     state = initial_state()
-    cfg = config(models=models(fill=1.0), guidance=guidance({"hires": {"CC-01": 2.0}}))
+    cfg = config(models=models(fill=1.0), guidance=guidance({"external_hires": {"CC-01": 2.0}}))
     result = external_fill(state, context(state, cfg))
     # CC-01 fills exactly two of its four openings; the unguided cost centers fill everything.
     hires = result.employees.append[:, EmployeeColumn.COST_CENTER]
@@ -247,7 +251,7 @@ def test_cancellation_drops_whole_requisitions() -> None:
 def test_a_guided_handler_without_guidance_refuses() -> None:
     state = initial_state()
     with pytest.raises(RuntimeError, match="needs guidance"):
-        context(state, config()).quota(GuidanceCategory.HIRES)
+        context(state, config()).quota(GuidanceCategory.EXTERNAL_HIRES)
 
 
 # --- the loop ---------------------------------------------------------------------------------
@@ -270,7 +274,7 @@ def test_guided_draws_realize_their_quotas_exactly() -> None:
     rows = [row for t in result.trajectories for row in t.quotas]
     assert {(r.domain, r.category) for r in rows} == {
         ("attrition", "attrition"),
-        ("external_fill", "hires"),
+        ("external_fill", "external_hires"),
         ("growth", "requisitions_opened"),
     }
     binding = 0
@@ -278,7 +282,7 @@ def test_guided_draws_realize_their_quotas_exactly() -> None:
         r = row.record
         assert np.array_equal(r.realized, np.minimum(r.quota, r.eligible))
         binding += int((r.eligible < r.quota).sum())
-    assert binding  # CC-03's hires quota outruns its openings
+    assert binding  # CC-03's external hires quota outruns its openings
 
     # Requisitions opened in a guided cost center equal its quota every month.
     opened = result.flow("B_att") + result.flow("G")

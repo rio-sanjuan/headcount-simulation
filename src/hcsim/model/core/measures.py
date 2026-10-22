@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
 
-from hcsim.model.core.categories import Grain
+from hcsim.model.core.categories import CATEGORIES, Grain, GuidanceCategory
 from hcsim.model.core.layouts import MAX_OPENINGS_PER_REQUISITION
 from hcsim.model.core.transactions import Disposition, TransType, TransTypeCatalog
 from hcsim.model.sql.render import Template, literal
@@ -118,9 +118,18 @@ class TemplateMeasure:
 
 Measure = TransTypeMeasure | TemplateMeasure
 
+_HIRE = {TransType.HIRE: 1, TransType.HIRE_REV: -1}
+
 HEADCOUNT_STOCK: Final = TransTypeMeasure("headcount", {TransType.ACTIVE: 1}, grain=Grain.STOCK)
-NET_HIRES: Final = TransTypeMeasure("hires", {TransType.HIRE: 1, TransType.HIRE_REV: -1})
+#: Departures net of reversals. A termination program's departures (`RIF`) are known events,
+#: not sampled attrition, so they don't count.
 NET_DEPARTURES: Final = TransTypeMeasure("attrition", {TransType.TERM: 1, TransType.TERM_REV: -1})
+NET_EXTERNAL_HIRES: Final = TransTypeMeasure("external_hires", _HIRE)
+CONVERSION_HIRES: Final = TransTypeMeasure("conversion_hires", {TransType.CONV_IN: 1})
+TRANSFERS_IN: Final = TransTypeMeasure("internal_starts", {TransType.XFER_IN: 1})
+CONVERSIONS_OUT: Final = TransTypeMeasure("conversions_out", {TransType.CONV_OUT: 1})
+NET_HIRES: Final = TransTypeMeasure("hires", {**_HIRE, TransType.CONV_IN: 1})
+NET_FILLS: Final = TransTypeMeasure("fills", {**_HIRE, TransType.CONV_IN: 1, TransType.XFER_IN: 1})
 #: Promotions change a level in place: they move no one.
 PROMOTIONS_IN_PLACE: Final = TransTypeMeasure("promotions", {TransType.PROMO: 1})
 
@@ -165,3 +174,25 @@ REQUISITIONS_CLOSED_UNFILLED: Final = TemplateMeasure(
         "requisitions closed unfilled",
     ),
 )
+
+#: One measure per guidance category, named for it.
+CATEGORY_MEASURES: Final[Mapping[GuidanceCategory, Measure]] = MappingProxyType(
+    {
+        GuidanceCategory(m.name): m
+        for m in (
+            HEADCOUNT_STOCK,
+            NET_DEPARTURES,
+            NET_EXTERNAL_HIRES,
+            CONVERSION_HIRES,
+            TRANSFERS_IN,
+            CONVERSIONS_OUT,
+            NET_HIRES,
+            NET_FILLS,
+            PROMOTIONS_IN_PLACE,
+            REQUISITIONS_OPENED,
+            REQUISITIONS_CLOSED_UNFILLED,
+        )
+    }
+)
+if set(CATEGORY_MEASURES) != set(CATEGORIES):  # pragma: no cover - an import-time check
+    raise MeasureError("every guidance category needs exactly one measure")

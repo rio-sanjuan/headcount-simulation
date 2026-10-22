@@ -182,14 +182,14 @@ def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
 
 
 def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """Each open opening fills with the model's monthly hazard, or by the hires quota. A fill
-    hires an external candidate into the requisition's role and consumes one opening."""
+    """Each open opening fills with the model's monthly hazard, or by the external hires quota.
+    A fill hires an external candidate into the requisition's role and consumes one opening."""
     reqs = state.live_openings
     openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
     row_of = np.repeat(np.arange(len(reqs)), openings)  # one entry per fillable opening
     p = ctx.config.models.external_fill.compute_probability(reqs)[row_of]
     filled, quotas = _draw(
-        p, reqs[row_of], OPENING, GuidanceCategory.HIRES, ctx, ctx.rng(EXTERNAL_FILL)
+        p, reqs[row_of], OPENING, GuidanceCategory.EXTERNAL_HIRES, ctx, ctx.rng(EXTERNAL_FILL)
     )
     source = row_of[filled]
     per_row = np.bincount(source, minlength=len(reqs)).astype(np.int64)

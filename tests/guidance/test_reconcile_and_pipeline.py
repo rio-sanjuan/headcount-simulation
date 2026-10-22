@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from hcsim.cli import main as hcsim
+from hcsim.guidance.ingest import MEASURES
 from hcsim.guidance.pipeline import PipelineConfig, PipelineResult, run
 from hcsim.guidance.reconcile import reconcile_greedy
 from hcsim.model.core.categories import GuidanceCategory
@@ -81,7 +82,7 @@ def result(world_path: Path) -> Iterator[PipelineResult]:
 def test_every_group_gets_every_category_for_the_horizon(result: PipelineResult) -> None:
     artifact = result.artifact
     assert artifact.groups == tuple(f"CC-{i:02d}" for i in range(1, 11))
-    assert artifact.categories == frozenset(GuidanceCategory)
+    assert artifact.categories == frozenset(MEASURES)  # every category the ingest counts
     assert artifact.horizon == 12
     assert artifact.snapshot_date == "2025-12-31"
     assert len(artifact.frame) == 10 * 4 * 12
@@ -105,7 +106,9 @@ def test_reconciled_flows_satisfy_the_identity_against_the_anchor(
         anchor = np.array(
             [artifact.get_quota(t, GuidanceCategory.HEADCOUNT)[index] for t in range(12)]
         )
-        hires = np.array([artifact.get_quota(t, GuidanceCategory.HIRES)[index] for t in range(12)])
+        hires = np.array(
+            [artifact.get_quota(t, GuidanceCategory.EXTERNAL_HIRES)[index] for t in range(12)]
+        )
         exits = np.array(
             [artifact.get_quota(t, GuidanceCategory.ATTRITION)[index] for t in range(12)]
         )
