@@ -139,3 +139,17 @@ def test_the_alignment_settings_are_checked_at_load() -> None:
     assert "aligning moves the headcount anchor" in message
     assert "alignment.fixed: ['hires'] aren't among the categories" in message
     assert "alignment.weights: every weight must be positive" in message
+
+
+def test_a_run_aligns_by_the_qp_too(con: duckdb.DuckDBPyConnection) -> None:
+    config = GuidanceConfig.from_mapping(
+        {"horizon": 6, "grouping": "TOPLINE", "alignment": {"method": "qp"}}
+    )
+    result = run(con, config, target_for([300.0, 320.0], bands=[2.0, 2.0]))
+    frame = result.artifact.frame
+    headcount = frame[frame["category"] == "headcount"].sort_values("forecast_month")
+    values = headcount["value"].to_numpy(dtype=float)
+    assert abs(values[2] - 300.0) <= 2.0 + 1e-6
+    assert abs(values[5] - 320.0) <= 2.0 + 1e-6
+    assert result.report["alignment"]["method"] == "qp"
+    assert result.report["alignment"]["max_shortfall"] == 0.0
