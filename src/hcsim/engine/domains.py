@@ -19,6 +19,7 @@ from typing import Final, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.engine.campus import is_campus
 from hcsim.engine.config import BackfillSource, SimulationConfig
 from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
@@ -319,6 +320,7 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     p = ctx.config.models.cancellation.compute_probability(reqs)
     p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
     p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
+    p = np.where(is_campus(reqs, ctx), 0.0, p)  # a campus requisition fills on its schedule
     exits = bernoulli(p, ctx.rng(CANCELLATION))
     return DomainResult(CANCELLATION, openings=RowChange(OPENING, drop=np.flatnonzero(exits)))
 
