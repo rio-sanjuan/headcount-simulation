@@ -17,6 +17,13 @@ setting no layer gives. Objects, such as the schema and the models, are passed i
 
 `load_settings` returns the merged values with the layer each came from, and `load_config`
 builds the configuration from them.
+
+**Records.** `to_record` writes a configuration as plain data: every setting by its path, the
+schema's and the guidance's fingerprints, whether it carries award settings, and each model's
+artifact version. `from_record` builds it again: the caller passes the schema, the guidance, and
+the award settings, which must match what the record names, and each model is re-attached from
+its artifact by version. A model built in code has no version, so a configuration holding one
+can't be written. Every problem is collected, as in loading.
 """
 
 from __future__ import annotations
@@ -35,7 +42,9 @@ from typing import Any, Final
 import yaml
 
 from hcsim.engine.config import (
+    ARTIFACT_DOMAINS,
     GROUPS,
+    MODEL_FIELDS,
     AwardSettings,
     ConfigError,
     DomainModels,
@@ -43,8 +52,12 @@ from hcsim.engine.config import (
 )
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
+from hcsim.model.interface import EntityModel, GroupRateModel
+from hcsim.model.ml.generative import EmpiricalAttributeGenerator
+from hcsim.model.ml.persistence import ArtifactError, load_model
 
 ENV_PREFIX: Final = "HCSIM_CONFIG__"
+RECORD_VERSION: Final = 1
 LAYERS: Final = ("default", "yaml", "environment", "override")
 _TRUE: Final = frozenset({"true", "yes", "1"})
 _FALSE: Final = frozenset({"false", "no", "0"})
@@ -241,6 +254,108 @@ def load_config(
 ) -> SimulationConfig:
     """The configuration from layered settings and the objects passed in code."""
     layered = load_settings(yaml_path=yaml_path, env=env, overrides=overrides)
+    return SimulationConfig(
+        schema=schema, models=models, guidance=guidance, awards=awards, **layered.values
+    )
+
+
+#: What each model field must be, to serve its domain.
+_SERVES: Final[Mapping[str, type]] = {
+    "attrition": EntityModel,
+    "external_fill": EntityModel,
+    "cancellation": EntityModel,
+    "backfill": GroupRateModel,
+    "growth": GroupRateModel,
+    "attributes": EmpiricalAttributeGenerator,
+}
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, tuple):
+        return [_plain(v) for v in value]
+    return value
+
+
+def to_record(config: SimulationConfig) -> dict[str, Any]:
+    """The configuration as plain data, with models by artifact version."""
+    unversioned = config.models.unversioned
+    if unversioned:
+        raise ConfigError(
+            [f"models built in code have no version to record: {', '.join(unversioned)}"]
+        )
+    return {
+        "record_version": RECORD_VERSION,
+        "settings": {path: _plain(getattr(config, s.name)) for path, s in settings().items()},
+        "schema": config.schema.fingerprint(),
+        "guidance": None if config.guidance is None else config.guidance.fingerprint(),
+        "awards": config.awards is not None,
+        "models": dict(config.models.versions),
+    }
+
+
+def _attach(
+    versions: Mapping[str, Any], models_root: Path, schema: SimulationSchema, problems: list[str]
+) -> DomainModels | None:
+    loaded: dict[str, Any] = {}
+    for name in MODEL_FIELDS:
+        version = versions.get(name)
+        if not isinstance(version, str):
+            problems.append(f"the record names no version for the {name} model")
+            continue
+        domain = ARTIFACT_DOMAINS.get(name, name)
+        try:
+            model, artifact = load_model(models_root / domain / version)
+        except (ArtifactError, OSError) as error:
+            problems.append(f"{name}: {error}")
+            continue
+        recorded = artifact.config.get("schema")
+        if recorded is not None and recorded != schema.fingerprint():
+            problems.append(f"{name} {version} was trained on schema {recorded}")
+        if not isinstance(model, _SERVES[name]):
+            problems.append(
+                f"{name} {version} holds a {type(model).__name__}, which can't serve it"
+            )
+        loaded[name] = model
+    if len(loaded) < len(MODEL_FIELDS):
+        return None
+    return DomainModels(**loaded, versions={n: str(versions[n]) for n in MODEL_FIELDS})
+
+
+def from_record(
+    record: Mapping[str, Any],
+    *,
+    schema: SimulationSchema,
+    models_root: Path,
+    guidance: GuidanceForecast | None = None,
+    awards: AwardSettings | None = None,
+) -> SimulationConfig:
+    """Build a configuration from its record, re-attaching each model by version."""
+    problems: list[str] = []
+    if record.get("record_version") != RECORD_VERSION:
+        raise ConfigError([f"unsupported configuration record {record.get('record_version')!r}"])
+    if record.get("schema") != schema.fingerprint():
+        problems.append(
+            f"the record was written for schema {record.get('schema')}, not {schema.fingerprint()}"
+        )
+    wanted = record.get("guidance")
+    given = None if guidance is None else guidance.fingerprint()
+    if wanted != given:
+        problems.append(f"the record names guidance {wanted}, but the call passes {given}")
+    if bool(record.get("awards")) != (awards is not None):
+        need = "needs" if record.get("awards") else "has no"
+        problems.append(f"the record {need} award settings, which the call doesn't match")
+    try:
+        layered = load_settings(env={}, overrides=record.get("settings", {}))
+    except ConfigError as error:
+        problems += [f"settings: {p}" for p in error.problems]
+        layered = None
+    models = _attach(record.get("models", {}), models_root, schema, problems)
+    if problems or layered is None or models is None:
+        raise ConfigError(problems)
     return SimulationConfig(
         schema=schema, models=models, guidance=guidance, awards=awards, **layered.values
     )
