@@ -134,6 +134,21 @@ DEFAULT_GATES: Final = (
 )
 
 
+#: The columns of a shortfall report.
+SHORTFALL_COLUMNS: Final = (
+    "trajectory",
+    "step",
+    "month",
+    "domain",
+    "category",
+    "group",
+    "quota",
+    "eligible",
+    "realized",
+    "shortfall",
+)
+
+
 class InvariantError(AssertionError):
     """State whose counters no longer match its buffers."""
 
@@ -188,6 +203,39 @@ class SimulationResult:
     def flow(self, symbol: str) -> Ints:
         """(trajectories, months, cost centers) for one flow symbol."""
         return np.stack([t.flows[symbol] for t in self.trajectories])
+
+    def shortfalls(self) -> pd.DataFrame:
+        """Every group a guided draw left short of its quota: one row per trajectory, step,
+        domain, category, and group, with the quota, what was eligible, what was realized,
+        and the shortfall. A shortfall means eligibility ran out before the quota did, as
+        when guidance asks for more fills than there are openings to fill."""
+        groups = () if self.config.guidance is None else self.config.guidance.groups
+        rows = [
+            {
+                "trajectory": t.trajectory,
+                "step": q.step,
+                "month": calendar_month(self.config.run_date, q.step),
+                "domain": q.domain,
+                "category": q.category,
+                "group": groups[g],
+                "quota": int(q.record.quota[g]),
+                "eligible": int(q.record.eligible[g]),
+                "realized": int(q.record.realized[g]),
+                "shortfall": int(short),
+            }
+            for t in self.trajectories
+            for q in t.quotas
+            for g, short in enumerate(q.record.shortfall.tolist())
+            if short > 0
+        ]
+        return pd.DataFrame(rows, columns=list(SHORTFALL_COLUMNS))
+
+    def shortfall_totals(self) -> pd.DataFrame:
+        """Shortfalls summed by domain and category, averaged over trajectories."""
+        frame = self.shortfalls()
+        totals = frame.groupby(["domain", "category"])["shortfall"].sum().reset_index()
+        totals["per_trajectory"] = totals["shortfall"] / len(self.trajectories)
+        return totals
 
 
 def calendar_month(run_date: dt.date, step: int) -> int:

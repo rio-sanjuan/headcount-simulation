@@ -85,6 +85,12 @@ class QuotaRecord:
     eligible: Ints
     realized: Ints
 
+    @property
+    def shortfall(self) -> Ints:
+        """What each group's quota asked for and didn't get: eligibility ran short."""
+        result: Ints = np.maximum(self.quota - self.realized, 0)
+        return result
+
 
 @dataclass(frozen=True)
 class DomainResult:
