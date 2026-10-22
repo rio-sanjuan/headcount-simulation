@@ -139,6 +139,7 @@ def _requisitions(n: int, cost_centers: Ints, req_type: int, step: int) -> Buffe
 def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     rows = state.live_employees
     p = ctx.config.models.attrition.compute_probability(rows)
+    p = ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p)
     leave, quotas = _draw(p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION))
     index = np.flatnonzero(leave)
     return DomainResult(
@@ -161,7 +162,8 @@ def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
     rates = _per_cost_center_rates(ctx.config.models.backfill, state.n_cost_centers)
     rng = ctx.rng(BACKFILL)
-    opened = bernoulli(rates[cost_centers], rng)
+    p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, rates[cost_centers])
+    opened = bernoulli(p, rng)
     ledger: dict[str, Ints] = {}
     if ctx.guided(_OPENED):
         groups = ctx.guided_groups(departed, EMPLOYEE, _OPENED)
@@ -187,7 +189,8 @@ def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
     reqs = state.live_openings
     openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
     row_of = np.repeat(np.arange(len(reqs)), openings)  # one entry per fillable opening
-    p = ctx.config.models.external_fill.compute_probability(reqs)[row_of]
+    hazard = ctx.config.models.external_fill.compute_probability(reqs)
+    p = ctx.config.resolved_eligibility.restrict(EXTERNAL_FILL, reqs, hazard)[row_of]
     filled, quotas = _draw(
         p, reqs[row_of], OPENING, GuidanceCategory.EXTERNAL_HIRES, ctx, ctx.rng(EXTERNAL_FILL)
     )
@@ -219,6 +222,7 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     """Requisitions that exit unfilled, with every opening they still carry."""
     reqs = state.live_openings
     p = ctx.config.models.cancellation.compute_probability(reqs)
+    p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
     exits = bernoulli(p, ctx.rng(CANCELLATION))
     return DomainResult(CANCELLATION, openings=RowChange(OPENING, drop=np.flatnonzero(exits)))
 

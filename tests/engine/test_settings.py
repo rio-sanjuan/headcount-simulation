@@ -46,7 +46,15 @@ def test_every_setting_belongs_to_a_group_and_is_documented() -> None:
     objects = {f.name for f in dataclasses.fields(SimulationConfig)} - {
         s.name for s in found.values()
     }
-    assert objects == {"schema", "models", "guidance", "awards", "aligner"}
+    assert objects == {
+        "schema",
+        "models",
+        "guidance",
+        "awards",
+        "eligibility",
+        "aligner",
+        "resolved_eligibility",
+    }
     with pytest.raises(ValueError, match="no field group 'weather'"):
         setting("weather", 1, "")
 
