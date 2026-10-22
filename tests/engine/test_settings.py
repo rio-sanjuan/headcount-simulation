@@ -56,6 +56,7 @@ def test_every_setting_belongs_to_a_group_and_is_documented() -> None:
         "capacity_caps",
         "plan",
         "fill_mix",
+        "campus",
         "aligner",
         "resolved_eligibility",
         "ceiling",

@@ -12,9 +12,9 @@ Histories are per cost center: stocks at the start of every month plus the end o
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
-    H(t+1) = H(t) + F_ext + F_conv + F_tr + F_pend + F_bdy
+    H(t+1) = H(t) + F_ext + F_conv + F_tr + F_camp + F_pend + F_bdy
                   - A - V_tr - V_conv + R_in - R_out + W_in - W_out
-    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_conv - F_tr - F_pend
+    O(t+1) = O(t) + G + G_camp + B_att + B_tr - U - F_ext - F_conv - F_tr - F_camp - F_pend
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.engine.apply import Applied, apply, per_cost_center
+from hcsim.engine.campus import CAMPUS, campus
 from hcsim.engine.config import SimulationConfig
 from hcsim.engine.domains import (
     ATTRITION,
@@ -83,8 +84,10 @@ FLOW_SYMBOLS: Final = (
     "F_ext",
     "F_conv",
     "F_tr",
+    "F_camp",
     "F_pend",
     "F_bdy",
+    "G_camp",
     "V_tr",
     "V_conv",
     "R_in",
@@ -98,6 +101,7 @@ HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "F_ext": +1,
     "F_conv": +1,
     "F_tr": +1,
+    "F_camp": +1,
     "F_pend": +1,
     "F_bdy": +1,
     "A": -1,
@@ -110,12 +114,14 @@ HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
 }
 OPENING_IDENTITY: Final[Mapping[str, int]] = {
     "G": +1,
+    "G_camp": +1,
     "B_att": +1,
     "B_tr": +1,
     "U": -1,
     "F_ext": -1,
     "F_conv": -1,
     "F_tr": -1,
+    "F_camp": -1,
     "F_pend": -1,
 }
 #: Every domain, in step order: the known-event domains, then the sampled ones.
@@ -129,6 +135,7 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (PENDING_STARTS, pending_starts),  # starts take their reserved openings before fills
     DOMAINS[2],  # fills
     (TRANSFERS, transfers),  # places the fills' transfer assignments
+    (CAMPUS, campus),  # opens and fills campus requisitions on their schedule
     *DOMAINS[3:],
 )
 #: The known-event kind each domain fires.
@@ -380,6 +387,8 @@ def _register(config: SimulationConfig) -> Registered:
     mode = config.run_mode or RunMode.UNGUIDED
     names = [name for name, _ in STEP_ORDER]
     defaults = [g for g in DEFAULT_GATES if g.domain in names]
+    if config.campus is None and CAMPUS in names:
+        defaults.append(RegistrationGate(CAMPUS, enabled=False, reason="no campus schedule"))
     if config.models.performance is None and PERFORMANCE in names:
         defaults.append(RegistrationGate(PERFORMANCE, enabled=False, reason="no model"))
     return register(names, (*defaults, *config.gates), mode)

@@ -44,6 +44,7 @@ from typing import Any, Final
 
 import yaml
 
+from hcsim.engine.campus import CampusSchedule
 from hcsim.engine.config import (
     ARTIFACT_DOMAINS,
     GROUPS,
@@ -308,6 +309,8 @@ _SERVES: Final[Mapping[str, type | tuple[type, ...]]] = {
     "family_similarity": SimilarityMatrix,
     "conversion_fill": EntityModel,
     "transfer_fill": EntityModel,
+    "campus_attributes": EmpiricalAttributeGenerator,
+    "campus_fill": EntityModel,
 }
 
 
@@ -319,6 +322,13 @@ def _plain(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_plain(v) for v in value]
     return value
+
+
+def _campus(data: Mapping[str, Any] | None) -> CampusSchedule | None:
+    if data is None:
+        return None
+    openings = {int(m): dict(c) for m, c in data["openings"].items()}
+    return CampusSchedule(openings, tuple(int(m) for m in data["start_months"]))
 
 
 def to_record(config: SimulationConfig) -> dict[str, Any]:
@@ -342,6 +352,14 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "gates": [gate.to_dict() for gate in config.gates],
         "capacity_caps": dict(sorted(config.capacity_caps.items())),
         "plan": None if config.plan is None else config.plan.digest(),
+        "campus": None
+        if config.campus is None
+        else {
+            "openings": {
+                str(m): dict(sorted(c.items())) for m, c in sorted(config.campus.openings.items())
+            },
+            "start_months": list(config.campus.start_months),
+        },
         "models": dict(config.models.versions),
     }
 
@@ -433,5 +451,6 @@ def from_record(
         gates=tuple(gates),
         capacity_caps=dict(record.get("capacity_caps", {})),
         plan=plan,
+        campus=_campus(record.get("campus")),
         **layered.values,
     )

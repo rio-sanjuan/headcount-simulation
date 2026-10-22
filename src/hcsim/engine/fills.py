@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.engine.campus import is_campus
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.categories import GuidanceCategory
@@ -77,6 +78,7 @@ def channel_hazards(openings: Buffer, ctx: StepContext) -> Floats:
             continue
         p = np.asarray(model.compute_probability(openings), dtype=np.float64)
         hazards[:, k] = ctx.config.resolved_eligibility.restrict(domain, openings, p)
+    hazards[is_campus(openings, ctx)] = 0.0  # campus requisitions fill on their schedule
     if ctx.config.fill_mix is not None:
         hazards = np.asarray(ctx.config.fill_mix(hazards, openings, ctx.step), dtype=np.float64)
         if hazards.shape != (len(openings), len(CHANNELS)):

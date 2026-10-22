@@ -29,6 +29,7 @@ from typing import Any, Final, cast
 
 import numpy as np
 
+from hcsim.engine.campus import CampusSchedule
 from hcsim.engine.ceiling import Ceiling, CeilingError
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
 from hcsim.engine.fills import FillMix
@@ -173,6 +174,10 @@ class DomainModels:
     #: never fills.
     conversion_fill: EntityModel | None = None
     transfer_fill: EntityModel | None = None
+    #: Roles for campus requisitions; a run with a campus schedule needs one.
+    campus_attributes: EmpiricalAttributeGenerator | None = None
+    #: Which campus requisitions fill in a start month. Without it, every one does.
+    campus_fill: EntityModel | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -207,6 +212,8 @@ MODEL_FIELDS: Final = (
     "family_similarity",
     "conversion_fill",
     "transfer_fill",
+    "campus_attributes",
+    "campus_fill",
 )
 #: The model fields a run may leave empty.
 OPTIONAL_MODELS: Final = frozenset(
@@ -217,6 +224,8 @@ OPTIONAL_MODELS: Final = frozenset(
         "family_similarity",
         "conversion_fill",
         "transfer_fill",
+        "campus_attributes",
+        "campus_fill",
     }
 )
 #: The artifact domain a model field loads from, where it isn't the field's own name.
@@ -348,6 +357,8 @@ class SimulationConfig:
     plan: AlignmentTarget | None = None
     #: A planner's reshaping of the fill channels' hazards.
     fill_mix: FillMix | None = None
+    #: Campus requisitions by month and cost center, and the months campus hires start.
+    campus: CampusSchedule | None = None
     aligner: GroupAligner | None = field(init=False, default=None)
     #: The rules, resolved against the schema.
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
@@ -364,6 +375,10 @@ class SimulationConfig:
         object.__setattr__(self, "gates", tuple(self.gates))
         problems += [f"gates: {p}" for p in check_gates(self.gates)]
         object.__setattr__(self, "capacity_caps", MappingProxyType(dict(self.capacity_caps)))
+        if self.campus is not None:
+            problems += [f"campus: {p}" for p in self.campus.problems(self.schema)]
+            if self.models.campus_attributes is None:
+                problems.append("campus: a campus schedule needs a campus attribute generator")
         try:
             ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan)
             object.__setattr__(self, "ceiling", ceiling)
