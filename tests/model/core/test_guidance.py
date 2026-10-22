@@ -11,6 +11,7 @@ import pytest
 from hcsim.model.core.categories import GuidanceCategory, UnknownCategoryError
 from hcsim.model.core.guidance import GuidanceArtifactError, GuidanceForecast
 from hcsim.model.core.schema import COST_CENTER, SchemaError, SimulationSchema
+from hcsim.model.data.population import REGULAR, population
 from hcsim.model.interface import ProbabilisticOutput
 
 ATTRITION = GuidanceCategory.ATTRITION
@@ -84,7 +85,7 @@ def test_the_fingerprint_ignores_row_order_but_not_values() -> None:
 
 
 def test_a_recorded_population_changes_the_fingerprint() -> None:
-    stamped = GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, population="tiny")
+    stamped = GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, population="regular")
     assert stamped.fingerprint() != artifact().fingerprint()
 
 
@@ -232,3 +233,136 @@ def test_bad_sample_paths_are_refused(kwargs: dict[str, object], message: str) -
             sample_paths=np.zeros((1, 5, 12)),
             path_index=(("CC-01", "terms"),),
         )
+
+
+# --- stamps, coherence, and combining --------------------------------------------------------
+
+
+def test_populations_are_recorded_as_stamps() -> None:
+    named = GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, population="regular")
+    assert named.population == str(REGULAR.stamp)
+    assert named.population_stamp == REGULAR.stamp
+    assert artifact().population_stamp is None
+    explicit = GuidanceForecast(
+        frame(), COST_CENTER, "2025-12-31", 12, population=str(REGULAR.stamp)
+    )
+    assert explicit.population == named.population
+    named.check_population(REGULAR)
+    with pytest.raises(GuidanceArtifactError, match="built for population regular@"):
+        named.check_population(population("every_account"))
+    for bad in ("staff", "regular@"):
+        with pytest.raises(GuidanceArtifactError):
+            GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, population=bad)
+
+
+def test_the_alignment_stamp_is_recorded_and_checked(tmp_path: Path) -> None:
+    aligned = GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, aligned_to="at1-0123")
+    assert aligned.metadata()["aligned_to"] == "at1-0123"
+    assert aligned.fingerprint() != artifact().fingerprint()
+    aligned.save(tmp_path / "a")
+    assert GuidanceForecast.load(tmp_path / "a").aligned_to == "at1-0123"
+    for bad in ("", "a b"):
+        with pytest.raises(GuidanceArtifactError, match="aligned_to must be a digest"):
+            GuidanceForecast(frame(), COST_CENTER, "2025-12-31", 12, aligned_to=bad)
+
+
+def tree(hires: list[float]) -> pd.DataFrame:
+    """Hires and both its parts, for CC-01 and CC-02 at step 0."""
+    return pd.DataFrame(
+        {
+            "forecast_month": [0] * 6,
+            "category": [
+                "hires",
+                "hires",
+                "external_hires",
+                "external_hires",
+                "conversion_hires",
+                "conversion_hires",
+            ],
+            "value": [*hires, 3.0, 1.0, 1.0, 1.0],
+            "cost_center": ["CC-01", "CC-02"] * 3,
+        }
+    )
+
+
+def test_a_parent_must_be_the_sum_of_its_carried_parts() -> None:
+    GuidanceForecast(tree([4.0, 2.0]), COST_CENTER, "2025-12-31", 12)  # coherent
+    with pytest.raises(GuidanceArtifactError, match="2 cells where a fill-tree parent") as error:
+        GuidanceForecast(tree([9.0, 2.5]), COST_CENTER, "2025-12-31", 12)
+    message = str(error.value)
+    assert message.index("CC-01: 9 against 4") < message.index("CC-02: 2.5 against 2")
+    alone = tree([9.0, 2.5])
+    alone = alone[alone["category"] != "conversion_hires"]  # a part missing: nothing to check
+    GuidanceForecast(alone, COST_CENTER, "2025-12-31", 12)
+
+
+def test_artifacts_covering_different_series_combine() -> None:
+    hires = artifact(category=["hires"] * 5)
+    attrition = artifact()
+    combined = GuidanceForecast.combine(
+        [
+            GuidanceForecast(
+                attrition.frame[attrition.frame["category"] == "attrition"],
+                COST_CENTER,
+                "2025-12-31",
+                12,
+            ),
+            hires,
+        ]
+    )
+    assert combined.categories == {ATTRITION, HIRES}
+    assert len(combined.frame) == 4 + 5
+    with_paths = GuidanceForecast(
+        frame(),
+        COST_CENTER,
+        "2025-12-31",
+        12,
+        sample_paths=np.zeros((1, 3, 12)),
+        path_index=(("CC-01", "attrition"),),
+    )
+    other = GuidanceForecast(
+        frame(category=["promotions"] * 5),
+        COST_CENTER,
+        "2025-12-31",
+        12,
+        sample_paths=np.ones((1, 3, 12)),
+        path_index=(("CC-01", "promotions"),),
+    )
+    joined = GuidanceForecast.combine([with_paths, other])
+    assert joined.path_index == (("CC-01", "attrition"), ("CC-01", "promotions"))
+
+
+def test_combining_refuses_artifacts_that_don_t_fit() -> None:
+    base = artifact()
+    with pytest.raises(GuidanceArtifactError, match="nothing to combine"):
+        GuidanceForecast.combine([])
+    with pytest.raises(GuidanceArtifactError, match="series carried twice"):
+        GuidanceForecast.combine([base, base])
+    later = GuidanceForecast(frame(category=["hires"] * 5), COST_CENTER, "2026-01-31", 12)
+    with pytest.raises(GuidanceArtifactError, match="differs in grouping, snapshot"):
+        GuidanceForecast.combine([base, later])
+    quantiled = GuidanceForecast(
+        frame(category=["hires"] * 5, q50=[1.0] * 5), COST_CENTER, "2025-12-31", 12
+    )
+    with pytest.raises(GuidanceArtifactError, match="carries other columns"):
+        GuidanceForecast.combine([base, quantiled])
+    pathed = GuidanceForecast(
+        frame(category=["hires"] * 5),
+        COST_CENTER,
+        "2025-12-31",
+        12,
+        sample_paths=np.zeros((1, 3, 12)),
+        path_index=(("CC-01", "hires"),),
+    )
+    with pytest.raises(GuidanceArtifactError, match="differs in carrying sample paths"):
+        GuidanceForecast.combine([base, pathed])
+    fewer = GuidanceForecast(
+        frame(category=["promotions"] * 5),
+        COST_CENTER,
+        "2025-12-31",
+        12,
+        sample_paths=np.zeros((1, 2, 12)),
+        path_index=(("CC-01", "promotions"),),
+    )
+    with pytest.raises(GuidanceArtifactError, match="sample paths differ in count"):
+        GuidanceForecast.combine([pathed, fewer])
