@@ -54,6 +54,7 @@ CANCELLATION: Final = "cancellation"
 GROWTH: Final = "growth"
 
 _OPENED = GuidanceCategory.REQUISITIONS_OPENED
+_CLOSED = GuidanceCategory.REQUISITIONS_CLOSED_UNFILLED
 
 
 @dataclass(frozen=True)
@@ -315,14 +316,55 @@ def backfill_transfer(state: SimulationState, ctx: StepContext) -> DomainResult:
 
 
 def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """Requisitions that exit unfilled, with every opening they still carry."""
+    """Requisitions that exit unfilled, with every opening they still carry.
+
+    Each requisition has a monthly hazard from the cancellation model; a reserved requisition,
+    a campus one, and any an eligibility rule excludes have none. Where guidance covers the
+    group with `requisitions_closed_unfilled`, its quota counts openings: the group's
+    requisitions are taken in Gumbel-top-k order on their hazards, each weighing its openings,
+    and one is taken when it still fits, so the group closes as close to its quota as its
+    requisitions allow without passing it. Elsewhere each requisition draws on its own.
+    """
     reqs = state.live_openings
     p = ctx.config.models.cancellation.compute_probability(reqs)
     p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
     p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
     p = np.where(is_campus(reqs, ctx), 0.0, p)  # a campus requisition fills on its schedule
-    exits = bernoulli(p, ctx.rng(CANCELLATION))
-    return DomainResult(CANCELLATION, openings=RowChange(OPENING, drop=np.flatnonzero(exits)))
+    rng = ctx.rng(CANCELLATION)
+    exits = bernoulli(p, rng)
+    quotas: dict[str, QuotaRecord] = {}
+    if ctx.guided(_CLOSED):
+        groups = ctx.guided_groups(reqs, OPENING, _CLOSED)
+        weights = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
+        chosen, record = weighted_top_k(p, weights, groups, ctx.quota(_CLOSED), rng)
+        exits = np.where(groups >= 0, chosen, exits)
+        quotas[_CLOSED.value] = record
+    return DomainResult(
+        CANCELLATION, openings=RowChange(OPENING, drop=np.flatnonzero(exits)), quotas=quotas
+    )
+
+
+def weighted_top_k(
+    p: Probabilities, weights: Ints, groups: Ints, quota: Ints, rng: np.random.Generator
+) -> tuple[Mask, QuotaRecord]:
+    """Per group, rows in Gumbel-top-k order on `p`, each taken when its weight still fits in
+    what's left of the group's quota. Rows with no chance, or no group, are never taken."""
+    with np.errstate(divide="ignore"):
+        keys = np.log(np.clip(p, 0.0, 1.0)) + rng.gumbel(size=len(p))
+    eligible_rows = np.flatnonzero((groups >= 0) & (p > 0))
+    order = eligible_rows[np.lexsort((-keys[eligible_rows], groups[eligible_rows]))]
+    left = quota.astype(np.int64).copy()
+    chosen = np.zeros(len(p), dtype=bool)
+    for row in order.tolist():
+        g = int(groups[row])
+        if 0 < weights[row] <= left[g]:
+            chosen[row] = True
+            left[g] -= int(weights[row])
+    size = len(quota)
+    eligible = np.bincount(groups[eligible_rows], weights=weights[eligible_rows], minlength=size)
+    realized = np.bincount(groups[chosen], weights=weights[chosen], minlength=size)
+    record = QuotaRecord(quota, eligible.astype(np.int64), realized.astype(np.int64))
+    return chosen, record
 
 
 # --- growth -----------------------------------------------------------------------------------
