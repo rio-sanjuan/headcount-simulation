@@ -12,8 +12,8 @@ Histories are per cost center: stocks at the start of every month plus the end o
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
-    H(t+1) = H(t) + F_ext - A - V_conv + R_in - R_out + W_in - W_out
-    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext
+    H(t+1) = H(t) + F_ext + F_pend + F_bdy - A - V_conv + R_in - R_out + W_in - W_out
+    O(t+1) = O(t) + G + B_att + B_tr - U - F_ext - F_pend
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from hcsim.engine.known_domains import (
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
 from hcsim.engine.modes import RunMode
+from hcsim.engine.pending import PENDING_STARTS, pending_starts
 from hcsim.engine.performance import PERFORMANCE, performance
 from hcsim.engine.promotion import PROMOTION, promotion
 from hcsim.engine.results import QuotaRecord
@@ -76,10 +77,22 @@ FLOWS: Final[Mapping[str, str]] = {
     GROWTH: "G",
 }
 #: Every flow a run records.
-FLOW_SYMBOLS: Final = (*FLOWS.values(), "V_conv", "R_in", "R_out", "W_in", "W_out", "Pi")
+FLOW_SYMBOLS: Final = (
+    *FLOWS.values(),
+    "F_pend",
+    "F_bdy",
+    "V_conv",
+    "R_in",
+    "R_out",
+    "W_in",
+    "W_out",
+    "Pi",
+)
 #: The runtime accounting identities: each flow's sign in the change of a stock.
 HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
     "F_ext": +1,
+    "F_pend": +1,
+    "F_bdy": +1,
     "A": -1,
     "V_conv": -1,
     "R_in": +1,
@@ -93,6 +106,7 @@ OPENING_IDENTITY: Final[Mapping[str, int]] = {
     "B_tr": +1,
     "U": -1,
     "F_ext": -1,
+    "F_pend": -1,
 }
 #: Every domain, in step order: the known-event domains, then the sampled ones.
 STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
@@ -101,13 +115,16 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (OTHER_MOVEMENT, other_movement),
     (PERFORMANCE, performance),
     (PROMOTION, promotion),
-    *DOMAINS,
+    *DOMAINS[:2],  # attrition, then backfill for its departures
+    (PENDING_STARTS, pending_starts),  # starts take their reserved openings before fills
+    *DOMAINS[2:],
 )
 #: The known-event kind each domain fires.
 FIRES: Final[Mapping[str, EventKind]] = {
     **KINDS,
     PROMOTION: EventKind.PROMOTION,
     ATTRITION: EventKind.TERMINATION,
+    PENDING_STARTS: EventKind.PENDING_START,
 }
 #: Gates every run has: other movement comes only from replayed history.
 DEFAULT_GATES: Final = (

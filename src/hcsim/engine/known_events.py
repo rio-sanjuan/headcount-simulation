@@ -185,23 +185,27 @@ def from_history(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> list[Know
     ]
 
 
-def from_pending_starts(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> list[KnownEvent]:
-    """Offers accepted by the last snapshot before the run, starting on or after it."""
+def from_pending_starts(
+    con: duckdb.DuckDBPyConnection, run_date: dt.date, staleness_days: int = 0
+) -> list[KnownEvent]:
+    """Offers accepted by the last snapshot before the run, starting on or after it. An offer
+    whose start date passed less than `staleness_days` before the run is still expected, and
+    starts in the run's first month; an older one is stale and left out."""
     cost_center = role_column(con, "pending_start")
     starts = con.execute(
         f"SELECT employee_id, req_id, {cost_center} AS cost_center, job_code, location, company, "
         "start_date FROM pending_start "
         "WHERE snapshot_date = (SELECT max(snapshot_date) FROM pending_start "
         "                       WHERE snapshot_date < $run) "
-        "AND start_date >= $run ORDER BY employee_id",
-        {"run": run_date},
+        "AND start_date >= $earliest ORDER BY employee_id",
+        {"run": run_date, "earliest": run_date - dt.timedelta(days=staleness_days)},
     ).df()
     columns = ["employee_id", "req_id", "cost_center", "job_code", "location", "company"]
     rows = zip(*(starts[c] for c in columns), starts["start_date"], strict=True)
     return [
         KnownEvent(
             EventKind.PENDING_START,
-            step_of(run_date, start),
+            max(0, step_of(run_date, start)),
             Source.PENDING_START,
             employee_id=int(employee),
             req_id=int(req),
@@ -325,13 +329,15 @@ def known_events(
     programs: Sequence[TerminationProgram] = (),
     history: bool = True,
     pending_starts: bool = True,
+    staleness_days: int = 0,
 ) -> KnownEvents:
     """Every known event of a run from the warehouse and the declarations."""
     sources: list[tuple[Source, Iterable[KnownEvent]]] = []
     if history:
         sources.append((Source.HISTORY, from_history(con, run_date)))
     if pending_starts:
-        sources.append((Source.PENDING_START, from_pending_starts(con, run_date)))
+        starts = from_pending_starts(con, run_date, staleness_days)
+        sources.append((Source.PENDING_START, starts))
     sources.append((Source.DECLARED, from_declarations(movements, run_date)))
     sources.append((Source.PROGRAM, from_programs(programs, run_date)))
     return collect(run_date, months, sources)
