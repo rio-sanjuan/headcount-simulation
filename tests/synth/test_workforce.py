@@ -29,6 +29,7 @@ FLOW_SIGN = {
     "PROMO": 0,
     "RECLASS": 0,
     "RIF": -1,
+    "TERM_PENDING": 0,
 }
 
 
@@ -107,7 +108,7 @@ def test_hires_get_fresh_ids_and_their_hire_date(world: World) -> None:
 
 def test_the_truth_manifest_records_every_process(world: World) -> None:
     processes = world.truth["processes"]
-    assert set(processes) == {"attrition", "equity", "movements", "programs"}
+    assert set(processes) == {"attrition", "backfill", "equity", "movements", "programs"}
     assert len(processes["attrition"]["cost_center_effect"]) == 10
 
 
@@ -147,12 +148,18 @@ def test_departures_recover_the_true_hazard(small_world: World) -> None:
         code=lambda f: f["rating"].astype(str).map(scale.index),
         cycle_date=lambda f: pd.to_datetime(f["cycle_date"]),
     )
-    active = txn[txn["trans_type"] == "ACTIVE"]
+    active = txn[(txn["trans_type"] == "ACTIVE") & (txn["account"].astype(str) == "ACCT-100")]
     months = sorted(active["month"].unique())
     shocks = _shock_multiplier(world, months[1:])
+    # Someone who gave notice sits out the draw until they leave on schedule.
+    pending = txn[txn["trans_type"] == "TERM_PENDING"].assign(
+        reported=lambda f: pd.to_datetime(f["reporting_date"]).dt.to_period("M")
+    )
     expected = variance = 0.0
     for previous, month in itertools.pairwise(months):
         at_risk = active[active["month"] == previous]
+        waiting = pending[(pending["reported"] < month) & (pending["month"] >= month)]
+        at_risk = at_risk[~at_risk["employee_id"].isin(waiting["employee_id"])]
         start, end = month.start_time, month.to_timestamp(how="end").normalize()
         latest = ratings[ratings["cycle_date"] <= start].drop_duplicates("employee_id", keep="last")
         code = at_risk["employee_id"].map(latest.set_index("employee_id")["code"]).fillna(-1)
@@ -169,7 +176,9 @@ def test_departures_recover_the_true_hazard(small_world: World) -> None:
         )
         expected += float(h.sum())
         variance += float((h * (1 - h)).sum())
-    observed = int((txn["trans_type"] == "TERM").sum())
+    # A hazard event is a departure at once or a notice; a scheduled departure isn't a new one.
+    terms = txn[txn["trans_type"] == "TERM"]
+    observed = int((~terms["employee_id"].isin(pending["employee_id"])).sum()) + len(pending)
     stat_check(observed, expected, float(np.sqrt(variance)), label="departures")
 
 

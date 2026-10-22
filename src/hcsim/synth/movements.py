@@ -113,7 +113,7 @@ class MovementProcess:
         """Conversions out, contingent ends, and contingent starts, on days in the month."""
         t, wf = self.truth, self.workforce
         days = MonthDays(month, self.config.dates)
-        active = wf.active()
+        active = wf.available()
         out = active[self.rng.random(len(active)) < t.conversion_out_hazard]
         wf.convert_out(out, self.contingent_account, days.sample("business", len(out), self.rng))
         pool = wf.contingent_pool()

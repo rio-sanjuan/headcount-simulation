@@ -5,6 +5,8 @@ integer-coded columns, with an active flag and a contingent flag. Every change g
 and each change appends transaction rows that the data contract carries:
 
 - `HIRE` (+1) and `TERM` (-1) for regular employees, and `RIF` (-1) for a termination program.
+  Notice of a future departure is `TERM_PENDING` (0): reported on the day of notice, and dated
+  on the day the person will leave.
 - Two legs for a move between roles, `XFER_OUT` (-1) then `XFER_IN` (+1), and for a
   reorganization, `REORG_OUT` (-1) then `REORG_IN` (+1).
 - `PROMO` (0) and `RECLASS` (0), which change the job in place.
@@ -41,12 +43,14 @@ TRANS_TYPES: Final = (
     "CTG_START",
     "CTG_END",
     "RIF",
+    "TERM_PENDING",
 )
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
 #: Transaction columns, coded. `*_previous` hold the role before a move.
 TXN_DTYPES: Final[dict[str, DTypeLike]] = {
     "employee_id": np.int64,
+    "reporting_date": "datetime64[D]",
     "event_date": "datetime64[D]",
     "trans_type": np.int8,
     "amount": np.int8,
@@ -72,10 +76,18 @@ class Workforce:
                 "rating": np.int8,  # a code into the rating scale; -1 until first rated
                 "readiness": np.float32,  # latent promotion readiness
                 "contingent": np.bool_,  # in the contingent pool, outside regular headcount
+                "exit_month": np.int32,  # a departure given notice for this month; -1 for none
+                "exit_date": "datetime64[D]",  # and its day
             }
         )
         self.people.append(
-            len(ids), employee_id=ids, hire_date=hire_dates, active=True, rating=-1, **roles
+            len(ids),
+            employee_id=ids,
+            hire_date=hire_dates,
+            active=True,
+            rating=-1,
+            exit_month=-1,
+            **roles,
         )
         self.next_id = int(ids.max()) + 1 if len(ids) else 1
         self.log = EventLog(list(TXN_DTYPES))
@@ -86,6 +98,11 @@ class Workforce:
     def active(self) -> Index:
         """Regular employees in post."""
         return np.flatnonzero(self.people.column("active") & ~self.people.column("contingent"))
+
+    def available(self) -> Index:
+        """Regular employees in post who haven't given notice: the ones a move can take."""
+        regular = self.people.column("active") & ~self.people.column("contingent")
+        return np.flatnonzero(regular & (self.people.column("exit_month") < 0))
 
     def contingent_pool(self) -> Index:
         return np.flatnonzero(self.people.column("active") & self.people.column("contingent"))
@@ -103,12 +120,14 @@ class Workforce:
         amount: int,
         dates: NDArray[np.datetime64] | np.datetime64,
         previous: Roles | None = None,
+        reported: NDArray[np.datetime64] | None = None,
     ) -> None:
         now = self.roles(index)
         before = previous if previous is not None else now
         self.log.add(
             len(index),
             employee_id=self.people.column("employee_id")[index],
+            reporting_date=dates if reported is None else reported,
             event_date=dates,
             trans_type=_CODE[trans_type],
             amount=amount,
@@ -126,7 +145,7 @@ class Workforce:
         ids = self.next_id + np.arange(n, dtype=np.int64)
         self.next_id += n
         index = self.people.append(
-            n, employee_id=ids, hire_date=dates, active=True, rating=-1, **roles
+            n, employee_id=ids, hire_date=dates, active=True, rating=-1, exit_month=-1, **roles
         )
         self._record(index, "HIRE", +1, dates)
         return ids
@@ -154,6 +173,18 @@ class Workforce:
             self.people.column(name)[index] = values
         self._record(index, "PROMO", 0, dates, previous=before)
 
+    def give_notice(
+        self,
+        index: Index,
+        notice_dates: NDArray[np.datetime64],
+        exit_dates: NDArray[np.datetime64],
+        exit_months: NDArray[np.integer],
+    ) -> None:
+        """Schedule departures: a `TERM_PENDING` row reported today and dated on the exit."""
+        self._record(index, "TERM_PENDING", 0, exit_dates, reported=notice_dates)
+        self.people.column("exit_month")[index] = exit_months
+        self.people.column("exit_date")[index] = exit_dates
+
     def reorganize(self, index: Index, cost_center: int, dates: NDArray[np.datetime64]) -> None:
         """Move people to another cost center in a batch: `REORG_OUT`, then `REORG_IN`."""
         before = self.roles(index)
@@ -178,6 +209,7 @@ class Workforce:
             hire_date=start_dates,
             active=True,
             rating=-1,
+            exit_month=-1,
             contingent=True,
             **roles,
         )
@@ -187,7 +219,14 @@ class Workforce:
         ids = self.next_id + np.arange(n, dtype=np.int64)
         self.next_id += n
         index = self.people.append(
-            n, employee_id=ids, hire_date=dates, active=True, rating=-1, contingent=True, **roles
+            n,
+            employee_id=ids,
+            hire_date=dates,
+            active=True,
+            rating=-1,
+            exit_month=-1,
+            contingent=True,
+            **roles,
         )
         self._record(index, "CTG_START", +1, dates)
         return ids
