@@ -134,6 +134,17 @@ def apply(
     return _concat(frame, extra)
 
 
+def snapshot_gaps(
+    config: WorldConfig, month_ends: list[pd.Timestamp], rng: np.random.Generator
+) -> list[str]:
+    """The month-ends a missed feed run leaves out of `req_snapshot`, as ISO dates."""
+    share = config.quirks.snapshot_gap_share
+    if share <= 0:
+        return []
+    missed = rng.random(len(month_ends)) < share
+    return [str(d.date()) for d, gone in zip(month_ends, missed, strict=True) if gone]
+
+
 def aggregate_only(
     config: WorldConfig, agg: pd.DataFrame, rng: np.random.Generator
 ) -> pd.DataFrame:
