@@ -17,7 +17,7 @@ from hcsim.engine.state import BufferCapacityError, SimulationState
 from hcsim.financial.prices import StaticPrice
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.sizing import NewHireGapFill
-from hcsim.financial.timing import AwardTiming, LagDistribution
+from hcsim.financial.timing import AnnualCutoff, AwardTiming, LagDistribution
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import (
@@ -419,3 +419,18 @@ def test_a_timed_grant_is_awarded_and_vests_from_its_award_month() -> None:
     assert later.shares.sum() == now.shares.sum()
     with pytest.raises(RuntimeError, match="are timed, so need a random stream"):
         hire(timed)
+
+
+def test_an_eligibility_cutoff_leaves_out_recipients_hired_after_it() -> None:
+    cutoff = dataclasses.replace(awards(), eligibility={"new_hire": AnnualCutoff(cutoff_month=1)})
+    state = make_state(ledger=True)
+    state.price = StaticPrice(100.0)
+    state.employees[:4, EmployeeColumn.HIRE_STEP] = [-12, -1, 0, 2]
+    grant = (Grant("new_hire", rows="written"),)
+    change = RowChange(EMPLOYEE, write_index=np.arange(4), write_rows=state.employees[:4].copy())
+    # At step 2, in March, the cutoff is January: step 0. The last two were hired at or after it.
+    applied = apply(state, result(employees=change, grants=grant), 2, SCHEMA, cutoff, 3)
+    assert applied.ineligible_grants == 2
+    assert state.ledger is not None
+    assert set(state.ledger.tranches().holder.tolist()) == {0, 1}
+    assert (state.employees[2:4, EmployeeColumn.BASE_SALARY] == 0).all()

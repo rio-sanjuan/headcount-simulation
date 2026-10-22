@@ -12,6 +12,11 @@ itself can land later, as a grant committee meets. Per award type, `AwardTiming`
 
 The award month anchors the grant's vesting, and its expense accrues from it. Lags are drawn
 from the run's own seeded stream, so a run's timing is reproducible.
+
+**Eligibility** (`AnnualCutoff`). An annual award goes only to those hired before the latest
+cutoff month: with an April cycle and an October cutoff, someone hired in October or later waits
+for the next cycle. The rule reads each recipient's hire step, so it holds for the seeded
+workforce, whose hire steps lie before the run, as for hires the run makes.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.financial.calculator import SizingError
+from hcsim.model.core.layouts import Buffer, EmployeeColumn
 
 Ints = NDArray[np.int64]
 #: The longest lag a distribution can give, in months.
@@ -113,4 +119,28 @@ class AwardTiming:
                 steps = np.where(held, steps + 1, steps)
                 months = np.where(held, months % 12 + 1, months)
         out: Ints = steps.astype(np.int64)
+        return out
+
+
+@dataclass(frozen=True)
+class AnnualCutoff:
+    """An annual award's eligibility: recipients hired before the latest `cutoff_month`, a
+    calendar month, at or before the award month."""
+
+    cutoff_month: int
+
+    def __post_init__(self) -> None:
+        if self.cutoff_month not in range(1, 13):
+            raise SizingError(f"a cutoff is a calendar month 1-12, not {self.cutoff_month}")
+
+    def cutoff_step(self, step: int, calendar_month: int) -> int:
+        """The step of the latest cutoff month at or before `step`, in `calendar_month`."""
+        if calendar_month not in range(1, 13):
+            raise SizingError(f"a calendar month runs 1-12, not {calendar_month}")
+        return step - (calendar_month - self.cutoff_month) % 12
+
+    def eligible(self, rows: Buffer, step: int, calendar_month: int) -> NDArray[np.bool_]:
+        """Which rows were hired before the cutoff, by their hire step."""
+        hired = np.asarray(rows[:, EmployeeColumn.HIRE_STEP], dtype=np.float64)
+        out: NDArray[np.bool_] = hired < self.cutoff_step(step, calendar_month)
         return out
