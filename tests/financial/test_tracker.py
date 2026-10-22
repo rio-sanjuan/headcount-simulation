@@ -6,7 +6,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hcsim.financial.tracker import NOT_FORFEITED, TAIL, HolderLedger, TrackerError, VestBuffer
+from hcsim.financial.tracker import (
+    EIGHT_D,
+    NINE_D,
+    NOT_FORFEITED,
+    TAIL,
+    HolderLedger,
+    TrackerError,
+    VestBuffer,
+)
 
 
 def schedule(**vests: int) -> np.ndarray:
@@ -189,3 +197,59 @@ def test_scratch_is_the_unpublished_part_of_each_tranches_expense() -> None:
     assert split.published.tolist() == [[10.0, 10.0, 0.0, 0.0, 10.0, 10.0]]
     assert split.scratch.tolist() == [[0.0, 0.0, 10.0, 10.0, 0.0, 0.0]]
     assert np.array_equal(split.total, expense)
+
+
+# --- views ---------------------------------------------------------------------------------------
+
+
+def granted() -> HolderLedger:
+    """Holder 1, granted in cost center 3 at month 0, vesting at 12; holder 2, granted in cost
+    center 4 at month 2, vesting at 14 but leaving at 6."""
+    ledger = HolderLedger()
+    ledger.buffer.cover(24)
+    ledger.record(np.array([1]), 0, schedule(m12=10), 2, np.array([5]), np.array([3]))
+    ledger.record(np.array([2]), 2, schedule(m12=20), 1, np.array([6]), np.array([4]))
+    ledger.forfeit(np.array([2]), 6)
+    return ledger
+
+
+def test_the_8d_view_is_one_row_per_tranche_with_its_eight_dimensions() -> None:
+    view = granted().view8()
+    assert tuple(view.columns) == EIGHT_D
+    assert view.to_dict("records") == [
+        {
+            "holder": 1,
+            "award_month": 0,
+            "vest_month": 12,
+            "shares": 10,
+            "forfeit_month": NOT_FORFEITED,
+            "award_type": 2,
+            "level": 5,
+            "cost_center": 3,
+        },
+        {
+            "holder": 2,
+            "award_month": 2,
+            "vest_month": 14,
+            "shares": 20,
+            "forfeit_month": 6,
+            "award_type": 1,
+            "level": 6,
+            "cost_center": 4,
+        },
+    ]
+
+
+def test_the_9d_view_cuts_each_tranche_at_its_holders_moves() -> None:
+    ledger = granted()
+    ledger.move(np.array([1]), 4, np.array([8]))  # inside holder 1's accrual
+    ledger.move(np.array([1]), 20, np.array([9]))  # after its vest: no piece
+    ledger.move(np.array([2]), 1, np.array([7]))  # before holder 2's award: it starts there
+    ledger.move(np.array([2]), 9, np.array([5]))  # after holder 2 left: no piece
+    view = ledger.view9()
+    assert tuple(view.columns) == NINE_D
+    pieces = view[["holder", "cost_center", "valid_from"]].values.tolist()
+    assert pieces == [[1, 3, 0], [1, 8, 4], [2, 7, 2]]
+    # Each piece keeps its tranche's other dimensions.
+    assert view["shares"].tolist() == [10, 10, 20]
+    assert granted().view9()["cost_center"].tolist() == [3, 4]  # no moves: one piece each
