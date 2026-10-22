@@ -96,6 +96,17 @@ class StepContext:
         flags = np.concatenate([np.zeros(0, dtype=bool), *(d.anticipated for d in chosen)])
         return rows, flags
 
+    def reserved(self, reqs: Buffer) -> Ints:
+        """Openings held back on each requisition row for pending starts still to come."""
+        if self.known is None:
+            return np.zeros(len(reqs), dtype=np.int64)
+        return self.known.plan.reserved(reqs, self.step)
+
+    def fillable(self, reqs: Buffer) -> Ints:
+        """The openings fills may take on each requisition row."""
+        result: Ints = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64) - self.reserved(reqs)
+        return result
+
     def known_at(self, kind: EventKind) -> list[ResolvedEvent]:
         """This step's known events of `kind`."""
         return [] if self.known is None else self.known.at(self.step, kind)
@@ -164,10 +175,12 @@ def draw(
     ctx: StepContext,
     rng: np.random.Generator,
     known: Mask | None = None,
+    used: Ints | None = None,
 ) -> tuple[Mask, dict[str, QuotaRecord]]:
     """Quota sampling for rows in covered groups, independent draws for the rest. Rows in
-    `known` already experience the event: they count against their group's quota, and sampling
-    takes only what's left of it."""
+    `known` already experience the event, and `used` counts, per group, what another domain
+    already realized of the category this step: both count against the group's quota, and
+    sampling takes only what's left of it."""
     independent = bernoulli(p, rng)
     if not ctx.guided(category):
         return independent, {}
@@ -177,6 +190,8 @@ def draw(
     if known is not None:
         covered = known & (groups >= 0)
         taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
+    if used is not None:
+        taken = taken + used
     selection = quota_select(p, groups, np.maximum(quota - taken, 0), rng)
     mask = np.where(groups >= 0, selection.mask, independent)
     record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken)
@@ -305,11 +320,19 @@ def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
     A fill hires an external candidate into the requisition's role and consumes one opening."""
     reqs = state.live_openings
     openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
-    row_of = np.repeat(np.arange(len(reqs)), openings)  # one entry per fillable opening
+    # Openings reserved for a pending start are held back.
+    row_of = np.repeat(np.arange(len(reqs)), ctx.fillable(reqs))  # one per fillable opening
     hazard = ctx.config.models.external_fill.compute_probability(reqs)
     p = ctx.config.resolved_eligibility.restrict(EXTERNAL_FILL, reqs, hazard)[row_of]
+    used = state.category_ledger.get(GuidanceCategory.EXTERNAL_HIRES.value)
     filled, quotas = draw(
-        p, reqs[row_of], OPENING, GuidanceCategory.EXTERNAL_HIRES, ctx, ctx.rng(EXTERNAL_FILL)
+        p,
+        reqs[row_of],
+        OPENING,
+        GuidanceCategory.EXTERNAL_HIRES,
+        ctx,
+        ctx.rng(EXTERNAL_FILL),
+        used=used,
     )
     source = row_of[filled]
     per_row = np.bincount(source, minlength=len(reqs)).astype(np.int64)
@@ -340,6 +363,7 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     reqs = state.live_openings
     p = ctx.config.models.cancellation.compute_probability(reqs)
     p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
+    p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
     exits = bernoulli(p, ctx.rng(CANCELLATION))
     return DomainResult(CANCELLATION, openings=RowChange(OPENING, drop=np.flatnonzero(exits)))
 
