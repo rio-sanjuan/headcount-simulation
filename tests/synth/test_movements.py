@@ -60,7 +60,7 @@ def test_regular_stock_moves_only_with_regular_flows(small_world: World) -> None
 def test_the_contingent_pool_books_to_its_own_account(small_world: World) -> None:
     t = txn(small_world)
     pool = t[t["account"] == CONTINGENT]
-    assert set(pool["trans_type"]) <= {"ACTIVE", "CTG_START", "CTG_END"}
+    assert set(pool["trans_type"]) <= {"ACTIVE", "CTG_START", "CTG_END", "ADMIN"}
     assert set(t.loc[t["trans_type"].isin(["CTG_START", "CTG_END"]), "account"]) == {CONTINGENT}
     sizes = pool[pool["trans_type"] == "ACTIVE"].groupby("month").size()
     regular = t[(t["account"] == REGULAR) & (t["trans_type"] == "ACTIVE")].groupby("month").size()

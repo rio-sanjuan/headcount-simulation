@@ -92,6 +92,15 @@ def _group_expression(grouping: str) -> str:
 
 
 def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
+    unknown = [
+        row[0]
+        for row in con.execute(
+            "SELECT DISTINCT trans_type FROM workforce_txn "
+            "WHERE trans_type NOT IN (SELECT trans_type FROM dim_trans_type) ORDER BY 1"
+        ).fetchall()
+    ]
+    if unknown:
+        raise IngestionError(f"transaction codes missing from dim_trans_type: {unknown}")
     group = _group_expression(grouping)
     parts = []
     for category, sql in MEASURES.items():

@@ -28,7 +28,9 @@ def vacancies(world: World) -> pd.DataFrame:
         ]
     ]
     rows = pd.concat([immediate, txn[txn["trans_type"] == "XFER_OUT"], pending])
-    return rows.assign(level=rows["job_code"].map(jobs), day=pd.to_datetime(rows["reporting_date"]))
+    # A vacancy arises on the event's day; a notice, on the day it's given (its reporting day).
+    day = rows["event_date"].where(rows["trans_type"] != "TERM_PENDING", rows["reporting_date"])
+    return rows.assign(level=rows["job_code"].map(jobs), day=pd.to_datetime(day))
 
 
 def linked(world: World) -> pd.DataFrame:

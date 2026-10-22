@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth import equity, population, process, structure
+from hcsim.synth import codes, equity, population, process, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -48,9 +48,13 @@ TXN_COLUMNS = [
     "job_code",
     "job_code_previous",
     "location",
+    "location_previous",
     "company",
+    "company_previous",
     "account",
+    "account_previous",
     "is_manager",
+    "is_manager_previous",
     "hire_date",
 ]
 REQ_COLUMNS = [
@@ -115,13 +119,31 @@ class _Labels:
         return values.astype("datetime64[s]")
 
 
-def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
+def _reporting_dates(
+    c: dict[str, np.ndarray], config: WorldConfig, rng: np.random.Generator
+) -> np.ndarray:
+    """When each row reached the warehouse. A row recorded with its own reporting date, such as
+    a notice, keeps it; stocks report on their month-end; every other event reports on the day
+    or some days later."""
+    reported = c["reporting_date"].copy()
+    lagged = (c["reporting_date"] == c["event_date"]) & (
+        c["trans_type"] != TRANS_TYPES.index("ACTIVE")
+    )
+    t = config.dates
+    late = rng.random(len(reported)) >= t.same_day_reporting_share
+    lag = np.where(late, rng.integers(1, t.reporting_lag_days + 1, len(reported)), 0)
+    reported[lagged] = reported[lagged] + lag[lagged].astype("timedelta64[D]")
+    return reported
+
+
+def _transactions(workforce: Workforce, labels: _Labels, rng: np.random.Generator) -> pd.DataFrame:
     c = workforce.log.collect(TXN_DTYPES)
     config = labels.config
+    accounts = [name for name, _ in config.accounts]
     return pd.DataFrame(
         {
             "employee_id": c["employee_id"],
-            "reporting_date": labels.dates(c["reporting_date"]),
+            "reporting_date": labels.dates(_reporting_dates(c, config, rng)),
             "event_date": labels.dates(c["event_date"]),
             "trans_type": labels.of(c["trans_type"], TRANS_TYPES),
             "amount": c["amount"].astype(np.int64),
@@ -132,9 +154,13 @@ def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
                 c["family_previous"], c["level_previous"], c["is_manager_previous"]
             ),
             "location": labels.of(c["location"], config.locations),
+            "location_previous": labels.of(c["location_previous"], config.locations),
             "company": labels.of(c["company"], config.companies),
-            "account": labels.of(c["account"], [name for name, _ in config.accounts]),
+            "company_previous": labels.of(c["company_previous"], config.companies),
+            "account": labels.of(c["account"], accounts),
+            "account_previous": labels.of(c["account_previous"], accounts),
             "is_manager": c["is_manager"],
+            "is_manager_previous": c["is_manager_previous"],
             "hire_date": labels.dates(c["hire_date"]),
         },
         columns=TXN_COLUMNS,
@@ -240,7 +266,7 @@ def _as_dates(frame: pd.DataFrame, *columns: str) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(10)
+    streams = np.random.SeedSequence(config.seed).spawn(11)
     (
         population_rng,
         process_rng,
@@ -252,6 +278,7 @@ def generate_world(config: WorldConfig) -> World:
         movement_rng,
         program_rng,
         offer_rng,
+        reporting_rng,
     ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
@@ -259,6 +286,7 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["dim_location"] = structure.location_dimension(config)
     world.tables["dim_company"] = structure.company_dimension(config)
     world.tables["dim_account"] = structure.account_dimension(config)
+    world.tables["dim_trans_type"] = codes.catalog_frame()
     ids, roles, hire_dates = population.initial_population(config, population_rng)
     workforce = Workforce(ids, roles, hire_dates)
     book = RequisitionBook()
@@ -290,7 +318,7 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["truth_latent_plan"] = plan.frame(structure.cost_center_names(config))
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
-    txn = _transactions(workforce, labels)
+    txn = _transactions(workforce, labels, reporting_rng)
     world.tables["workforce_txn"] = txn
     world.tables["req_interval"] = _requisitions(book, labels)
     world.tables["pending_start"] = _pending_starts(offers, book, labels)

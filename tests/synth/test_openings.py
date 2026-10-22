@@ -20,7 +20,8 @@ def per_requisition(world: World) -> pd.DataFrame:
     after_last = filled.groupby(reqs["req_id"]).shift(fill_value=False) & (
         group["openings"].shift() == 1
     )
-    reopened = (reqs["close_reason"] == "reopened") | after_last
+    # One interval can be both: reopened from filled, then reopened again before it ended.
+    reopened = (reqs["close_reason"] == "reopened").astype(int) + after_last.astype(int)
     return (
         reqs.assign(fill=filled, reopen=reopened)
         .groupby("req_id")

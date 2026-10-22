@@ -126,7 +126,7 @@ def test_the_warehouse_stores_dates_and_text(tmp_path: Path) -> None:
     path = tmp_path / "w.duckdb"
     write_world(world, path)
     with duckdb.connect(str(path), read_only=True) as con:
-        types = dict(con.execute("DESCRIBE workforce_txn").fetchall()[i][:2] for i in range(14))
+        types = dict(r[:2] for r in con.execute("DESCRIBE workforce_txn").fetchall())
         reqs = dict(r[:2] for r in con.execute("DESCRIBE req_interval").fetchall())
     assert (types["event_date"], types["hire_date"], types["cost_center"]) == (
         "DATE",

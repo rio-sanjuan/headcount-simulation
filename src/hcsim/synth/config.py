@@ -511,6 +511,13 @@ class DateTruth:
 
     start_weekday: int = 0
     exit_month_end_weight: float = 8.0
+    #: Events are reported on the day with `same_day_reporting_share`, and otherwise up to
+    #: `reporting_lag_days` days later. Month-end stocks report on the month-end, and a notice
+    #: reports on the day it's given.
+    same_day_reporting_share: float = 0.6
+    reporting_lag_days: int = 10
+    #: The monthly chance a person in post gets an administrative change.
+    admin_change_rate: float = 0.005
 
     def problems(self) -> list[str]:
         found = []
@@ -518,6 +525,10 @@ class DateTruth:
             found.append("dates.start_weekday must be a business day, 0 (Monday) to 4")
         if self.exit_month_end_weight <= 0:
             found.append("dates.exit_month_end_weight must be positive")
+        if not 0 <= self.same_day_reporting_share <= 1 or self.reporting_lag_days < 1:
+            found.append("dates reporting lags need a share in [0, 1] and a positive lag")
+        if not 0 <= self.admin_change_rate <= 1:
+            found.append("dates.admin_change_rate must lie in [0, 1]")
         return found
 
 
