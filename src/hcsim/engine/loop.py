@@ -407,6 +407,7 @@ def run_trajectory(
         state.price = copy.deepcopy(awards.price_model)
         if state.ledger is None:
             state.ledger = HolderLedger()
+        state.ledger.buffer.cover(config.simulation_months)
     months, n = config.simulation_months, state.n_cost_centers
     headcount = np.zeros((months + 1, n), dtype=np.int64)
     open_openings = np.zeros((months + 1, n), dtype=np.int64)
