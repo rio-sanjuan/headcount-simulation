@@ -15,7 +15,7 @@ from hcsim.model.core.contract import role_column
 from hcsim.model.core.measures import (
     HEADCOUNT_STOCK,
     NET_DEPARTURES,
-    NET_HIRES,
+    NET_EXTERNAL_HIRES,
     PROMOTIONS_IN_PLACE,
     REQUISITIONS_CLOSED_UNFILLED,
     REQUISITIONS_OPENED,
@@ -35,7 +35,7 @@ from hcsim.synth.world import generate_world, write_world
 
 MEASURES: tuple[Measure, ...] = (
     HEADCOUNT_STOCK,
-    NET_HIRES,
+    NET_EXTERNAL_HIRES,
     NET_DEPARTURES,
     PROMOTIONS_IN_PLACE,
     REQUISITIONS_OPENED,
@@ -112,7 +112,7 @@ def test_reversals_net_out_of_hires_and_departures(
     quirky world are the clean world's counts."""
     clean, quirky = warehouses
     assert int(raw(quirky, "HIRE_REV").sum()) > 0
-    for measure, code in ((NET_HIRES, "HIRE"), (NET_DEPARTURES, "TERM")):
+    for measure, code in ((NET_EXTERNAL_HIRES, "HIRE"), (NET_DEPARTURES, "TERM")):
         got = counted(quirky, measure)
         expected = raw(clean, code)
         pd.testing.assert_series_equal(got[got != 0], expected, check_names=False)
@@ -150,7 +150,7 @@ def test_a_measure_refuses_codes_it_can_t_count() -> None:
     with pytest.raises(MeasureError, match=r"pool: codes that aren't measured: \['CTG_START'\]"):
         pool.check(catalog)
     with pytest.raises(TransTypeError, match="HIRE_REV"):
-        NET_HIRES.check(catalog)
+        NET_EXTERNAL_HIRES.check(catalog)
 
 
 def test_a_bad_declaration_reports_every_problem() -> None:
@@ -162,8 +162,8 @@ def test_a_bad_declaration_reports_every_problem() -> None:
 
 
 def test_the_expression_is_a_signed_case() -> None:
-    assert NET_HIRES.expression() == (
+    assert NET_EXTERNAL_HIRES.expression() == (
         "(CASE trans_type WHEN 'HIRE' THEN 1 WHEN 'HIRE_REV' THEN -1 ELSE 0 END) * headcount"
     )
-    assert NET_HIRES.codes == {TransType.HIRE, TransType.HIRE_REV}
+    assert NET_EXTERNAL_HIRES.codes == {TransType.HIRE, TransType.HIRE_REV}
     REQUISITIONS_OPENED.check(TransTypeCatalog([]))  # reads no codes

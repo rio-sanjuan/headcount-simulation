@@ -14,7 +14,7 @@ from hcsim.model.core.categories import GuidanceCategory
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
 
-ATTRITION, HIRES = GuidanceCategory.ATTRITION, GuidanceCategory.HIRES
+ATTRITION, HIRES = GuidanceCategory.ATTRITION, GuidanceCategory.EXTERNAL_HIRES
 HEADCOUNT, OPENED = GuidanceCategory.HEADCOUNT, GuidanceCategory.REQUISITIONS_OPENED
 
 
