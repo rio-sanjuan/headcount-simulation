@@ -17,7 +17,7 @@ all are trimmed, because they usually mark months not yet loaded.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -209,17 +209,9 @@ def ingest(
     found = problems(con, grouping, categories)
     if found:
         raise IngestionError("; ".join(found))
-    group = _group_expression(con, grouping)
     tables = {m.table for m in measures.values()}
     sql = consolidated_sql(list(measures.values()), {t: role_column(con, t) for t in tables})
-    raw = con.execute(
-        f"""
-        SELECT m.month, {group} AS "group", m.measure AS category, sum(m.value)::DOUBLE AS value
-        FROM ({sql}) m
-        {_JOINS}
-        GROUP BY ALL
-        """
-    ).df()
+    raw = grouped(con, sql, grouping)
     if raw.empty:
         raise IngestionError("the warehouse holds no workforce or requisition data")
     # A row whose attribute names no group, such as a location missing from its dimension, is
@@ -248,12 +240,34 @@ def ingest(
         .reindex(grid, fill_value=0.0)
         .reset_index()
     )
-    frame = _compose(frame, categories)
+    frame = compose(frame, categories)
     return Series(frame, grouping, snapshot, observed, ungrouped)
 
 
-def _compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.DataFrame:
-    """The requested categories, each inner fill-tree node the sum of its leaves."""
+def grouped(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    grouping: str,
+    parameters: Mapping[str, object] | None = None,
+) -> pd.DataFrame:
+    """The rows of `sql`, which yields the month, `KEYS`, measure, and value, summed per month,
+    group of `grouping`, and measure, as `category`. A row whose attribute names no group keeps
+    a missing group, for the caller to count."""
+    group = _group_expression(con, grouping)
+    return con.execute(
+        f"""
+        SELECT m.month, {group} AS "group", m.measure AS category, sum(m.value)::DOUBLE AS value
+        FROM ({sql}) m
+        {_JOINS}
+        GROUP BY ALL
+        """,
+        dict(parameters or {}),
+    ).df()
+
+
+def compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.DataFrame:
+    """The requested categories from their counted ones, long-form, each inner fill-tree node
+    the sum of its leaves."""
     wide = frame.pivot(index=[MONTH, GROUP], columns=CATEGORY, values=VALUE)
     parts = []
     for category in categories:

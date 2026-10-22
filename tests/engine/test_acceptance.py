@@ -2,8 +2,8 @@
 
 - Replay reproduces each world's month-end headcount per cost center, exactly, every month,
   and its open openings too, once the openings it reserves for accepted offers are counted.
-- A `guided_actuals` run, on guidance made of the world's realized totals, honors every quota,
-  and its flows show it.
+- A `guided_actuals` run, on the realized-total producer's guidance, honors every quota, and
+  its flows show it.
 - An unguided run's counts land within the `stat_check` bound of what its models expect, given
   the exposure its stocks and event cells record.
 - A run is reproducible: the same seed gives the same digests, fewer trajectories a prefix of
@@ -39,6 +39,7 @@ from hcsim.engine.seeding import (
 from hcsim.engine.state import SimulationState
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.sizing import NewHireGapFill
+from hcsim.guidance.realized import realized as realized_totals
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
 from hcsim.model.core.guidance import GuidanceForecast
@@ -202,17 +203,15 @@ def test_replay_reproduces_the_month_end_open_openings_per_cost_center(
 # --- guided_actuals -----------------------------------------------------------------------------
 
 
-def actuals(con: duckdb.DuckDBPyConnection, schema: SimulationSchema, months: int) -> Any:
-    """Guidance carrying the world's realized totals for every guided category, on the whole
-    grid of months and cost centers, zeros included, so every cost center is guided."""
+def actuals(
+    con: duckdb.DuckDBPyConnection, schema: SimulationSchema, months: int
+) -> GuidanceForecast:
+    """Guidance carrying the world's realized totals for every guided category, as the
+    realized-total producer counts them, on the whole grid of months and cost centers, zeros
+    included, so every cost center is guided."""
     labels = schema.vocabulary(COST_CENTER).labels
-    rows = [
-        {"forecast_month": s, "category": c.value, COST_CENTER: labels[cc], "value": v}
-        for c in GUIDED
-        for (s, cc), v in np.ndenumerate(realized(con, schema, c, pd.Period(RUN, freq="M"), months))
-    ]
-    snapshot = (RUN - dt.timedelta(days=1)).isoformat()
-    return GuidanceForecast(pd.DataFrame(rows), COST_CENTER, snapshot, months)
+    start = pd.Period(RUN, freq="M")
+    return realized_totals(con, start, months, COST_CENTER, GUIDED, groups=labels).artifact
 
 
 @pytest.fixture(scope="module")
