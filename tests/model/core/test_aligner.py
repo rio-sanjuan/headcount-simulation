@@ -9,6 +9,7 @@ from hcsim.model.core.aligner import TOPLINE, GroupAligner
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import (
     COST_CENTER,
+    JOB_FAMILY,
     JOB_LEVEL,
     UNATTRIBUTED,
     SchemaError,
@@ -72,3 +73,71 @@ def test_counts_ignore_unattributed_rows() -> None:
     groups = np.array([0, 1, 1, UNATTRIBUTED], dtype=np.int64)
     assert aligner.counts(groups).tolist() == [1, 2]
     assert aligner.counts(groups, np.array([1.0, 3.0, 2.0, 9.0])).tolist() == [1, 5]
+
+
+def composite_schema() -> SimulationSchema:
+    return SimulationSchema.build(
+        {
+            COST_CENTER: ["CC-01", "CC-02", "CC-03"],
+            JOB_FAMILY: ["Data", "Sales"],
+            JOB_LEVEL: [1, 2],
+        },
+        org_levels={"org_level1": {"CC-01": "ORG-A", "CC-02": "ORG-B", "CC-03": "ORG-A"}},
+    )
+
+
+def test_a_composite_key_groups_by_several_columns_and_rollups() -> None:
+    groups = [("ORG-B", "Data"), ("ORG-A", "Sales"), ("ORG-A", "Data")]  # ORG-B Sales not carried
+    aligner = GroupAligner(composite_schema(), ["org_level1", "job_family"], groups)
+    assert aligner.column == "org_level1+job_family"
+    assert aligner.group_labels == tuple(groups)
+    buffer = employees([0, 1, 2, 1, 0])
+    buffer[:, EmployeeColumn.JOB_FAMILY] = [1, 0, 0, 1, 0]
+    assert aligner.groups(buffer, EMPLOYEE).tolist() == [1, 0, 2, UNATTRIBUTED, 2]
+    openings = OPENING.empty(2)
+    openings[:, OpeningColumn.COST_CENTER] = [2, 1]
+    openings[:, OpeningColumn.JOB_FAMILY] = [1, 0]
+    assert aligner.groups(openings, OPENING).tolist() == [1, 0]
+    assert aligner.counts(aligner.groups(buffer, EMPLOYEE)).tolist() == [1, 1, 2]
+
+
+def test_composite_codes_with_any_gap_are_unattributed() -> None:
+    aligner = GroupAligner(composite_schema(), ["cost_center", "job_level"], [("CC-01", "2")])
+    codes = np.array([[0, 1], [0, 0], [UNATTRIBUTED, 1], [0, UNATTRIBUTED]])
+    assert aligner.groups_of_codes(codes).tolist() == [0, UNATTRIBUTED, UNATTRIBUTED, UNATTRIBUTED]
+    with pytest.raises(SchemaError, match="codes need 2 columns, not 1"):
+        aligner.groups_of_codes(np.zeros((1, 1), dtype=np.int64))
+
+
+def test_the_first_column_is_the_most_significant() -> None:
+    labels = [("CC-02", "1"), ("CC-01", "2")]
+    a = GroupAligner(composite_schema(), ["cost_center", "job_level"], labels)
+    b = GroupAligner(composite_schema(), ["job_level", "cost_center"], [(y, x) for x, y in labels])
+    codes = np.array([[1, 0], [0, 1]])
+    assert a.groups_of_codes(codes).tolist() == b.groups_of_codes(codes[:, ::-1]).tolist() == [0, 1]
+
+
+def test_bad_composite_groupings_are_refused() -> None:
+    s = composite_schema()
+    with pytest.raises(SchemaError, match="at least one column"):
+        GroupAligner(s, [], [])
+    with pytest.raises(SchemaError, match="can't combine"):
+        GroupAligner(s, [TOPLINE, "job_family"], [("ALL", "Data")])
+    with pytest.raises(SchemaError, match="columns repeat"):
+        GroupAligner(s, ["job_family", "job_family"], [("Data", "Data")])
+    with pytest.raises(SchemaError, match="need 2 parts"):
+        GroupAligner(s, ["org_level1", "job_family"], [("ORG-A",)])
+    with pytest.raises(SchemaError, match="not in the 'org_level1' vocabulary") as error:
+        GroupAligner(s, ["org_level1", "job_family"], [("ORG-Z", "Legal")])
+    assert "not in the 'job_family' vocabulary: ['Legal']" in str(error.value)
+
+
+def test_topline_codes_are_one_group_and_huge_keys_are_refused() -> None:
+    topline = GroupAligner(schema(), TOPLINE, ["ALL"])
+    assert topline.groups_of_codes(np.array([3, -1, 0])).tolist() == [0, 0, 0]
+    names = [f"v{k}" for k in range(5)]
+    wide = SimulationSchema.build(
+        {COST_CENTER: ["CC-01"], **{n: [f"{n}-{i:05d}" for i in range(10_000)] for n in names}}
+    )
+    with pytest.raises(SchemaError, match="too many combinations"):
+        GroupAligner(wide, names, [tuple(f"{n}-00000" for n in names)])
