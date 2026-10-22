@@ -381,7 +381,7 @@ def executive_min_level(con: duckdb.DuckDBPyConnection) -> int | None:
 
 
 def range_table_from_world(con: duckdb.DuckDBPyConnection, schema: SimulationSchema) -> RangeTable:
-    return RangeTable.from_frame(con.execute("SELECT * FROM comp_range").df(), schema)
+    return RangeTable.load(con, schema)
 
 
 def opening_price(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> float:
