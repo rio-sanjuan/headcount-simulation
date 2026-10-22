@@ -6,9 +6,9 @@ schema, the guidance, the models) are treated as read-only.
 
 **Settings and objects.** A field is either a *setting*, a scalar that loads in layers (see
 `hcsim.engine.settings`), or an *object* passed in code: the schema, the models, the guidance,
-the award settings, and the eligibility rules, which are resolved against the schema. Every
-setting belongs to one *field group*, listed in `GROUPS`, and records it in its metadata. A
-setting's name is its group's name, an underscore, and its key, so `promotion_cycle_months` is
+the award settings, the gates, and the eligibility rules, which are resolved against the schema.
+Every setting belongs to one *field group*, listed in `GROUPS`, and records it in its metadata.
+A setting's name is its group's name, an underscore, and its key, so `promotion_cycle_months` is
 the key `cycle_months` of the group `promotion`. The `run` group's settings go unprefixed. The
 configuration stays one flat record (ADR 0007), so the whole tunable surface can be listed, and
 a group with no settings yet is where a later domain puts its own.
@@ -28,6 +28,9 @@ from types import MappingProxyType
 from typing import Any, Final, cast
 
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
+from hcsim.engine.gates import Gate
+from hcsim.engine.gates import check as check_gates
+from hcsim.engine.modes import RunMode
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.sizing import NewHireGapFill
@@ -50,15 +53,6 @@ class ConfigError(ValueError):
 class ForecastScope(StrEnum):
     HEADCOUNT = "hcf"
     HEADCOUNT_AND_SBC = "hcf+sbc"
-
-
-class RunMode(StrEnum):
-    """The run-mode ladder, from most pinned to least."""
-
-    REPLAY = "replay"
-    GUIDED_ACTUALS = "guided_actuals"
-    GUIDED_FORECAST = "guided_forecast"
-    UNGUIDED = "unguided"
 
 
 class BackfillSource(StrEnum):
@@ -265,6 +259,8 @@ class SimulationConfig:
     awards: AwardSettings | None = None
     #: Eligibility rules, declared in raw labels.
     eligibility: tuple[EligibilityRule, ...] = ()
+    #: Registration and step gates on the domains.
+    gates: tuple[Gate, ...] = ()
     aligner: GroupAligner | None = field(init=False, default=None)
     #: The rules, resolved against the schema.
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
@@ -276,6 +272,8 @@ class SimulationConfig:
         if self.guidance is not None and {"simulation_months", "run_date"} <= typed:
             problems += self._check_guidance(self.guidance)
         object.__setattr__(self, "eligibility", tuple(self.eligibility))
+        object.__setattr__(self, "gates", tuple(self.gates))
+        problems += [f"gates: {p}" for p in check_gates(self.gates)]
         try:
             object.__setattr__(self, "resolved_eligibility", resolve(self.eligibility, self.schema))
         except EligibilityError as error:

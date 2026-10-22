@@ -23,9 +23,9 @@ between the fields' defaults and YAML.
 schema's and the guidance's fingerprints, whether it carries award settings, and each model's
 artifact version. `from_record` builds it again: the caller passes the schema, the guidance, and
 the award settings, which must match what the record names; eligibility rules are written in
-their raw labels; and each model is re-attached from its artifact by version. A model built in
-code has no version, so a configuration holding one can't be written. Every problem is
-collected, as in loading.
+their raw labels, gates as plain data; and each model is re-attached from its artifact by
+version. A model built in code has no version, so a configuration holding one can't be written.
+Every problem is collected, as in loading.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ from hcsim.engine.config import (
     SimulationConfig,
 )
 from hcsim.engine.eligibility import EligibilityError, EligibilityRule
+from hcsim.engine.gates import GateError, gate_from_dict
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
@@ -325,6 +326,7 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "guidance": None if config.guidance is None else config.guidance.fingerprint(),
         "awards": config.awards is not None,
         "eligibility": [rule.to_dict() for rule in config.eligibility],
+        "gates": [gate.to_dict() for gate in config.gates],
         "models": dict(config.models.versions),
     }
 
@@ -391,6 +393,12 @@ def from_record(
             rules.append(EligibilityRule.from_dict(entry))
         except EligibilityError as error:
             problems += error.problems
+    gates = []
+    for entry in record.get("gates", []):
+        try:
+            gates.append(gate_from_dict(entry))
+        except GateError as error:
+            problems += error.problems
     models = _attach(record.get("models", {}), models_root, schema, problems)
     if problems or layered is None or models is None:
         raise ConfigError(problems)
@@ -400,5 +408,6 @@ def from_record(
         guidance=guidance,
         awards=awards,
         eligibility=tuple(rules),
+        gates=tuple(gates),
         **layered.values,
     )
