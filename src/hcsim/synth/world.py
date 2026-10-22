@@ -394,12 +394,19 @@ def generate_world(config: WorldConfig) -> World:
             "rating": logged["rating"].astype(np.int64),
         }
     )
-    award_frame, vests = awards.make_awards(
-        config, txn, rating_codes, world.tables["dim_job"], daily, grant_rng
+    equity_tables = awards.make_awards(
+        config,
+        txn,
+        rating_codes,
+        world.tables["dim_job"],
+        daily,
+        world.tables["stock_price"],
+        grant_rng,
     )
-    world.tables["equity_award"] = award_frame
-    world.tables["equity_vest"] = vests
-    world.tables["equity_expense"] = awards.reference_ledger(award_frame, vests, ends)
+    world.tables.update(equity_tables)
+    world.tables["equity_expense"] = awards.reference_ledger(
+        equity_tables["equity_award"], equity_tables["equity_vest"], ends
+    )
     world.truth = {
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
