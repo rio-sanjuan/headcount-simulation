@@ -27,6 +27,9 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final, cast
 
+import numpy as np
+
+from hcsim.engine.ceiling import Ceiling, CeilingError
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
@@ -35,6 +38,7 @@ from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.sizing import NewHireGapFill
 from hcsim.model.core.aligner import GroupAligner
+from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import COST_CENTER, JOB_LEVEL, SchemaError, SimulationSchema
@@ -251,6 +255,11 @@ class SimulationConfig:
     backfill_source: BackfillSource = setting(
         "backfill", BackfillSource.RATE, "a rate per cost center, or a classifier per departure"
     )
+    backfill_anticipated_terminations: bool = setting(
+        "backfill",
+        False,
+        "whether a known termination opens a backfill; by default a planned exit isn't replaced",
+    )
     # promotion
     promotion_cycle_months: tuple[int, ...] = setting(
         "promotion", (3, 9), "the calendar months promotions take effect"
@@ -281,9 +290,15 @@ class SimulationConfig:
     eligibility: tuple[EligibilityRule, ...] = ()
     #: Registration and step gates on the domains.
     gates: tuple[Gate, ...] = ()
+    #: `Cap(c)`, by cost-center label.
+    capacity_caps: Mapping[str, int] = field(default_factory=dict)
+    #: The plan whose cost-center targets bound committed strength, `H*(c, t)`.
+    plan: AlignmentTarget | None = None
     aligner: GroupAligner | None = field(init=False, default=None)
     #: The rules, resolved against the schema.
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
+    #: `Cap_eff(c, t)`, from the caps and the plan.
+    ceiling: Ceiling = field(init=False, default_factory=lambda: Ceiling(np.zeros(0)))
 
     def __post_init__(self) -> None:
         problems: list[str] = []
@@ -294,6 +309,12 @@ class SimulationConfig:
         object.__setattr__(self, "eligibility", tuple(self.eligibility))
         object.__setattr__(self, "gates", tuple(self.gates))
         problems += [f"gates: {p}" for p in check_gates(self.gates)]
+        object.__setattr__(self, "capacity_caps", MappingProxyType(dict(self.capacity_caps)))
+        try:
+            ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan)
+            object.__setattr__(self, "ceiling", ceiling)
+        except CeilingError as error:
+            problems += [f"ceiling: {p}" for p in error.problems]
         try:
             rules = (*self.eligibility, *self._executive_rule())
             object.__setattr__(self, "resolved_eligibility", resolve(rules, self.schema))

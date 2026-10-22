@@ -56,6 +56,7 @@ from hcsim.engine.config import (
 )
 from hcsim.engine.eligibility import EligibilityError, EligibilityRule
 from hcsim.engine.gates import GateError, gate_from_dict
+from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
@@ -331,6 +332,8 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "awards": config.awards is not None,
         "eligibility": [rule.to_dict() for rule in config.eligibility],
         "gates": [gate.to_dict() for gate in config.gates],
+        "capacity_caps": dict(sorted(config.capacity_caps.items())),
+        "plan": None if config.plan is None else config.plan.digest(),
         "models": dict(config.models.versions),
     }
 
@@ -372,6 +375,7 @@ def from_record(
     models_root: Path,
     guidance: GuidanceForecast | None = None,
     awards: AwardSettings | None = None,
+    plan: AlignmentTarget | None = None,
 ) -> SimulationConfig:
     """Build a configuration from its record, re-attaching each model by version."""
     problems: list[str] = []
@@ -385,6 +389,10 @@ def from_record(
     given = None if guidance is None else guidance.fingerprint()
     if wanted != given:
         problems.append(f"the record names guidance {wanted}, but the call passes {given}")
+    wanted_plan = record.get("plan")
+    given_plan = None if plan is None else plan.digest()
+    if wanted_plan != given_plan:
+        problems.append(f"the record names plan {wanted_plan}, but the call passes {given_plan}")
     if bool(record.get("awards")) != (awards is not None):
         need = "needs" if record.get("awards") else "has no"
         problems.append(f"the record {need} award settings, which the call doesn't match")
@@ -415,5 +423,7 @@ def from_record(
         awards=awards,
         eligibility=tuple(rules),
         gates=tuple(gates),
+        capacity_caps=dict(record.get("capacity_caps", {})),
+        plan=plan,
         **layered.values,
     )

@@ -53,8 +53,11 @@ def test_every_setting_belongs_to_a_group_and_is_documented() -> None:
         "awards",
         "eligibility",
         "gates",
+        "capacity_caps",
+        "plan",
         "aligner",
         "resolved_eligibility",
+        "ceiling",
     }
     with pytest.raises(ValueError, match="no field group 'weather'"):
         setting("weather", 1, "")

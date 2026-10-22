@@ -241,15 +241,19 @@ def _backfill_probability(
 def _backfill(
     state: SimulationState, ctx: StepContext, domain: str, source: str, model: object
 ) -> DomainResult:
-    """Each departure by `source` opens a backfill for the same role with its probability, as
-    a binomial draw over the departures. Where guidance covers the cost center, the count is
-    capped at the requisitions-opened quota's headroom."""
-    departed, _ = ctx.departed(source)
+    """Each departure by `source` opens a backfill for the same role, copied verbatim, with its
+    probability, as a binomial draw over the departures. A known termination opens none unless
+    the configuration says so. Where guidance covers the cost center, the count is capped at the
+    requisitions-opened quota's headroom; and no cost center opens more than the room its
+    effective ceiling leaves."""
+    departed, anticipated = ctx.departed(source)
     if not len(departed):
         return DomainResult(domain)
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
     p = _backfill_probability(departed, ctx, model, state.n_cost_centers)
     p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, p)
+    if not ctx.config.backfill_anticipated_terminations:
+        p = np.where(anticipated, 0.0, p)
     rng = ctx.rng(domain)
     opened = bernoulli(p, rng)
     ledger: dict[str, Ints] = {}
@@ -260,6 +264,19 @@ def _backfill(
         capped = quota_select(opened.astype(np.float64), groups, headroom, rng)
         opened = np.where(groups >= 0, capped.mask, opened)
         ledger[_OPENED.value] = capped.realized
+    ceiling = ctx.config.ceiling
+    if ceiling.binds:
+        strength = state.headcount + state.open_openings
+        room = ceiling.room(ctx.config.run_date, ctx.step, strength)
+        quota = np.minimum(room, len(departed)).astype(np.int64)
+        vetoed = quota_select(opened.astype(np.float64), cost_centers, quota, rng)
+        if _OPENED.value in ledger:
+            groups = ctx.guided_groups(departed, EMPLOYEE, _OPENED)
+            kept = vetoed.mask & (groups >= 0)
+            ledger[_OPENED.value] = np.bincount(
+                groups[kept], minlength=len(ledger[_OPENED.value])
+            ).astype(np.int64)
+        opened = vetoed.mask
     roles = departed[opened]
     code = ctx.config.schema.vocabulary(REQ_TYPE).code(BACKFILL)
     rows = _requisitions(len(roles), cost_centers[opened], code, ctx.step)
