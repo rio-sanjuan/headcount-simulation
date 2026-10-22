@@ -14,15 +14,28 @@ for an employee, its openings for a requisition. A row of capacity k is k units.
 column gets a key, `log(weight) + Gumbel`, and cells are taken in descending key order while
 their column still needs rows and their unit is free. Each column so realizes exactly its quota,
 or what's left when supply runs out, and no row exceeds its capacity.
+
+Several domains can draw from one candidate pool in a fixed order. A `CandidatePool` tracks who
+is still available within a step, and `sequential` runs each domain's quota draw over what the
+earlier domains left, so no one is selected twice.
+
+When quotas are known on two margins, such as org and family, `rake_quota` spreads them over the
+joint cells: raking (IPF) fits a seed table to both margins, and each row's cells are then
+apportioned to integers, so every row's total is exact and column totals are within rounding.
+The seed is a `seed_base`: eligible rows per cell, their summed probability, or uniform over the
+cells that have any rows at all.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from hcsim.model.data.quotas import QuotaError, RakingMarginals, rake
 from hcsim.model.interface import Mask, Probabilities
 
 Ints = NDArray[np.int64]
@@ -202,3 +215,96 @@ def assign(
             if not need.any():
                 break
     return Assignment(counts, k.astype(np.int64), counts.sum(axis=0))
+
+
+class CandidatePool:
+    """Who is still available to select within a step."""
+
+    def __init__(self, eligible: ArrayLike) -> None:
+        self.available: Mask = np.asarray(eligible, dtype=bool).copy()
+
+    def __len__(self) -> int:
+        return int(self.available.sum())
+
+    def take(self, rows: Mask) -> None:
+        """Mark selected rows unavailable. Taking a row twice is a defect."""
+        mask = np.asarray(rows, dtype=bool)
+        if mask.shape != self.available.shape:
+            raise SamplingError("a selection needs one entry per pooled row")
+        if (mask & ~self.available).any():
+            raise SamplingError("rows taken that the pool no longer has")
+        self.available &= ~mask
+
+    def select(
+        self, p: ArrayLike, groups: ArrayLike, quota: ArrayLike, rng: np.random.Generator
+    ) -> QuotaSelection:
+        """A quota draw among the available rows, which it then takes."""
+        probabilities = np.where(self.available, _probabilities(p), 0.0)
+        selection = quota_select(probabilities, groups, quota, rng)
+        self.take(selection.mask)
+        return selection
+
+
+def sequential(
+    draws: Sequence[tuple[ArrayLike, ArrayLike, ArrayLike]],
+    rng: np.random.Generator,
+    eligible: ArrayLike | None = None,
+) -> list[QuotaSelection]:
+    """Run quota draws in order over one pool. Each is (probabilities, groups, quota), and
+    each sees only the rows the earlier ones left."""
+    if not draws:
+        return []
+    n = len(np.asarray(draws[0][0]))
+    pool = CandidatePool(np.ones(n, dtype=bool) if eligible is None else eligible)
+    return [pool.select(p, groups, quota, rng) for p, groups, quota in draws]
+
+
+class SeedBasis(StrEnum):
+    ROWS = "rows"
+    PROBABILITY = "probability"
+    UNIFORM = "uniform"
+
+
+def seed_base(
+    basis: SeedBasis,
+    row_group: ArrayLike,
+    column_group: ArrayLike,
+    shape: tuple[int, int],
+    p: ArrayLike | None = None,
+) -> NDArray[np.float64]:
+    """A (rows, columns) seed table from each row's two groups. Rows in group -1 of either
+    don't count."""
+    a, b = np.asarray(row_group, dtype=np.int64), np.asarray(column_group, dtype=np.int64)
+    if a.shape != b.shape:
+        raise SamplingError("each row needs one group in each grouping")
+    known = (a >= 0) & (b >= 0)
+    if known.any() and (a[known].max() >= shape[0] or b[known].max() >= shape[1]):
+        raise SamplingError(f"groups must lie inside the table's shape {shape}")
+    cell = a[known] * shape[1] + b[known]
+    if basis is SeedBasis.PROBABILITY:
+        if p is None:
+            raise SamplingError("a probability basis needs the probabilities")
+        weights = _probabilities(p)[known]
+    else:
+        weights = np.ones(int(known.sum()))
+    table = np.bincount(cell, weights=weights, minlength=shape[0] * shape[1]).reshape(shape)
+    if basis is SeedBasis.UNIFORM:
+        table = (table > 0).astype(np.float64)
+    result: NDArray[np.float64] = table.astype(np.float64)
+    return result
+
+
+def rake_quota(seed: ArrayLike, row_quota: ArrayLike, column_quota: ArrayLike) -> Ints:
+    """Integer joint quotas whose rows sum exactly to `row_quota`, and whose columns sum to
+    `column_quota` within rounding, raked from `seed`."""
+    rows = np.asarray(row_quota, dtype=np.float64)
+    columns = np.asarray(column_quota, dtype=np.float64)
+    try:
+        table = rake(seed, RakingMarginals(rows, columns))
+    except QuotaError as error:
+        raise SamplingError(str(error)) from None
+    return (
+        np.stack([apportion(row) for row in table])
+        if len(table)
+        else np.zeros((0, len(columns)), np.int64)
+    )
