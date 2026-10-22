@@ -51,9 +51,45 @@ def test_a_registry_refuses_a_name_twice() -> None:
         registry.register(Entry("plain", lambda: "again"))
 
 
+def test_a_namespaced_registry_names_its_entries_by_namespace() -> None:
+    registry: Registry[str] = Registry(
+        "widget",
+        (Entry(f"{ns}.{name}", lambda: "w") for ns in ("alpha", "beta") for name in "ABCDEFG"),
+        namespaced=True,
+    )
+    assert registry.namespaces == ("alpha", "beta")
+    assert registry.in_namespace("beta") == tuple(f"beta.{n}" for n in "ABCDEFG")
+    with pytest.raises(RegistryError, match=r"<namespace>\.<Name>, not 'plain'"):
+        registry.register(Entry("plain", lambda: "w"))
+    # A large registry names the namespace's entries, or every namespace, not every entry.
+    wrong_case, missing, elsewhere = registry.problems(["alpha.a", "beta.Z", "gamma.A"])
+    assert wrong_case.startswith("unknown widget 'alpha.a'; did you mean 'alpha.A'")
+    assert wrong_case.endswith("; alpha has " + ", ".join(f"alpha.{n}" for n in "ABCDEFG"))
+    assert missing.startswith("unknown widget 'beta.Z'")
+    assert missing.endswith("; beta has " + ", ".join(f"beta.{n}" for n in "ABCDEFG"))
+    assert elsewhere == "unknown widget 'gamma.A'; known namespaces: alpha, beta"
+
+
+def test_the_model_registry_is_namespaced() -> None:
+    assert MODELS.namespaced
+    assert set(MODELS.namespaces) == {"native", "statsforecast", "darts", "sktime", "prophet"}
+    assert MODELS.problems(["seasonal_naive"]) == [
+        "unknown model 'seasonal_naive'; did you mean 'native.SeasonalNaive'; known namespaces: "
+        + ", ".join(MODELS.namespaces)
+    ]
+    assert MODELS.problems(["statsforecast.autoarima"])[0].startswith(
+        "unknown model 'statsforecast.autoarima'; did you mean 'statsforecast.AutoARIMA'"
+    )
+
+
 def test_the_pipeline_s_registries() -> None:
-    assert {"drift", "historical_average", "last_observed", "seasonal_naive"} <= set(MODELS.names)
-    assert isinstance(MODELS.build("seasonal_naive"), SeasonalNaive)
+    assert {
+        "native.Drift",
+        "native.HistoricalAverage",
+        "native.LastObserved",
+        "native.SeasonalNaive",
+    } <= set(MODELS.names)
+    assert isinstance(MODELS.build("native.SeasonalNaive"), SeasonalNaive)
     assert COMBINERS.build("inverse_error") is inverse_error_weights
     assert RECONCILERS.build("greedy") is reconcile_greedy
 
@@ -67,7 +103,7 @@ def test_the_defaults_load_and_map_onto_the_steps_settings() -> None:
     assert config.reconcile
     assert config.tolerance == 1.0
     selection = config.selection
-    assert selection.suite == ("seasonal_naive", "historical_average")
+    assert selection.suite == ("native.SeasonalNaive", "native.HistoricalAverage")
     assert (selection.top_k, selection.combination) == (2, "inverse_error")
     assert selection.evaluation.min_length == 42
 
@@ -75,12 +111,16 @@ def test_the_defaults_load_and_map_onto_the_steps_settings() -> None:
 def test_a_configuration_reads_from_yaml(tmp_path: Path) -> None:
     path = tmp_path / "guidance.yaml"
     path.write_text(
-        "horizon: 6\ngrouping: TOPLINE\nmodels: [seasonal_naive]\n"
+        "horizon: 6\ngrouping: TOPLINE\nmodels: [native.SeasonalNaive]\n"
         "combination: {top_k: 1}\nevaluation: {min_train_months: 24}\n"
         "reconciliation: {method: null}\n"
     )
     config = GuidanceConfig.load(path)
-    assert (config.horizon, config.grouping, config.models) == (6, "TOPLINE", ("seasonal_naive",))
+    assert (config.horizon, config.grouping, config.models) == (
+        6,
+        "TOPLINE",
+        ("native.SeasonalNaive",),
+    )
     assert not config.reconcile
     assert config.selection.evaluation.min_length == 30
     assert GuidanceConfig.from_mapping(config.model_dump()) == config
@@ -96,7 +136,7 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
     with pytest.raises(GuidanceConfigError) as error:
         GuidanceConfig.from_mapping(
             {
-                "models": ["seasonal_naive", "prophet", "seasonal_naive"],
+                "models": ["native.SeasonalNaive", "prophet", "native.SeasonalNaive"],
                 "combination": {"method": "median"},
                 "reconciliation": {"method": "mint"},
                 "grouping": "cost_type",
@@ -105,8 +145,9 @@ def test_every_unregistered_name_is_refused_at_load_at_once() -> None:
     lines = str(error.value).splitlines()
     assert lines[0] == "invalid guidance configuration:"
     assert lines[1:] == [
-        f"  - models: unknown model 'prophet'; known: {', '.join(MODELS.names)}",
-        "  - models: each model is named once; ['seasonal_naive'] repeat",
+        "  - models: unknown model 'prophet'; did you mean 'prophet.Prophet'; prophet has "
+        "prophet.Prophet",
+        "  - models: each model is named once; ['native.SeasonalNaive'] repeat",
         "  - combination.method: unknown combination method 'median'; known: inverse_error",
         "  - reconciliation.method: unknown reconciliation method 'mint'; known: greedy",
         "  - grouping: 'cost_type' can't group by; it permits filter, population",

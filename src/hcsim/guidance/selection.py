@@ -37,7 +37,7 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    suite: tuple[str, ...] = ("seasonal_naive", "historical_average")
+    suite: tuple[str, ...] = ("native.SeasonalNaive", "native.HistoricalAverage")
     top_k: int = 2
     combination: str = "inverse_error"
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)

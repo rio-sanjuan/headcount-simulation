@@ -1,13 +1,13 @@
 """Fixed-form baselines: models whose form is chosen, not searched for.
 
-- **Log-count ARIMA** (`log_count_arima`) fits ARIMA(1,0,0)(1,0,0)[12] with a mean to
+- **Log-count ARIMA** (`native.LogCountARIMA`) fits ARIMA(1,0,0)(1,0,0)[12] with a mean to
   `log(1 + count)` and forecasts back through the inverse, so a forecast is never negative.
-- **Logit-rate ARIMA** (`logit_rate_arima`) models a flow as a share of its exposure, as
+- **Logit-rate ARIMA** (`native.LogitRateARIMA`) models a flow as a share of its exposure, as
   attrition is a share of headcount. It fits the same ARIMA to the logit of the share, clipped
   away from 0 and 1, and forecasts the share times the exposure's forecast. It's an
   `ExposureModel`: it needs the exposure's history to fit and its forecast to predict.
-- **Poisson and negative-binomial GLMs with harmonics** (`poisson_glm`,
-  `negative_binomial_glm`) regress the count, through a log link, on a level, a linear trend,
+- **Poisson and negative-binomial GLMs with harmonics** (`native.PoissonGLM`,
+  `native.NegativeBinomialGLM`) regress the count, through a log link, on a level, a linear trend,
   and the first two annual harmonics. Both harmonics' sine and cosine are fitted, so the
   season's phase is learned whatever month the series starts in. The negative binomial
   estimates its dispersion, so it fits overdispersed counts the Poisson can't.
@@ -52,7 +52,7 @@ def _arima(values: Floats) -> Any:
 
 
 class LogCountARIMA(LibraryModel):
-    NAME: ClassVar[str] = "log_count_arima"
+    NAME: ClassVar[str] = "native.LogCountARIMA"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _POINT
     MIN_MONTHS: ClassVar[int] = 2 * SEASON
 
@@ -66,7 +66,7 @@ class LogCountARIMA(LibraryModel):
 
 
 class LogitRateARIMA(LibraryModel):
-    NAME: ClassVar[str] = "logit_rate_arima"
+    NAME: ClassVar[str] = "native.LogitRateARIMA"
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _POINT
     MIN_MONTHS: ClassVar[int] = 2 * SEASON
 
@@ -133,7 +133,7 @@ class _HarmonicGLM(LibraryModel):
 
 
 class PoissonGLM(_HarmonicGLM):
-    NAME: ClassVar[str] = "poisson_glm"
+    NAME: ClassVar[str] = "native.PoissonGLM"
 
     def _model(self, counts: Floats, design: Floats) -> Any:
         sm = importlib.import_module("statsmodels.api")
@@ -141,7 +141,7 @@ class PoissonGLM(_HarmonicGLM):
 
 
 class NegativeBinomialGLM(_HarmonicGLM):
-    NAME: ClassVar[str] = "negative_binomial_glm"
+    NAME: ClassVar[str] = "native.NegativeBinomialGLM"
 
     def _model(self, counts: Floats, design: Floats) -> Any:
         sm = importlib.import_module("statsmodels.api")
