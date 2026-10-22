@@ -233,9 +233,11 @@ def simulate(
     notice = config.backfill
     workforce.snapshot(np.datetime64(month_ends[0].date(), "D"))
     start = np.bincount(workforce.column("cost_center")[workforce.active()], minlength=n)
-    plan = LatentPlan(
-        config.growth, start.astype(np.int64), [pd.Period(e, freq="M") for e in month_ends], rng
-    )
+    first = pd.Period(month_ends[0], freq="M")
+    plan_months = [first + k for k in range(len(month_ends) + config.plans.future_months)]
+    plan = LatentPlan(config.growth, start.astype(np.int64), plan_months, rng)
+    headcount = np.zeros((len(month_ends), n), dtype=np.int64)
+    headcount[0] = start
 
     if ratings is not None:
         ratings.seed(pd.Period(month_ends[0], freq="M"))
@@ -358,6 +360,7 @@ def simulate(
         # 4. Campus: openings on the schedule, and fills in the start months.
         campus_month(config, workforce, book, month, m, days, rng)
         workforce.snapshot(end)
+        headcount[m] = np.bincount(workforce.column("cost_center")[workforce.active()], minlength=n)
         if offers is not None:
             offers.snapshot(end)
         if promotions is not None:
@@ -380,6 +383,7 @@ def simulate(
             ],
         },
         "plan": plan,
+        "headcount": headcount,
     }
 
 
