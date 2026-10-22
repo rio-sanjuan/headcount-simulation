@@ -13,6 +13,7 @@ from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
 from hcsim.guidance.pipeline import run
+from hcsim.guidance.report import write_report
 from hcsim.model.core.alignment import AlignmentError, AlignmentTarget
 
 
@@ -52,6 +53,7 @@ def main(argv: Sequence[str]) -> int:
             parser.error(str(error))
     result.artifact.save(args.out)
     (args.out / "report.json").write_text(json.dumps(result.report, indent=2, default=str))
+    write_report(result, args.out)
     report = result.report
     print(
         f"wrote {report['fingerprint']} to {args.out}: {report['series_forecast']} series, "

@@ -51,6 +51,7 @@ from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.generation import generate
 from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS, Problem
+from hcsim.guidance.report import config_digest
 from hcsim.guidance.selection import Selection, select
 from hcsim.guidance.sources import Source, SourceError, as_source
 from hcsim.model.core.alignment import AlignmentTarget
@@ -69,6 +70,8 @@ Forecasts = dict[tuple[str, GuidanceCategory], np.ndarray]
 class PipelineResult:
     artifact: GuidanceForecast
     report: dict[str, Any]
+    #: The settled history the forecast started from.
+    series: ingestion.Series
 
 
 # --- steps ---------------------------------------------------------------------------------------
@@ -575,6 +578,8 @@ def run(
     sections = ctx.report
     report = {
         "fingerprint": artifact.fingerprint(),
+        "configuration": config_digest(config),
+        "source": sections["ingest"]["source"],
         "snapshot": sections["validate"]["snapshot"],
         "grouping": config.grouping,
         "series_forecast": len(ctx["forecasts"]),
@@ -622,4 +627,4 @@ def run(
             for r in ctx.records
         ],
     }
-    return PipelineResult(artifact, report)
+    return PipelineResult(artifact, report, ctx["series"])
