@@ -2,7 +2,9 @@
 
 The pipeline runs as ordered steps over a shared context (see `framework`):
 
-1. **ingest** reads the warehouse into monthly series per group and category;
+1. **ingest** reads the warehouse into monthly series per group and category, composing an
+   inner fill-tree node from its leaves, with the calendar covariates for the history and the
+   horizon;
 2. **forecast** gives every series long enough a combined benchmark forecast;
 3. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
    headcount anchor. The lite identity carries hires and attrition only, so it's partial
@@ -27,6 +29,7 @@ import pandas as pd
 
 from hcsim.guidance import ingest as ingestion
 from hcsim.guidance.config import GuidanceConfig
+from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.models import ForecastError
 from hcsim.guidance.reconcile import RECONCILERS
@@ -54,27 +57,31 @@ class PipelineResult:
 class Ingest:
     name: str = "ingest"
     needs: tuple[str, ...] = ("source", "config")
-    gives: tuple[str, ...] = ("series",)
+    gives: tuple[str, ...] = ("series", "covariates")
 
     def validate(self, ctx: Context) -> list[str]:
+        config = ctx["config"]
         try:
             source = as_source(ctx["source"])
             with source.connect() as con:
-                return ingestion.problems(con, ctx["config"].grouping)
+                return ingestion.problems(con, config.grouping, config.categories)
         except SourceError as error:
             return [str(error)]
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
+        config = ctx["config"]
         source = as_source(ctx["source"])
         with source.connect() as con:
-            series = ingestion.ingest(con, ctx["config"].grouping)
+            series = ingestion.ingest(con, config.grouping, config.categories)
         ctx.note(
             self.name,
             source=source.description,
             snapshot=str(series.snapshot),
             grouping=series.grouping,
+            categories=[c.value for c in series.categories],
+            counted=[c.value for c in ingestion.counted(config.categories)],
         )
-        return {"series": series}
+        return {"series": series, "covariates": covariates(series, config.horizon)}
 
 
 @dataclass(frozen=True)

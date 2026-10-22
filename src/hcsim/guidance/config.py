@@ -8,7 +8,8 @@ configuration, collecting every problem before it refuses:
 - every component it names, against its registry (see `registry`): the models, the combination
   method, and the reconciliation method. An unknown name lists the known ones, and a name from
   an uninstalled extra gives the command that installs it;
-- the grouping, against the column catalog.
+- the grouping, against the column catalog;
+- the categories: each once, and the headcount anchor among them when reconciling.
 
 A configuration that loads names only components the pipeline can build.
 """
@@ -21,10 +22,11 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from hcsim.guidance.ingest import grouping_problems
+from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
 from hcsim.guidance.models import MODELS
 from hcsim.guidance.reconcile import RECONCILERS
 from hcsim.guidance.selection import COMBINERS, EvaluationConfig, SelectionConfig
+from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 
 
 class GuidanceConfigError(ValueError):
@@ -63,6 +65,8 @@ class GuidanceConfig(_Strict):
     grouping: str = "cost_center"
     #: The population's stamp, `name@digest`, or a built-in population's name.
     population: str | None = None
+    #: The categories to forecast. An inner fill-tree node is composed from its leaves.
+    categories: tuple[GuidanceCategory, ...] = Field(default=DEFAULT_CATEGORIES, min_length=1)
     models: tuple[str, ...] = Field(default=("seasonal_naive", "historical_average"), min_length=1)
     combination: Combination = Combination()
     evaluation: Evaluation = Evaluation()
@@ -87,6 +91,14 @@ class GuidanceConfig(_Strict):
             method = [self.reconciliation.method]
             found += [f"reconciliation.method: {p}" for p in RECONCILERS.problems(method)]
         found += [f"grouping: {p}" for p in grouping_problems(self.grouping)]
+        repeated = sorted({c.value for c in self.categories if self.categories.count(c) > 1})
+        if repeated:
+            found.append(f"categories: each category is named once; {repeated} repeat")
+        if self.reconcile and ANCHOR not in self.categories:
+            found.append(
+                f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "
+                "needs it among the categories; add it, or set reconciliation.method to null"
+            )
         return found
 
     @property
