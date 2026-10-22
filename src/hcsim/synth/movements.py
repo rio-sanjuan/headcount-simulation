@@ -16,14 +16,10 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.synth.config import WorldConfig
+from hcsim.synth.dates import MonthDays
 from hcsim.synth.population import Roles, draw_roles
 from hcsim.synth.structure import cost_center_names, level_one_names
 from hcsim.synth.workforce import Workforce
-
-
-def _days(month: pd.Period, n: int, rng: np.random.Generator) -> NDArray[np.datetime64]:
-    first = np.datetime64(month.start_time.date(), "D")
-    return first + rng.integers(0, month.days_in_month, n).astype("timedelta64[D]")
 
 
 class MovementProcess:
@@ -106,7 +102,7 @@ class MovementProcess:
         members = active[wf.column("cost_center")[active] == source]
         share = self.rng.uniform(*self.truth.reorg_share)
         moved = members[self.rng.random(len(members)) < share]
-        day = _days(month, 1, self.rng)[0]
+        day = MonthDays(month, self.config.dates).sample("business", 1, self.rng)[0]
         wf.reorganize(moved, int(target), np.full(len(moved), day))
         names = cost_center_names(self.config)
         self.reorgs.append(
@@ -116,14 +112,15 @@ class MovementProcess:
     def contingent(self, month: pd.Period) -> None:
         """Conversions out, contingent ends, and contingent starts, on days in the month."""
         t, wf = self.truth, self.workforce
+        days = MonthDays(month, self.config.dates)
         active = wf.active()
         out = active[self.rng.random(len(active)) < t.conversion_out_hazard]
-        wf.convert_out(out, self.contingent_account, _days(month, len(out), self.rng))
+        wf.convert_out(out, self.contingent_account, days.sample("business", len(out), self.rng))
         pool = wf.contingent_pool()
         ending = pool[self.rng.random(len(pool)) < t.contingent_end_hazard]
-        wf.end_contingent(ending, _days(month, len(ending), self.rng))
+        wf.end_contingent(ending, days.sample("exit", len(ending), self.rng))
         starts = int(self.rng.poisson(t.contingent_start_rate * len(wf.active())))
-        wf.start_contingent(self._contingent_roles(starts), _days(month, starts, self.rng))
+        wf.start_contingent(self._contingent_roles(starts), days.sample("start", starts, self.rng))
 
     def manifest(self) -> dict[str, Any]:
         return {"reorganizations": self.reorgs, "reclassifications": self.reclasses}

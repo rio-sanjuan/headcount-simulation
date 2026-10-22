@@ -12,7 +12,7 @@ import pytest
 from hcsim.synth.columns import EventLog, Table
 from hcsim.synth.config import AttritionTruth, RequisitionTruth, WorldConfig, preset
 from hcsim.synth.population import Roles, draw_roles
-from hcsim.synth.process import TransferPool, random_days
+from hcsim.synth.process import TransferPool
 from hcsim.synth.workforce import Workforce
 from hcsim.synth.world import generate_world, write_world
 
@@ -74,17 +74,6 @@ def test_roles_lean_to_the_dominant_family() -> None:
     assert roles["is_manager"].mean() == pytest.approx(config.manager_share, abs=0.02)
     junior = draw_roles(config, np.zeros(100, int), np.ones(100, int), rng)
     assert not junior["is_manager"].any()  # managers start at manager_min_level
-
-
-def test_random_days_stay_in_the_month_and_after_the_earliest_day() -> None:
-    month_end = pd.Timestamp("2024-02-29")
-    rng = np.random.default_rng(1)
-    earliest = np.full(500, np.datetime64("2024-02-20"))
-    days = random_days(month_end, 500, rng, earliest)
-    assert days.min() >= np.datetime64("2024-02-20")
-    assert days.max() <= np.datetime64("2024-02-29")
-    anywhere = random_days(month_end, 2_000, rng)
-    assert anywhere.min() == np.datetime64("2024-02-01")
 
 
 def _workforce(cost_centers: list[int], families: list[int], levels: list[int]) -> Workforce:

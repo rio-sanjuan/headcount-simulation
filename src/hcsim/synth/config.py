@@ -435,6 +435,28 @@ class ProgramTruth:
         return found
 
 
+@dataclass(frozen=True)
+class DateTruth:
+    """How events fall within their month. Invented, round values.
+
+    Hires start on `start_weekday` (Monday is 0). Departures fall on business days, with the
+    month's last business day `exit_month_end_weight` times as likely as any other. Every
+    other event falls on any business day. When no day of the profile is late enough, an
+    event falls on any day from its earliest one.
+    """
+
+    start_weekday: int = 0
+    exit_month_end_weight: float = 8.0
+
+    def problems(self) -> list[str]:
+        found = []
+        if self.start_weekday not in range(5):
+            found.append("dates.start_weekday must be a business day, 0 (Monday) to 4")
+        if self.exit_month_end_weight <= 0:
+            found.append("dates.exit_month_end_weight must be positive")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -499,6 +521,7 @@ class WorldConfig:
     promotions: PromotionTruth = field(default_factory=PromotionTruth)
     movements: MovementTruth = field(default_factory=MovementTruth)
     programs: ProgramTruth = field(default_factory=ProgramTruth)
+    dates: DateTruth = field(default_factory=DateTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -560,6 +583,7 @@ class WorldConfig:
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
         problems += self.movements.problems()
         problems += self.programs.problems(len(self.ratings.scale))
+        problems += self.dates.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:
