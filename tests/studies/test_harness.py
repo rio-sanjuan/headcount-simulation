@@ -128,7 +128,7 @@ def test_the_provenance_names_every_input(guided: StudyRun, inputs: tuple[Path, 
     p = guided.provenance
     assert p["source"] == "synthetic_world"
     assert (p["world_preset"], p["world_seed"]) == ("tiny", "5")
-    assert p["guidance_fingerprint"].startswith("gf1-")
+    assert p["guidance_fingerprint"].startswith("gf2-")
     assert p["schema_fingerprint"] == guided.config.schema.fingerprint()
     assert (p["mode"], p["scope"], p["seed"], p["run_date"]) == (
         "guided_forecast",

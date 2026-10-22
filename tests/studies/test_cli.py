@@ -65,7 +65,7 @@ def test_a_study_run_writes_its_scorecard_and_record(
     assert card.loc[card["evaluator"] == "summary", "threshold"].isna().all()
     assert card["passed"].all()
     assert card[PROVENANCE_COLUMNS].notna().all().all()
-    assert (card["guidance_fingerprint"].str.startswith("gf1-")).all()
+    assert (card["guidance_fingerprint"].str.startswith("gf2-")).all()
 
     record = json.loads((tmp_path / "out" / "run.json").read_text())
     assert record["passed"] is True

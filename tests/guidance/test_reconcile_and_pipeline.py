@@ -145,7 +145,7 @@ def test_guidance_fit_writes_the_artifact_and_report(
 ) -> None:
     out = tmp_path / "artifact"
     assert hcsim(["guidance", "fit", "--world", str(world_path), "--out", str(out)]) == 0
-    assert "wrote gf1-" in capsys.readouterr().out
+    assert "wrote gf2-" in capsys.readouterr().out
     assert GuidanceForecast.load(out).horizon == 12
     assert json.loads((out / "report.json").read_text())["grouping"] == "cost_center"
 
