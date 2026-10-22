@@ -4,7 +4,9 @@ The walking skeleton has two evaluators. `summary` reports the run's outcomes wi
 them; the metric baselines compare them. Each of the `invariants` checks holds by construction,
 so any failure is a defect, never noise:
 
-- **Quota.** Every guided draw realizes exactly `min(quota, eligible)` in every group.
+- **Quota.** Every guided draw honors its quota in every group: it realizes exactly
+  `min(quota, eligible)`, less what no whole requisition could fit, unless known events alone
+  passed it (`QuotaRecord.honored`).
 - **Headcount identity.** `H(t+1) = H(t) + F_ext - A - V_conv + R_in - R_out + W_in - W_out`,
   exactly, per cost center.
 - **Opening identity.** `O(t+1) = O(t) + G + B_att - U - F_ext`, exactly, per cost center.
@@ -47,10 +49,7 @@ def _identity_gap(stock: np.ndarray, result: SimulationResult, terms: Mapping[st
 def invariants(result: SimulationResult) -> list[Metric]:
     name = "invariants"
     rows = [row for t in result.trajectories for row in t.quotas]
-    violations = sum(
-        int((r.record.realized != np.minimum(r.record.quota, r.record.eligible)).sum())
-        for r in rows
-    )
+    violations = sum(int((~r.record.honored).sum()) for r in rows)
     shortfall = sum(int(r.record.shortfall.sum()) for r in rows)
     metrics = [
         Metric(name, "quota_violations", violations, 0, f"{len(rows)} guided draws checked"),

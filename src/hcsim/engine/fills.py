@@ -142,7 +142,9 @@ class _Draw:
         quota = self.ctx.quota(node)
         used = self.ledger.get(node.value, np.zeros(len(quota), dtype=np.int64))
         chosen = quota_select(weight, groups, np.maximum(quota - used, 0), self.rng)
-        self.quotas[node.value] = QuotaRecord(quota, chosen.eligible + used, chosen.realized + used)
+        self.quotas[node.value] = QuotaRecord(
+            quota, chosen.eligible + used, chosen.realized + used, used
+        )
         mask: Mask = chosen.mask & (groups >= 0)
         return mask
 

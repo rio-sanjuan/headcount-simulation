@@ -15,6 +15,19 @@ from tests.engine.test_loop import config, guidance, initial_state, models
 def test_a_record_s_shortfall_is_what_the_quota_didn_t_get() -> None:
     record = QuotaRecord(np.array([5, 2, 0]), np.array([3, 4, 0]), np.array([3, 2, 0]))
     assert record.shortfall.tolist() == [2, 0, 0]
+    assert record.known.tolist() == record.blocked.tolist() == [0, 0, 0]
+    assert record.honored.all()
+
+
+def test_a_quota_is_honored_by_the_smaller_of_quota_and_eligible_with_two_allowances() -> None:
+    quota = np.array([4, 1, 3, 3, 3])
+    eligible = np.array([9, 5, 9, 9, 2])
+    known = np.array([0, 3, 0, 0, 0])  # known events past the quota still fire
+    blocked = np.array([0, 0, 1, 0, 0])  # one opening no whole requisition left could fill
+    realized = np.array([4, 3, 2, 2, 2])
+    record = QuotaRecord(quota, eligible, realized, known, blocked)
+    assert record.expected.tolist() == [4, 3, 2, 3, 2]
+    assert record.honored.tolist() == [True, True, True, False, True]
 
 
 def test_a_quota_past_the_openings_shows_up_as_a_shortfall() -> None:

@@ -11,7 +11,7 @@ under their own id, with a new-hire grant:
 
 In replay, a realized hire is a pending start into the requisition it filled. One whose
 requisition the run doesn't hold is a boundary fill only when `replay_boundary_fill` allows;
-otherwise it's left out.
+otherwise it's left out, with the rest of their known events.
 
 An offer whose start passed before the run started is still expected for
 `pending_starts_staleness_days`, and starts in the run's first month; an older one is stale and
@@ -63,6 +63,8 @@ def pending_starts(state: SimulationState, ctx: StepContext) -> DomainResult:
             matched[k] = True
         elif e.event.source is Source.REPLAY and not ctx.config.replay_boundary_fill:
             joining[k] = False  # a replayed hire with no requisition, and no boundary fills
+            if e.event.employee_id is not None:
+                ctx.fired.leave_out(e.event.employee_id)
         else:
             for column, code in e.codes.items():
                 hires[k, column] = code
