@@ -22,11 +22,12 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from hcsim.guidance.combination import COMBINERS
 from hcsim.guidance.evaluation import EvaluationConfig, space_of
 from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
 from hcsim.guidance.models import MODELS
 from hcsim.guidance.reconcile import RECONCILERS
-from hcsim.guidance.selection import COMBINERS, SelectionConfig
+from hcsim.guidance.selection import SelectionConfig
 from hcsim.guidance.tuning import TuningSettings
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 
@@ -62,10 +63,14 @@ class Tuning(_Strict):
 
 
 class Combination(_Strict):
-    """How the scored models combine into one forecast."""
+    """How the scored models combine into one forecast (see `combination`)."""
 
     method: str = "inverse_error"
     top_k: int = Field(default=2, ge=1)
+    #: Tried in order when the method can't weigh the candidates.
+    fallbacks: tuple[str, ...] = ("equal",)
+    temperature: float = Field(default=0.1, gt=0)
+    ridge_alpha: float = Field(default=1.0, ge=0)
 
 
 class Reconciliation(_Strict):
@@ -117,6 +122,9 @@ class GuidanceConfig(_Strict):
         if repeated:
             found.append(f"models: each model is named once; {repeated} repeat")
         found += [f"combination.method: {p}" for p in COMBINERS.problems([self.combination.method])]
+        found += [
+            f"combination.fallbacks: {p}" for p in COMBINERS.problems(self.combination.fallbacks)
+        ]
         if self.reconciliation.method is not None:
             method = [self.reconciliation.method]
             found += [f"reconciliation.method: {p}" for p in RECONCILERS.problems(method)]
@@ -155,6 +163,9 @@ class GuidanceConfig(_Strict):
             suite=self.models,
             top_k=self.combination.top_k,
             combination=self.combination.method,
+            fallbacks=self.combination.fallbacks,
+            temperature=self.combination.temperature,
+            ridge_alpha=self.combination.ridge_alpha,
             evaluation=EvaluationConfig(
                 e.n_splits, e.test_months, e.step_months, e.min_train_months, e.metric
             ),
