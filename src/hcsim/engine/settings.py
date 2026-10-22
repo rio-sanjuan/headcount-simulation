@@ -306,6 +306,8 @@ _SERVES: Final[Mapping[str, type | tuple[type, ...]]] = {
     "backfill_transfer": (GroupRateModel, EntityModel),
     "promotion": EntityModel,
     "family_similarity": SimilarityMatrix,
+    "conversion_fill": EntityModel,
+    "transfer_fill": EntityModel,
 }
 
 
@@ -321,6 +323,10 @@ def _plain(value: Any) -> Any:
 
 def to_record(config: SimulationConfig) -> dict[str, Any]:
     """The configuration as plain data, with models by artifact version."""
+    if config.fill_mix is not None:
+        raise ConfigError(
+            ["a planner-mix hook is code with no record yet; it arrives with the planner (M7)"]
+        )
     unversioned = config.models.unversioned
     if unversioned:
         raise ConfigError(

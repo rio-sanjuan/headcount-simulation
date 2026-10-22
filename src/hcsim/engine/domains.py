@@ -20,6 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.config import BackfillSource, SimulationConfig
+from hcsim.engine.fills import EXTERNAL, channel_hazards
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
@@ -322,8 +323,7 @@ def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
     openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
     # Openings reserved for a pending start are held back.
     row_of = np.repeat(np.arange(len(reqs)), ctx.fillable(reqs))  # one per fillable opening
-    hazard = ctx.config.models.external_fill.compute_probability(reqs)
-    p = ctx.config.resolved_eligibility.restrict(EXTERNAL_FILL, reqs, hazard)[row_of]
+    p = channel_hazards(reqs, ctx)[row_of, EXTERNAL]
     used = state.category_ledger.get(GuidanceCategory.EXTERNAL_HIRES.value)
     filled, quotas = draw(
         p,
