@@ -132,14 +132,19 @@ def apply(
     state.headcount -= per_cost_center(dropped, ecc, n)
     state.n_employees = _drop(state.employees, state.n_employees, e.drop)
 
-    # 2. Write employee rows in place.
+    # 2. Write employee rows in place. A holder whose cost center changes moves in the ledger.
     written = np.zeros(0, dtype=np.int64)
     if len(e.write_index):
         index = _after_drops(e.write_index, e.drop)
         written = index
+        before = state.employees[index, ecc].copy()
         state.headcount -= per_cost_center(state.employees[index], ecc, n)
         state.employees[index] = e.write_rows
         state.headcount += per_cost_center(e.write_rows, ecc, n)
+        moved = before != e.write_rows[:, ecc]
+        if moved.any() and state.ledger is not None:
+            slots = state.employees[index[moved], EmployeeColumn.VEST_INDEX].astype(np.int64)
+            state.ledger.move(slots, step, e.write_rows[moved, ecc].astype(np.int64))
 
     # 3. Append employees, with new ids and vest slots.
     appended = e.append.copy()

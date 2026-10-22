@@ -1,8 +1,16 @@
 """The RSU tracker: the holder ledger of every granted tranche, and each holder's vest buffer.
 
-**The holder ledger** keeps one row per holder, award month, and vest month, never summed. On a
-departure, it stamps the departure month on the holder's live rows that vest after it, so a
-leaver's unvested equity forfeits in the month they leave. Each trajectory holds its own copy.
+**The holder ledger** keeps one row per holder, award month, and vest month, never summed. Each
+trajectory holds its own copy. It supports three changes:
+
+- **forfeit**: on a departure, it stamps the departure month on the holder's live rows that
+  vest after it, so a leaver's unvested equity forfeits in the month they leave;
+- **move**: when a holder moves cost center, it starts a holder interval at the new cost center
+  from that month, so expense after the move can follow them while each tranche keeps the cost
+  center it was granted in;
+- **timed grants**: a grant recorded before its award month, as award timing lags it, waits in
+  the ledger. If its holder leaves before the award month, it's cancelled, never awarded: it
+  forfeits before it accrues anything.
 
 **The vest buffer** (`VestBuffer`) keeps each holder's live shares by vest month, so what a
 recipient already vests in a forward year is a slice, not a scan of the ledger. It spans every
@@ -127,12 +135,37 @@ class Tranches:
     def __len__(self) -> int:
         return len(self.holder)
 
+    @property
+    def cancelled(self) -> NDArray[np.bool_]:
+        """Timed grants whose holder left before their award month: never awarded."""
+        out: NDArray[np.bool_] = (self.forfeit_month >= 0) & (self.forfeit_month < self.award_month)
+        return out
+
+    def pending(self, month: int) -> NDArray[np.bool_]:
+        """Timed grants still to be awarded after `month`, and not cancelled."""
+        out: NDArray[np.bool_] = (self.award_month > month) & ~self.cancelled
+        return out
+
+
+@dataclass(frozen=True)
+class Intervals:
+    """Holder intervals: from `valid_from`, the holder sits in `cost_center`, until their next
+    interval. Sorted by holder, then month."""
+
+    holder: Ints
+    valid_from: Ints
+    cost_center: Ints
+
+    def __len__(self) -> int:
+        return len(self.holder)
+
 
 @dataclass
 class HolderLedger:
     _chunks: list[Ints] = field(default_factory=list)
     _rows: Ints = field(default_factory=lambda: np.zeros((0, 8), dtype=np.int64))
     buffer: VestBuffer = field(default_factory=VestBuffer)
+    _moves: list[Ints] = field(default_factory=list)
 
     # Column order of the consolidated rows.
     HOLDER, AWARD, VEST, SHARES, FORFEIT, TYPE, LEVEL, CC = range(8)
@@ -189,6 +222,44 @@ class HolderLedger:
         after `month`, from the vest buffer. Forward year y (from 1) covers vest months
         `month + 12(y - 1) + 1` through `month + 12y`."""
         return self.buffer.by_year(np.asarray(holders, dtype=np.int64), month, years)
+
+    def move(self, holders: Ints, month: int, cost_centers: Ints) -> int:
+        """Start each holder's interval at `cost_centers` from `month`. Returns the moves."""
+        holders = np.asarray(holders, dtype=np.int64)
+        if len(holders):
+            rows = np.empty((len(holders), 3), dtype=np.int64)
+            rows[:, 0], rows[:, 1], rows[:, 2] = holders, month, np.asarray(cost_centers)
+            self._moves.append(rows)
+        return len(holders)
+
+    def intervals(self) -> Intervals:
+        """Every move, as holder intervals. A holder moved twice in one month keeps the last."""
+        if not self._moves:
+            empty = np.zeros(0, dtype=np.int64)
+            return Intervals(empty, empty.copy(), empty.copy())
+        rows = np.concatenate(self._moves)
+        order = np.lexsort((np.arange(len(rows)), rows[:, 1], rows[:, 0]))
+        rows = rows[order]
+        last = np.ones(len(rows), dtype=bool)
+        last[:-1] = (rows[1:, 0] != rows[:-1, 0]) | (rows[1:, 1] != rows[:-1, 1])
+        rows = rows[last]
+        return Intervals(rows[:, 0].copy(), rows[:, 1].copy(), rows[:, 2].copy())
+
+    def cost_center_at(self, holders: Ints, months: Ints, granted: Ints) -> Ints:
+        """Each (holder, month)'s cost center: their latest interval's at or before the month,
+        else `granted`, the cost center they were granted in."""
+        holders, months = np.asarray(holders, np.int64), np.asarray(months, np.int64)
+        out = np.asarray(granted, dtype=np.int64).copy()
+        moves = self.intervals()
+        if not len(moves):
+            return out
+        # Sort the intervals by (holder, month); find each query's last interval at or before it.
+        key = moves.holder * (1 << 32) + moves.valid_from
+        query = holders * (1 << 32) + months
+        at = np.searchsorted(key, query, side="right") - 1
+        found = (at >= 0) & (moves.holder[np.maximum(at, 0)] == holders)
+        out[found] = moves.cost_center[at[found]]
+        return out
 
     def tranches(self) -> Tranches:
         rows = self._consolidate()

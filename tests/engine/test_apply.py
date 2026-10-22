@@ -434,3 +434,19 @@ def test_an_eligibility_cutoff_leaves_out_recipients_hired_after_it() -> None:
     assert state.ledger is not None
     assert set(state.ledger.tranches().holder.tolist()) == {0, 1}
     assert (state.employees[2:4, EmployeeColumn.BASE_SALARY] == 0).all()
+
+
+def test_a_holder_whose_cost_center_changes_moves_in_the_ledger() -> None:
+    state = make_state(ledger=True)
+    rows = state.employees[:2].copy()
+    rows[0, EmployeeColumn.COST_CENTER] = 1  # moves from CC-01 to CC-02
+    rows[1, EmployeeColumn.PERF_RATING] = 3  # a write that moves nothing
+    apply(
+        state,
+        result(employees=RowChange(EMPLOYEE, write_index=np.arange(2), write_rows=rows)),
+        5,
+        SCHEMA,
+    )
+    assert state.ledger is not None
+    moves = state.ledger.intervals()
+    assert list(zip(moves.holder, moves.valid_from, moves.cost_center, strict=True)) == [(0, 5, 1)]
