@@ -25,6 +25,14 @@ month of the run and a 120-month tail after it, enough for any grant the run mak
 template after an award lagged up to two years. Its rows are allocated lazily: a holder takes a
 row the first time they're granted, so a workforce that's never granted costs nothing. A vest
 before the run's first month has already happened, so the buffer leaves it out.
+
+**Views.** The 8-D view (`view8`) is one row per tranche with its eight dimensions: holder, award
+month, vest month, shares, forfeit month, award type, level, and the cost center it was granted
+in. The 9-D view (`view9`) cuts each tranche's accrual, from its award month to its vest, or its
+forfeit when that comes first, at its holder's moves: one row per tranche and holder interval,
+the cost center the holder sat in, and a ninth dimension, `valid_from`, the month the piece
+begins. A piece runs until the next one's `valid_from`, or the tranche's end, so expense can be
+attributed to the cost center its holder was in when it accrued.
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 Ints = NDArray[np.int64]
@@ -40,6 +49,18 @@ Ints = NDArray[np.int64]
 NOT_FORFEITED = -1
 #: The months the vest buffer spans after the run's last.
 TAIL: Final = 120
+#: The 8-D view's dimensions, and the 9-D view's.
+EIGHT_D: Final = (
+    "holder",
+    "award_month",
+    "vest_month",
+    "shares",
+    "forfeit_month",
+    "award_type",
+    "level",
+    "cost_center",
+)
+NINE_D: Final = (*EIGHT_D, "valid_from")
 
 
 class TrackerError(ValueError):
@@ -299,6 +320,37 @@ class HolderLedger:
         found = (at >= 0) & (moves.holder[np.maximum(at, 0)] == holders)
         out[found] = moves.cost_center[at[found]]
         return out
+
+    def view8(self) -> pd.DataFrame:
+        """One row per tranche, with its eight dimensions (`EIGHT_D`)."""
+        t = self.tranches()
+        return pd.DataFrame({name: np.asarray(getattr(t, name), np.int64) for name in EIGHT_D})
+
+    def view9(self) -> pd.DataFrame:
+        """One row per tranche and holder interval its accrual spans (`NINE_D`): each piece's
+        cost center is the holder's in it, from `valid_from`. Rows keep the tranches' order,
+        and pieces their months'."""
+        frame = self.view8()
+        frame["tranche"] = np.arange(len(frame))
+        forfeited = (frame["forfeit_month"] >= 0) & (frame["forfeit_month"] < frame["vest_month"])
+        frame["end"] = np.where(forfeited, frame["forfeit_month"], frame["vest_month"])
+        start = frame["award_month"].to_numpy()
+        first = frame.assign(
+            valid_from=start,
+            cost_center=self.cost_center_at(
+                frame["holder"].to_numpy(), start, frame["cost_center"].to_numpy()
+            ),
+        )
+        moves = self.intervals()
+        later = pd.DataFrame(
+            {"holder": moves.holder, "valid_from": moves.valid_from, "moved_to": moves.cost_center}
+        )
+        cuts = frame.merge(later, on="holder")
+        within = (cuts["valid_from"] > cuts["award_month"]) & (cuts["valid_from"] <= cuts["end"])
+        cuts = cuts[within].assign(cost_center=lambda f: f["moved_to"])
+        pieces = pd.concat([first, cuts], ignore_index=True)
+        pieces = pieces.sort_values(["tranche", "valid_from"], kind="stable", ignore_index=True)
+        return pieces[list(NINE_D)].astype("int64")
 
     def tranches(self) -> Tranches:
         rows = self._consolidate()
