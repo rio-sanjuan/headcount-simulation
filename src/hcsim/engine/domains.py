@@ -72,6 +72,11 @@ class StepContext:
     def rng(self, domain: str) -> np.random.Generator:
         return self.seeds.generator(self.trajectory, domain)
 
+    @property
+    def month(self) -> int:
+        """The calendar month, 1-12, of this step."""
+        return (self.config.run_date.month - 1 + self.step) % 12 + 1
+
     def known_at(self, kind: EventKind) -> list[ResolvedEvent]:
         """This step's known events of `kind`."""
         return [] if self.known is None else self.known.at(self.step, kind)

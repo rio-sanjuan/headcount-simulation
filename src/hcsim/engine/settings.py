@@ -48,6 +48,7 @@ from hcsim.engine.config import (
     ARTIFACT_DOMAINS,
     GROUPS,
     MODEL_FIELDS,
+    OPTIONAL_MODELS,
     AwardSettings,
     ConfigError,
     DomainModels,
@@ -59,6 +60,7 @@ from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.generative import EmpiricalAttributeGenerator
+from hcsim.model.ml.markov import MarkovModel
 from hcsim.model.ml.persistence import ArtifactError, load_model
 
 ENV_PREFIX: Final = "HCSIM_CONFIG__"
@@ -299,6 +301,7 @@ _SERVES: Final[Mapping[str, type]] = {
     "backfill": GroupRateModel,
     "growth": GroupRateModel,
     "attributes": EmpiricalAttributeGenerator,
+    "performance": MarkovModel,
 }
 
 
@@ -337,6 +340,8 @@ def _attach(
     loaded: dict[str, Any] = {}
     for name in MODEL_FIELDS:
         version = versions.get(name)
+        if version is None and name in OPTIONAL_MODELS:
+            continue
         if not isinstance(version, str):
             problems.append(f"the record names no version for the {name} model")
             continue
@@ -354,9 +359,9 @@ def _attach(
                 f"{name} {version} holds a {type(model).__name__}, which can't serve it"
             )
         loaded[name] = model
-    if len(loaded) < len(MODEL_FIELDS):
+    if set(MODEL_FIELDS) - OPTIONAL_MODELS - set(loaded):
         return None
-    return DomainModels(**loaded, versions={n: str(versions[n]) for n in MODEL_FIELDS})
+    return DomainModels(**loaded, versions={n: str(versions[n]) for n in loaded})
 
 
 def from_record(

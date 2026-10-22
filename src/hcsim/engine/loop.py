@@ -2,10 +2,11 @@
 
 Each trajectory runs on its own deep copy of the seeded state, with its own price path and
 holder ledger, and draws from its own random streams. A month advances the price, clears the
-category ledger, then runs the registered domains in order, applying each result before the
-next domain reads state. The known-event domains run first, so the sampled domains see the
-workforce they leave. After the last month, every recorded tranche is valued at the price in
-its award month and amortized, and every known event of a registered kind must have fired.
+category ledger, then runs the registered domains in order, applying each result before the next
+domain reads state. The known-event domains run first, so the sampled domains see the workforce
+they leave, and then performance, so the month's draws read its new ratings. After the last
+month, every recorded tranche is valued at the price in its award month and amortized, and every
+known event of a registered kind must have fired.
 
 Histories are per cost center: stocks at the start of every month plus the end of the last
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
@@ -51,6 +52,7 @@ from hcsim.engine.known_domains import (
 )
 from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
 from hcsim.engine.modes import RunMode
+from hcsim.engine.performance import PERFORMANCE, performance
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -86,6 +88,7 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (CONVERSION_OUT, conversion_out),
     (REORGANIZATION, reorganization),
     (OTHER_MOVEMENT, other_movement),
+    (PERFORMANCE, performance),
     *DOMAINS,
 )
 #: Gates every run has: other movement comes only from replayed history.
@@ -216,7 +219,7 @@ def run_trajectory(
             if result.flows:
                 for symbol, counts in result.flows.items():
                     flows[symbol][step] = counts
-            else:
+            elif domain in FLOWS:
                 flows[FLOWS[domain]][step] = _flow(domain, applied, n)
             quotas += [QuotaRow(step, domain, c, r) for c, r in result.quotas.items()]
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
@@ -282,4 +285,6 @@ def _register(config: SimulationConfig) -> Registered:
     mode = config.run_mode or RunMode.UNGUIDED
     names = [name for name, _ in STEP_ORDER]
     defaults = [g for g in DEFAULT_GATES if g.domain in names]
+    if config.models.performance is None and PERFORMANCE in names:
+        defaults.append(RegistrationGate(PERFORMANCE, enabled=False, reason="no model"))
     return register(names, (*defaults, *config.gates), mode)
