@@ -38,7 +38,7 @@ from hcsim.synth.population import Roles, draw_roles
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RatingProcess
-from hcsim.synth.requisitions import RequisitionBook
+from hcsim.synth.requisitions import CLOSE_REASONS, RequisitionBook
 from hcsim.synth.structure import cost_center_names, level_one_names
 from hcsim.synth.workforce import Workforce, tenure_months
 
@@ -125,6 +125,28 @@ class Backfills:
             if len(options):
                 kept["cost_center"][i] = int(options[rng.integers(len(options))])
         book.open("backfill", kept, dates[keep], month, vacated_by[keep])
+
+
+class Fills:
+    """A month's fills, gathered across channels and applied to the book in date order."""
+
+    def __init__(self) -> None:
+        self.parts: list[tuple[NDArray[np.int64], Dates, int, NDArray[np.int64]]] = []
+
+    def add(
+        self, reqs: NDArray[np.int64], dates: Dates, reason: str, fillers: NDArray[np.int64]
+    ) -> None:
+        self.parts.append((reqs, dates, CLOSE_REASONS.index(reason), fillers))
+
+    def apply(self, book: RequisitionBook) -> None:
+        if not self.parts:
+            return
+        book.fill(
+            np.concatenate([p[0] for p in self.parts]),
+            np.concatenate([p[1] for p in self.parts]),
+            np.concatenate([np.full(len(p[0]), p[2]) for p in self.parts]),
+            np.concatenate([p[3] for p in self.parts]),
+        )
 
 
 class TransferPool:
@@ -278,33 +300,44 @@ def simulate(
         cost_centers = np.repeat(np.arange(n), plan.openings(m, committed, rng))
         levels = rng.choice(growth_levels, size=len(cost_centers), p=growth_p)
         roles = draw_roles(config, cost_centers, levels, rng)
-        book.open("growth", roles, days.sample("business", len(cost_centers), rng), m)
+        book.open(
+            "growth",
+            roles,
+            days.sample("business", len(cost_centers), rng),
+            m,
+            openings=config.openings.draw(len(cost_centers), rng),
+        )
 
         # 3. Fills and unfilled exits. Backfills opened by transfers wait a month, and campus
-        # requisitions fill only through their own channel.
+        # requisitions fill only through their own channel. A requisition may exit unfilled;
+        # otherwise each remaining opening may fill externally (a hazard by age), by transfer,
+        # or by conversion.
         open_reqs = book.open_requisitions()
         open_reqs = open_reqs[book.column("req_type")[open_reqs] != CAMPUS]
-        h_ext = reqs.external_hazards(m - book.column("opened_month")[open_reqs])
-        u = rng.random(len(open_reqs))
+        leaving = rng.random(len(open_reqs)) < reqs.unfilled_exit_hazard
+        exits, staying = open_reqs[leaving], open_reqs[~leaving]
+        book.exit(
+            exits, days.sample("business", len(exits), rng, book.column("interval_start")[exits])
+        )
+        row = np.repeat(staying, book.column("remaining")[staying])  # one entry per opening
+        h_ext = reqs.external_hazards(m - book.column("opened_month")[row])
         h_conv = config.movements.conversion_fill_hazard if movements is not None else 0.0
+        u = rng.random(len(row))
         external = u < h_ext
         transfer = ~external & (u < h_ext + reqs.transfer_fill_hazard)
         conversion = ~external & ~transfer & (u < h_ext + reqs.transfer_fill_hazard + h_conv)
-        unfilled = (
-            ~external
-            & ~transfer
-            & ~conversion
-            & (u < h_ext + reqs.transfer_fill_hazard + h_conv + reqs.unfilled_exit_hazard)
+        # External hires start on the start weekday; other fills fall on business days.
+        earliest = book.column("interval_start")[row]
+        dates = days.sample("business", len(row), rng, earliest)
+        dates[external] = days.sample("start", int(external.sum()), rng, earliest[external])
+        fills = Fills()
+        hired = workforce.hire(book.roles(row[external]), dates[external])
+        fills.add(row[external], dates[external], "filled_external", hired)
+        _transfers(
+            config, workforce, row[transfer], dates[transfer], book, m, rng, backfills, fills
         )
-        # External hires start on the start weekday; other outcomes fall on business days.
-        opened = book.column("opened_date")[open_reqs]
-        dates = days.sample("business", len(open_reqs), rng, opened)
-        dates[external] = days.sample("start", int(external.sum()), rng, opened[external])
-        hired = workforce.hire(book.roles(open_reqs[external]), dates[external])
-        book.close(open_reqs[external], dates[external], "filled_external", hired)
-        _transfers(config, workforce, book, open_reqs[transfer], dates[transfer], m, rng, backfills)
-        _conversions(config, workforce, book, open_reqs[conversion], dates[conversion], rng)
-        book.close(open_reqs[unfilled], dates[unfilled], "unfilled")
+        _conversions(config, workforce, row[conversion], dates[conversion], book, rng, fills)
+        fills.apply(book)
         # 4. Campus: openings on the schedule, and fills in the start months.
         campus_month(config, workforce, book, month, m, days, rng)
         workforce.snapshot(end)
@@ -334,54 +367,60 @@ def simulate(
 def _transfers(
     config: WorldConfig,
     workforce: Workforce,
-    book: RequisitionBook,
-    requisitions: NDArray[np.int64],
+    openings: NDArray[np.int64],
     dates: Dates,
+    book: RequisitionBook,
     month: int,
     rng: np.random.Generator,
     backfills: Backfills,
+    fills: Fills,
 ) -> None:
-    reqs = config.requisitions
-    pool = TransferPool(workforce, reqs.transfer_level_band)
-    for j, date in zip(requisitions.tolist(), dates, strict=True):
+    """Fill openings by moving employees of the same family, within the band, from another
+    cost center. An opening with no candidate stays open."""
+    pool = TransferPool(workforce, config.requisitions.transfer_level_band)
+    taken, days, movers = [], [], []
+    for j, date in zip(openings.tolist(), dates, strict=True):
         role = book.roles(np.array([j]))
-        mover = pool.pick(
-            int(role["family"][0]), int(role["level"][0]), int(role["cost_center"][0]), rng
-        )
+        family, level = int(role["family"][0]), int(role["level"][0])
+        mover = pool.pick(family, level, int(role["cost_center"][0]), rng)
         if mover is None:
             continue
         index = np.array([mover])
         old = (int(workforce.column("family")[mover]), int(workforce.column("level")[mover]))
         vacated = workforce.reassign(index, role, np.array([date]))
-        pool.move(mover, old, (int(role["family"][0]), int(role["level"][0])))
-        book.close(
-            np.array([j]),
-            np.array([date]),
-            "filled_transfer",
-            workforce.column("employee_id")[index],
-        )
-        backfills.open(
-            book, workforce.column("employee_id")[index], vacated, np.array([date]), month + 1, rng
-        )
+        pool.move(mover, old, (family, level))
+        employee = workforce.column("employee_id")[index]
+        backfills.open(book, employee, vacated, np.array([date]), month + 1, rng)
+        taken.append(j)
+        days.append(date)
+        movers.append(int(employee[0]))
+    fills.add(
+        np.array(taken, dtype=np.int64),
+        np.array(days, dtype="datetime64[D]"),
+        "filled_transfer",
+        np.array(movers, dtype=np.int64),
+    )
 
 
 def _conversions(
     config: WorldConfig,
     workforce: Workforce,
-    book: RequisitionBook,
-    requisitions: NDArray[np.int64],
+    openings: NDArray[np.int64],
     dates: Dates,
+    book: RequisitionBook,
     rng: np.random.Generator,
+    fills: Fills,
 ) -> None:
-    """Fill requisitions by converting contingent workers of the same family, within the band,
-    from any cost center. A requisition with no candidate stays open."""
+    """Fill openings by converting contingent workers of the same family, within the band,
+    from any cost center. An opening with no candidate stays open."""
     pool = TransferPool(
         workforce,
         config.movements.conversion_level_band,
         members=workforce.contingent_pool(),
         other_cost_center=False,
     )
-    for j, date in zip(requisitions.tolist(), dates, strict=True):
+    taken, days, workers = [], [], []
+    for j, date in zip(openings.tolist(), dates, strict=True):
         role = book.roles(np.array([j]))
         family, level = int(role["family"][0]), int(role["level"][0])
         worker = pool.pick(family, level, int(role["cost_center"][0]), rng)
@@ -391,9 +430,12 @@ def _conversions(
         old = (int(workforce.column("family")[worker]), int(workforce.column("level")[worker]))
         workforce.convert_in(index, role, np.array([date]))
         pool.move(worker, old, None)
-        book.close(
-            np.array([j]),
-            np.array([date]),
-            "filled_conversion",
-            workforce.column("employee_id")[index],
-        )
+        taken.append(j)
+        days.append(date)
+        workers.append(int(workforce.column("employee_id")[worker]))
+    fills.add(
+        np.array(taken, dtype=np.int64),
+        np.array(days, dtype="datetime64[D]"),
+        "filled_conversion",
+        np.array(workers, dtype=np.int64),
+    )

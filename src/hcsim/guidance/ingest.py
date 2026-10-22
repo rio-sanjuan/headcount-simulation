@@ -44,12 +44,17 @@ MEASURES: Final[dict[GuidanceCategory, str]] = {
     GuidanceCategory.ATTRITION: _FLOW.format(code="TERM"),
     GuidanceCategory.HIRES: _FLOW.format(code="HIRE"),
     GuidanceCategory.HEADCOUNT: _FLOW.format(code="ACTIVE"),
-    # A requisition's opening is its first sighting. Openings are capped per requisition, as
-    # they are in the opening buffer.
+    # A requisition counts once, in the month it opened, with the openings it opened with: the
+    # most any of its state intervals carries. Openings are capped per requisition, as they
+    # are in the opening buffer.
     GuidanceCategory.REQUISITIONS_OPENED: f"""
         SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
                sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
-        FROM req_interval
+        FROM (
+            SELECT req_id, min(opened_date) AS opened_date, any_value(cost_center) AS cost_center,
+                   max(openings) AS openings
+            FROM req_interval GROUP BY req_id
+        )
         GROUP BY ALL
     """,
 }

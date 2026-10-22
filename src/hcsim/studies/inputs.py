@@ -26,6 +26,14 @@ from hcsim.model.ml.generative import ATTRIBUTES, EmpiricalAttributeGenerator
 from hcsim.model.ml.group import BackfillRateModel, PoissonGrowthModel
 
 WINDOW_MONTHS: Final = 12
+#: One row per requisition, with the openings it opened with, from its state intervals.
+_REQUISITIONS: Final = """
+    SELECT req_id, any_value(req_type) AS req_type, any_value(cost_center) AS cost_center,
+           any_value(job_code) AS job_code, any_value(location) AS location,
+           any_value(company) AS company, any_value(is_manager) AS is_manager,
+           min(opened_date) AS opened_date, max(openings) AS openings
+    FROM req_interval GROUP BY req_id
+"""
 
 
 class InputError(ValueError):
@@ -92,14 +100,17 @@ def fit_models(
         window,
     ) + _scalar(
         con,
-        "SELECT sum(openings) FROM req_interval WHERE opened_date > ? AND opened_date <= ?",
+        f"SELECT sum(openings) FROM ({_REQUISITIONS}) WHERE opened_date > ? AND opened_date <= ?",
         window,
     )
 
     def closed(reason: str) -> float:
+        # A fill takes one opening and ends one state interval; an unfilled exit ends the last
+        # interval with every opening still open.
+        measure = "sum(openings)" if reason == "unfilled" else "count(*)"
         return _scalar(
             con,
-            "SELECT sum(openings) FROM req_interval WHERE close_reason = ? "
+            f"SELECT {measure} FROM req_interval WHERE close_reason = ? "
             "AND closed_date > ? AND closed_date <= ?",
             [reason, *window],
         )
@@ -112,7 +123,7 @@ def fit_models(
     )
     backfills = _scalar(
         con,
-        "SELECT count(*) FROM req_interval WHERE req_type = 'backfill' "
+        f"SELECT count(*) FROM ({_REQUISITIONS}) WHERE req_type = 'backfill' "
         "AND opened_date > ? AND opened_date <= ?",
         window,
     )
@@ -125,10 +136,10 @@ def fit_models(
 
     # Growth: requisitions opened per cost center and month.
     growth = con.execute(
-        """
+        f"""
         SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
                count(*) AS n
-        FROM req_interval WHERE req_type = 'growth' AND opened_date > ? AND opened_date <= ?
+        FROM ({_REQUISITIONS}) WHERE req_type = 'growth' AND opened_date > ? AND opened_date <= ?
         GROUP BY ALL
         """,
         window,
@@ -145,10 +156,10 @@ def fit_models(
 
     # Roles: every growth requisition up to the snapshot, or every requisition if none.
     roles = con.execute(
-        """
+        f"""
         SELECT r.req_type, r.cost_center, r.location, r.company, r.is_manager,
                j.job_family, j.job_level, j.tech_indicator
-        FROM req_interval r JOIN dim_job j USING (job_code)
+        FROM ({_REQUISITIONS}) r JOIN dim_job j USING (job_code)
         WHERE r.opened_date <= ?
         """,
         [end],

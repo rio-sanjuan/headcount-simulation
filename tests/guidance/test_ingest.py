@@ -58,7 +58,10 @@ def test_categories_sum_to_the_raw_transaction_counts(con: duckdb.DuckDBPyConnec
 
 def test_requisitions_opened_counts_first_sightings(con: duckdb.DuckDBPyConnection) -> None:
     series = ingest(con)
-    (opened,) = con.execute("SELECT sum(openings) FROM req_interval").fetchone() or (0,)
+    (opened,) = con.execute(
+        "SELECT sum(least(o, 10)) "
+        "FROM (SELECT max(openings) AS o FROM req_interval GROUP BY req_id)"
+    ).fetchone() or (0,)
     total = series.frame.loc[series.frame["category"] == OPENED.value, "value"].sum()
     assert total == opened
 
