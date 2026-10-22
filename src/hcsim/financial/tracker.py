@@ -87,6 +87,27 @@ class HolderLedger:
         rows[hit, self.FORFEIT] = month
         return int(hit.sum())
 
+    def vesting_by_year(self, holders: Ints, month: int, years: int) -> NDArray[np.float64]:
+        """(holders, years): the shares each holder's live tranches vest in each forward year
+        after `month`. Forward year y (from 1) covers vest months `month + 12(y - 1) + 1` through
+        `month + 12y`."""
+        holders = np.asarray(holders, dtype=np.int64)
+        out = np.zeros((len(holders), years))
+        rows = self._consolidate()
+        if not len(rows) or not len(holders):
+            return out
+        after = rows[:, self.VEST] - month - 1
+        keep = (rows[:, self.FORFEIT] == NOT_FORFEITED) & (after >= 0) & (after < 12 * years)
+        order = np.argsort(holders, kind="stable")
+        ranked = holders[order]
+        found = np.searchsorted(ranked, rows[keep, self.HOLDER])
+        found = np.minimum(found, len(ranked) - 1)
+        mine = ranked[found] == rows[keep, self.HOLDER]
+        position = order[found[mine]]
+        year = after[keep][mine] // 12
+        np.add.at(out, (position, year), rows[keep, self.SHARES][mine].astype(np.float64))
+        return out
+
     def tranches(self) -> Tranches:
         rows = self._consolidate()
         return Tranches(

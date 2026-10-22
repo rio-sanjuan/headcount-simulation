@@ -25,6 +25,7 @@ from numpy.typing import NDArray
 from hcsim.engine.config import AwardSettings
 from hcsim.engine.results import DomainResult, RowChange
 from hcsim.engine.state import SimulationState
+from hcsim.financial.sizing import SizingContext
 from hcsim.model.core.layouts import Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import AWARD_TYPE, SimulationSchema
 
@@ -102,8 +103,9 @@ def apply(
     step: int,
     schema: SimulationSchema,
     awards: AwardSettings | None = None,
+    calendar_month: int = 1,
 ) -> Applied:
-    """Apply `result` to `state` at simulation step `step`."""
+    """Apply `result` to `state` at simulation step `step`, in `calendar_month`."""
     n = state.n_cost_centers
     e, o = result.employees, result.openings
     _check(e, state.live_employees)
@@ -193,7 +195,8 @@ def apply(
             if recorded_batch is not None:
                 batch = recorded_batch
             elif sizer is not None:
-                batch = sizer.size(rows, state.price)
+                context = SizingContext(step, calendar_month, state.ledger)
+                batch = sizer.size(rows, state.price, context)
             else:
                 unsized += len(positions)
                 continue
