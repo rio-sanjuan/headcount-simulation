@@ -622,6 +622,8 @@ class DomainResult:
     probe: Probe
     #: A classifier champion's lift table over the held-out rows.
     lift: pd.DataFrame | None = None
+    #: A classifier's design, to score rows the way its arms were trained.
+    design: Design | None = None
 
     @property
     def champion(self) -> ArmResult:
@@ -757,6 +759,7 @@ def train(
             task.lift(fitted[selection.champion].model)
             if isinstance(task, _ClassifierTask)
             else None,
+            task.design if isinstance(task, _ClassifierTask) else None,
         )
     run = TrainingRun(split, run.population, run.schema, results, z)
     if root is not None:

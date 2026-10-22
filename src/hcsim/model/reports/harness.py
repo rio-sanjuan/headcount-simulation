@@ -14,7 +14,8 @@ Nothing in a report depends on when it was written, so the same run writes the s
 
 - a selection summary, one row per domain;
 - per domain, every arm's metrics, the decisions that chose the champion, and a classifier
-  champion's lift table over the held-out rows.
+  champion's lift table over the held-out rows;
+- any ground-truth recoveries, each with its figures, whose rows go into the sidecar.
 """
 
 from __future__ import annotations
@@ -24,13 +25,16 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pandas as pd
 
 from hcsim.model.ml.metrics import FAMILY_METRICS
 from hcsim.model.ml.training import TrainingRun
 from hcsim.model.reports.sidecar import MetricsSidecar, Provenance, SidecarError
+
+if TYPE_CHECKING:
+    from hcsim.model.reports.recovery import Recovery
 
 REPORT_FILE: Final = "report.md"
 FIGURES: Final = "figures"
@@ -195,10 +199,16 @@ def _domain(name: str, run: TrainingRun) -> Section:
     return Section(f"Domain: {name}", "\n\n".join(parts))
 
 
-def training_report(run: TrainingRun, provenance: Provenance) -> tuple[Report, MetricsSidecar]:
-    """The report of a training run, and its sidecar."""
+def training_report(
+    run: TrainingRun, provenance: Provenance, recoveries: Sequence[Recovery] = ()
+) -> tuple[Report, MetricsSidecar]:
+    """The report of a training run, with any recoveries after the domains, and its
+    sidecar."""
     report = Report("Model training report", provenance)
     report.add(_selection(run))
     for name in run.domains:
         report.add(_domain(name, run))
-    return report, MetricsSidecar.of(run, provenance)
+    for recovery in recoveries:
+        report.add(recovery.section())
+    rows = {r.name: r.records() for r in recoveries}
+    return report, MetricsSidecar.of(run, provenance, rows)
