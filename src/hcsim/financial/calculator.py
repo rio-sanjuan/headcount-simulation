@@ -19,6 +19,12 @@ one grant per recipient. It reads nothing else: no simulation state, no warehous
 7. **Whole shares.** Rounded to whole shares, then laid out month by month by the vest template.
 
 `size` returns every step's result, so a grant can be traced from its range to its schedule.
+
+**Nothing is sized to a silent zero.** A projected price that isn't finite and positive, or an
+existing vest that isn't finite and non-negative, refuses the batch before any step runs. A
+recipient whose grant still comes out non-finite, or too large to count in whole shares, refuses
+it too: the error names every such recipient by ID, with the step and forward year where their
+sizing went wrong, rather than granting them nothing.
 """
 
 from __future__ import annotations
@@ -40,6 +46,10 @@ Floats = NDArray[np.float64]
 Ints = NDArray[np.int64]
 #: The rating rank of an employee who hasn't been rated.
 UNRATED: Final = 0
+#: The most shares one grant's year can hold: beyond it, whole shares can't be counted exactly.
+MAX_SHARES: Final = float(2**53)
+#: How many refused recipients an error names before it counts the rest.
+NAMED: Final = 20
 
 
 class SizingError(ValueError):
@@ -153,11 +163,23 @@ def size(
     price = np.asarray(prices, dtype=np.float64)
     if price.shape != (years,):
         raise SizingError(f"one projected price per forward year: {years}, not {price.shape}")
+    bad_years = [y + 1 for y in np.flatnonzero(~(np.isfinite(price) & (price > 0)))]
+    if bad_years:
+        raise SizingError(
+            "projected prices must be finite and positive: forward year "
+            + ", ".join(f"{y} is {float(price[y - 1])!r}" for y in bad_years)
+        )
     n = len(recipients)
     held = np.zeros((n, years)) if existing is None else np.asarray(existing, dtype=np.float64)
     if held.shape != (n, years):
         raise SizingError(
             f"existing vests must be (recipients, years), {(n, years)}, not {held.shape}"
+        )
+    bad_held = ~(np.isfinite(held) & (held >= 0)).all(axis=1)
+    if bad_held.any():
+        raise SizingError(
+            "existing vests must be finite and non-negative, for "
+            + _named(recipients.ids[bad_held])
         )
     # 1. Range.
     cells = ranges.lookup(recipients.families, recipients.levels, recipients.locations)
@@ -175,8 +197,36 @@ def size(
     with np.errstate(divide="ignore", invalid="ignore"):
         shares_float = gap / price[None, :]
     # 7. Whole shares.
-    finite = np.isfinite(shares_float).all(axis=1)
-    if not finite.all():
-        raise SizingError(f"{int((~finite).sum())} recipients got a non-finite grant")
+    _refuse(recipients.ids, {"target": target, "base": base, "gap": gap, "shares": shares_float})
     shares = np.rint(shares_float).astype(np.int64)
     return Sized(cells, p, target, base, gap, shares_float, shares, template.expand(shares))
+
+
+def _named(ids: Ints) -> str:
+    listed = ", ".join(f"employee {int(i)}" for i in ids[:NAMED])
+    more = len(ids) - NAMED
+    return listed + (f", and {more} more" if more > 0 else "")
+
+
+def _refuse(ids: Ints, steps: Mapping[str, Floats]) -> None:
+    """Refuse every recipient a step left non-finite, or with more shares than can be counted,
+    naming each with the first step and forward year it went wrong in."""
+    first: dict[int, str] = {}
+    for step, values in steps.items():
+        grid = values.reshape(len(ids), -1)
+        wrong = ~np.isfinite(grid)
+        if step == "shares":
+            wrong |= np.isfinite(grid) & (grid > MAX_SHARES)
+        for row, col in zip(*np.nonzero(wrong), strict=True):
+            where = step if grid.shape[1] == 1 else f"{step}, forward year {int(col) + 1}"
+            first.setdefault(int(row), where)
+    if first:
+        rows = sorted(first)
+        named = [f"employee {int(ids[r])} (at the {first[r]})" for r in rows[:NAMED]]
+        more = len(rows) - NAMED
+        raise SizingError(
+            f"{len(rows)} recipients got a grant that isn't a finite, countable number of shares, "
+            "and none is granted zero instead: "
+            + ", ".join(named)
+            + (f", and {more} more" if more > 0 else "")
+        )

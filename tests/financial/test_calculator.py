@@ -114,3 +114,44 @@ def test_a_rating_table_is_checked(
 ) -> None:
     with pytest.raises(SizingError, match=message):
         RatingTable(positions, unrated)
+
+
+# --- nothing is sized to a silent zero -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [0.0, -5.0, np.inf, np.nan])
+def test_a_price_that_isnt_finite_and_positive_refuses_the_batch(bad: float) -> None:
+    with pytest.raises(
+        SizingError, match="projected prices must be finite and positive: forward year 2"
+    ):
+        size(recipients(4), RANGES, RATINGS, [100.0, bad], TWO_YEARS)
+
+
+def test_an_existing_vest_that_isnt_finite_and_non_negative_names_its_recipient() -> None:
+    existing = np.array([[0.0, 0.0], [np.nan, 0.0], [0.0, -1.0]])
+    with pytest.raises(SizingError, match=r"for employee 101, employee 102$"):
+        size(recipients(3, 3, 3), RANGES, RATINGS, [100.0, 125.0], TWO_YEARS, existing)
+
+
+def test_a_grant_too_large_to_count_names_its_recipient_and_step() -> None:
+    # A price this small asks for more shares than can be counted exactly.
+    with pytest.raises(SizingError) as error:
+        size(recipients(4, 0), RANGES, RATINGS, [1e-12, 125.0], TWO_YEARS)
+    message = str(error.value)
+    assert message.startswith("2 recipients got a grant that isn't a finite, countable number")
+    assert "none is granted zero instead" in message
+    assert "employee 100 (at the shares, forward year 1), employee 101 (at the shares" in message
+
+
+def test_a_broken_range_names_the_step_it_breaks() -> None:
+    values = RANGES.values.copy()
+    values[0, 0, 0, 2] = np.nan  # a min_target no loader would accept
+    with pytest.raises(SizingError, match=r"employee 100 \(at the target\)"):
+        size(recipients(4), RangeTable(values), RATINGS, [100.0, 125.0], TWO_YEARS)
+
+
+def test_a_long_list_of_refused_recipients_is_counted_past_twenty() -> None:
+    with pytest.raises(
+        SizingError, match=r"employee 119 \(at the shares, forward year 1\), and 5 more$"
+    ):
+        size(recipients(*[4] * 25), RANGES, RATINGS, [1e-12, 125.0], TWO_YEARS)

@@ -9,7 +9,7 @@ import pytest
 from hcsim.financial.calculator import RatingTable
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.ranges import RangeError, RangeTable
-from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.sizing import NewHireGapFill, SizingError
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, VestTemplate, VestTemplateError
 from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn
@@ -271,3 +271,14 @@ def test_an_empty_grant_records_nothing() -> None:
         == 0
     )
     assert len(ledger) == 0
+
+
+class InfinitePrice(AnnualGrowthPrice):
+    def projection(self, forward_years: int) -> float:
+        return float("inf") if forward_years == 3 else super().projection(forward_years)
+
+
+def test_a_strategy_refuses_a_price_it_cant_size_at_rather_than_granting_zero() -> None:
+    strategy = NewHireGapFill(RangeTable.from_frame(range_frame(), SCHEMA))
+    with pytest.raises(SizingError, match="forward year 3 is inf"):
+        strategy.size(recipients(), InfinitePrice(100.0))

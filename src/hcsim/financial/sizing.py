@@ -54,8 +54,6 @@ class NewHireGapFill:
     ) -> AwardBatch:
         """Size one grant per employee row."""
         projected = np.array([prices.projection(y) for y in range(1, self.template.n_years + 1)])
-        if not (np.isfinite(projected) & (projected > 0)).all():
-            raise SizingError("projected prices must be positive")
         sized = size(
             Recipients.from_rows(rows),
             self.ranges,
