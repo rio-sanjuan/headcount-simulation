@@ -628,6 +628,13 @@ class SimulationConfig:
             and guidance.grouping_column != COST_CENTER
         ):
             problems.append("requisition generation reads guidance only at cost-center grain")
+        if guidance.aligned_to is not None and self.plan is not None:
+            plan = self.plan.digest()
+            if guidance.aligned_to != plan:
+                problems.append(
+                    f"guidance was aligned to the plan {guidance.aligned_to}, but the run's plan "
+                    f"is {plan}: realign the guidance, or run against the plan it was aligned to"
+                )
         try:
             object.__setattr__(self, "aligner", guidance.aligner(self.schema))
         except SchemaError as error:

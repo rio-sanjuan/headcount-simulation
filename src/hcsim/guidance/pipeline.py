@@ -18,7 +18,8 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
 7. **align**, when the configuration names a method, moves each group's anchor onto its plan
    targets and re-derives the flows (see `alignment`), after reconciliation, so the aligned
    values are final, and a coherence pass follows it;
-8. **format** writes the artifact. Negative cells are clamped to zero there, and the report
+8. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`)
+   when the run aligned to one. Negative cells are clamped to zero there, and the report
    counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
@@ -377,6 +378,8 @@ class Align:
             self.name,
             method=rules.method,
             target=target.digest(),
+            # Alignment runs after reconciliation, so its values are the artifact's.
+            precedence="aligned after reconciliation" if config.reconcile else "aligned",
             aligned_months=aligned_months,
             untargeted_groups=untargeted,
             max_shortfall=max(shortfalls.values(), default=0.0),
@@ -473,6 +476,7 @@ class Format:
             config.population,
             sample_paths=paths,
             path_index=tuple((g, c.value) for g, c in keys),
+            aligned_to=ctx.report.get("align", {}).get("target"),
         )
         ctx.note(
             self.name,
