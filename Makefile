@@ -51,9 +51,10 @@ deps: ## Lockfile freshness, known vulnerabilities, and dependency licenses
 test: ## Fast tests, in parallel
 	$(UV_RUN) pytest -n auto -m "$(FAST)" $(TESTS)
 
+# A PR whose selected tests are all heavy collects no fast ones, and pytest exits 5: that's a pass.
 test-cov: ## Fast tests with coverage, for the diff-coverage gate
 	$(UV_RUN) pytest -n auto -m "$(FAST)" --cov --cov-report=xml:$(COVERAGE_XML) \
-		--cov-report=term $(TESTS)
+		--cov-report=term $(TESTS) || [ $$? -eq 5 ]
 
 # CI: coverage of the lines a PR changes since $BASE. hcsim.financial carries the accounting, so
 # its bar is higher. Run after test-cov.
