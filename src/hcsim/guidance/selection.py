@@ -78,6 +78,9 @@ class SeriesForecast:
     #: (paths, horizon) draws from the combined predictive distribution, or none, and why.
     paths: Floats | None = None
     point_only: str = ""
+    #: The combined forecast's backtest errors, over the folds every weighted model forecast,
+    #: for reconciliation to weigh the series by.
+    residuals: Floats | None = None
 
 
 @dataclass(frozen=True)

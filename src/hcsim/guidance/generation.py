@@ -94,7 +94,24 @@ def generate(
         selection.method,
         paths,
         point_only,
+        _residuals(selection, weights, values),
     )
+
+
+def _residuals(selection: Selection, weights: dict[str, float], history: Floats) -> Floats | None:
+    """The combined forecast's backtest errors: the actuals less the weighted fold forecasts,
+    over the folds every weighted model forecast, in fold order."""
+    by_window = {
+        name: {(f.train_end, f.test_end): f.predicted for f in selection.folds.get(name, ())}
+        for name in weights
+    }
+    shared = set.intersection(*(set(w) for w in by_window.values())) if by_window else set()
+    errors = [
+        history[start:end] - sum(weights[n] * by_window[n][(start, end)] for n in weights)
+        for start, end in sorted(shared)
+        if all(len(by_window[n][(start, end)]) == end - start for n in weights)
+    ]
+    return np.concatenate(errors) if errors else None
 
 
 def _paths(

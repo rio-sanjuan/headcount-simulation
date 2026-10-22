@@ -75,10 +75,17 @@ class Combination(_Strict):
 
 
 class Reconciliation(_Strict):
-    """How each group's flows are reconciled to its anchor. No method skips the step."""
+    """How each group's flows are reconciled to its anchor (see `reconcile`). No method skips
+    the step."""
 
     method: str | None = "greedy"
     tolerance: float = Field(default=1.0, ge=0.0)
+    #: Greedy: raise the flows moving with a gap before cutting the others.
+    sign_aware: bool = False
+    #: The projections: hold the anchor and adjust only the flows.
+    anchor_fixed: bool = True
+    #: MinT's shrinkage intensity; none estimates it.
+    shrinkage: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class Validation(_Strict):
