@@ -333,6 +333,12 @@ class SimulationConfig:
         ShortfallPolicy.KEEP_OPEN,
         "keep an unmatched transfer opening open, or spill it to another fill channel",
     )
+    # requisitions
+    requisitions_supply_gain: float = setting(
+        "requisitions",
+        1.0,
+        "the share of the gap to the plan target that target-seeking growth closes each month",
+    )
     # replay
     replay_boundary_fill: bool = setting(
         "replay", True, "inject boundary fills for hires replay can't trace to a requisition"
@@ -532,6 +538,13 @@ class SimulationConfig:
                 ("transfers_level_band",),
                 lambda: _when(
                     self.transfers_level_band < 0, "transfers_level_band must be non-negative"
+                ),
+            ),
+            (
+                ("requisitions_supply_gain",),
+                lambda: _when(
+                    not 0.0 <= self.requisitions_supply_gain <= 1.0,
+                    "requisitions_supply_gain must lie in [0, 1]",
                 ),
             ),
             (

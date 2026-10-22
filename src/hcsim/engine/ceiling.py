@@ -84,21 +84,24 @@ class Ceiling:
         """Whether anything bounds any cost center."""
         return self.plan is not None or bool(np.isfinite(self.caps).any())
 
-    def at(self, run_date: dt.date, step: int) -> Floats:
-        """`Cap_eff(c, t)` for every cost center at `step`."""
-        ceiling = self.caps.copy()
+    def targets(self, run_date: dt.date, step: int) -> Floats:
+        """`H*(c, t)` for every cost center at `step`: NaN where the plan has none."""
+        planned = np.full(len(self.caps), np.nan)
         if self.plan is None:
-            return ceiling
+            return planned
         month = pd.Period(run_date, freq="M") + step
         first, last = self.plan.window
         if not first <= month <= last:
-            return ceiling
+            return planned
         targets = self.plan.target(COST_CENTER, month)
         has = self._plan_group >= 0
-        planned = np.full(len(ceiling), np.inf)
         planned[has] = targets[self._plan_group[has]]
-        planned = np.where(np.isnan(planned), np.inf, planned)
-        result: Floats = np.minimum(ceiling, planned)
+        return planned
+
+    def at(self, run_date: dt.date, step: int) -> Floats:
+        """`Cap_eff(c, t)` for every cost center at `step`."""
+        planned = self.targets(run_date, step)
+        result: Floats = np.minimum(self.caps, np.where(np.isnan(planned), np.inf, planned))
         return result
 
     def room(self, run_date: dt.date, step: int, strength: Ints) -> Floats:

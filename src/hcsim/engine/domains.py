@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Final, cast
 
 import numpy as np
@@ -370,23 +371,63 @@ def weighted_top_k(
 # --- growth -----------------------------------------------------------------------------------
 
 
+class Regime(IntEnum):
+    """How growth sizes a cost center's new requisitions in a month."""
+
+    RATE = 0  #: at the growth model's historical rate
+    TARGET = 1  #: toward the plan's target, by the supply rule
+    GUIDED = 2  #: to the residual of the requisitions-opened quota
+
+
+def regimes(state: SimulationState, ctx: StepContext) -> NDArray[np.int64]:
+    """Each cost center's regime this month: guided where guidance covers it, target-seeking
+    where the plan has a target for it and guidance doesn't, and the rate elsewhere."""
+    n = state.n_cost_centers
+    regime = np.full(n, Regime.RATE, dtype=np.int64)
+    planned = ~np.isnan(ctx.config.ceiling.targets(ctx.config.run_date, ctx.step))
+    regime[planned] = Regime.TARGET
+    if ctx.guided(_OPENED):
+        covered = ctx.guided_groups_of_codes(np.arange(n, dtype=np.int64), _OPENED) >= 0
+        regime[covered] = Regime.GUIDED
+    return regime
+
+
 def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """New growth requisitions: the residual of the requisitions-opened quota where guidance
-    covers the cost center, and a Poisson count at the historical rate elsewhere. Roles come
-    from the attribute generator."""
+    """New growth requisitions, sized per cost center by its regime:
+
+    - **guided**: the residual of the requisitions-opened quota, after backfill's use of it;
+    - **target-seeking**: the supply rule, `ceil(gain * (H* - S))` and never negative, so the
+      plan target's gap to committed strength closes by the supply gain each month;
+    - **rate**: a Poisson count at the growth model's historical rate.
+
+    Every count is then clamped at the room the effective ceiling leaves, since the capacity
+    veto always wins. Roles come from the required attribute generator.
+    """
     n = state.n_cost_centers
     rng = ctx.rng(GROWTH)
     counts = rng.poisson(_per_cost_center_rates(ctx.config.models.growth, n)).astype(np.int64)
+    regime = regimes(state, ctx)
+    strength = state.headcount + state.open_openings
+    target = ctx.config.ceiling.targets(ctx.config.run_date, ctx.step)
+    seeking = regime == Regime.TARGET
+    gap = np.nan_to_num(target - strength, nan=0.0)
+    supply = np.maximum(0, np.ceil(ctx.config.requisitions_supply_gain * gap)).astype(np.int64)
+    counts[seeking] = supply[seeking]
     ledger: dict[str, Ints] = {}
     quotas: dict[str, QuotaRecord] = {}
-    if ctx.guided(_OPENED):
+    guided = regime == Regime.GUIDED
+    group = np.full(n, -1, dtype=np.int64)
+    if guided.any():
         group = ctx.guided_groups_of_codes(np.arange(n, dtype=np.int64), _OPENED)
-        covered = group >= 0
         quota = ctx.quota(_OPENED)
         used = state.category_ledger.get(_OPENED.value, np.zeros(len(quota), dtype=np.int64))
-        residual = np.maximum(0, quota - used)
-        counts[covered] = residual[group[covered]]
-        mine = np.bincount(group[covered], weights=counts[covered], minlength=len(quota))
+        counts[guided] = np.maximum(0, quota - used)[group[guided]]
+    ceiling = ctx.config.ceiling
+    if ceiling.binds:
+        room = ceiling.room(ctx.config.run_date, ctx.step, strength)
+        counts = np.minimum(counts, np.minimum(room, np.iinfo(np.int64).max)).astype(np.int64)
+    if guided.any():
+        mine = np.bincount(group[guided], weights=counts[guided], minlength=len(quota))
         ledger[_OPENED.value] = mine.astype(np.int64)
         # Generation can always supply its residual, so the whole quota is eligible.
         quotas[_OPENED.value] = QuotaRecord(quota, quota.copy(), used + ledger[_OPENED.value])
