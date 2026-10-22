@@ -1,4 +1,5 @@
-"""Tests for replay: realized history routed to the domains, with boundary fills."""
+"""Tests for replay: realized history routed to the domains, with boundary fills, and
+requisitions kept on history's track."""
 
 from __future__ import annotations
 
@@ -11,24 +12,30 @@ from typing import Any
 
 import duckdb
 import numpy as np
+import pandas as pd
 import pytest
 
 from hcsim.engine.apply import apply
 from hcsim.engine.config import ForecastScope, RunMode, SimulationConfig
 from hcsim.engine.domains import StepContext
-from hcsim.engine.known_events import EventKind, Source, collect, from_replay
+from hcsim.engine.known_events import EventKind, Source, collect, from_replay, step_of
 from hcsim.engine.known_plan import sanitize
 from hcsim.engine.known_resolution import jobs_from_world, resolve_plan
 from hcsim.engine.loop import FLOW_SYMBOLS, HEADCOUNT_IDENTITY, OPENING_IDENTITY, simulate
-from hcsim.engine.replay import replay_requisitions, replayed_requisitions
+from hcsim.engine.replay import (
+    RESERVED_OPENINGS,
+    ReplayedRequisitions,
+    replay_requisitions,
+    replayed_requisitions,
+)
 from hcsim.engine.results import DomainResult, Grant, RowChange
 from hcsim.engine.seeding import schema_from_world, seed_state
 from hcsim.engine.seeds import SeedManager
 from hcsim.financial.prices import StaticPrice
 from hcsim.financial.sizing import AwardBatch
 from hcsim.financial.tracker import HolderLedger
-from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn, OpeningColumn
-from hcsim.model.core.schema import SimulationSchema
+from hcsim.model.core.layouts import EMPLOYEE, OPENING, EmployeeColumn, OpeningColumn
+from hcsim.model.core.schema import REQ_TYPE, SimulationSchema
 from hcsim.studies.inputs import fit_models
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
@@ -80,16 +87,83 @@ def test_realized_movements_become_replay_events(con: duckdb.DuckDBPyConnection)
     assert all("cost_center" in e.destination for e in transfers + hires)
 
 
-def test_realized_requisitions_open_and_close_by_month(con: duckdb.DuckDBPyConnection) -> None:
+def test_hires_whose_offers_predate_the_run_carry_no_requisition(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    waiting = con.execute(
+        "SELECT employee_id, start_date FROM pending_start WHERE snapshot_date = ?",
+        [RUN - dt.timedelta(days=1)],
+    ).df()
+    due = {
+        (int(e), step_of(RUN, d))
+        for e, d in zip(waiting["employee_id"], waiting["start_date"], strict=True)
+    }
+    starts = [
+        e for e in from_replay(con, RUN) if e.reason == "HIRE" and (e.employee_id, e.step) in due
+    ]
+    assert starts
+    assert all(e.req_id is None for e in starts)
+
+
+def test_realized_requisitions_carry_their_openings_by_month(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
     replay = replayed_requisitions(con, schema_from_world(con), RUN, MONTHS)
-    assert set(replay.opened) <= set(range(MONTHS))
-    opened = np.concatenate(list(replay.opened.values()))
-    assert (opened[:, OpeningColumn.REQ_ID] > 0).all()
-    assert (
-        (opened[:, OpeningColumn.NUM_OPENINGS] >= 1) & (opened[:, OpeningColumn.NUM_OPENINGS] <= 10)
-    ).all()
-    assert sum(len(v) for v in replay.closed.values()) > 0
+    assert set(replay.held) == set(replay.reserved) == set(range(MONTHS))
+    assert (np.diff(replay.ids) > 0).all()
+    assert (replay.rows[:, OpeningColumn.NUM_OPENINGS] == 0).all()
+    for step, (place, openings) in replay.held.items():
+        assert ((openings >= 0) & (openings <= 10)).all()
+        cost_centers = replay.rows[place, OpeningColumn.COST_CENTER].astype(int)
+        shows = np.bincount(cost_centers, weights=openings, minlength=len(replay.reserved[step]))
+        assert (replay.reserved[step] <= shows).all()
+    assert sum(int(r.sum()) for r in replay.reserved.values()) > 0
     assert replay.pruned == {}
+
+
+def test_a_replay_holds_history_s_openings_and_its_reservations(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    result, _, _ = replay_run(con)
+    schema = schema_from_world(con)
+    truth = np.stack(
+        [seed_state(con, schema, first_of(RUN, k))[0].open_openings for k in range(MONTHS + 1)]
+    )
+    for t in result.trajectories:
+        reserved = t.diagnostics[RESERVED_OPENINGS]
+        assert int(reserved.sum()) > 0
+        assert np.array_equal(t.open_openings[0], truth[0])
+        assert np.array_equal(t.open_openings[1:] - reserved, truth[1:])
+
+
+def test_the_domain_moves_each_requisition_to_its_month_end_openings() -> None:
+    state = initial_state()  # requisitions 500-505, with 1 or 3 openings
+    rows = OPENING.empty(4)
+    rows[:, OpeningColumn.REQ_ID] = [500, 501, 502, 900]
+    rows[:, OpeningColumn.COST_CENTER] = [0, 0, 1, 2]
+    rows[:, OpeningColumn.REQ_TYPE] = SCHEMA.vocabulary(REQ_TYPE).code("growth")
+    # 500 is no longer held, 501 grows from 3 to 5, 502 stays at 1, and 900 opens with 2.
+    held = {0: (np.array([1, 2, 3]), np.array([5, 1, 2]))}
+    replay = ReplayedRequisitions(rows, held, {0: np.array([0, 2, 0])})
+    config = dataclasses.replace(config_for(SCHEMA), run_mode=RunMode.REPLAY)
+    result = replay_requisitions(state, StepContext(config, 0, 0, SeedManager(1), replay=replay))
+    # Openings count by the type of the row they land on: 501 is a backfill, 900 growth.
+    assert result.flows["B_att"].tolist() == [2, 0, 0]
+    assert result.flows["G"].tolist() == [0, 0, 2]
+    assert result.flows["U"].tolist() == [1, 0, 0]
+    assert result.diagnostics[RESERVED_OPENINGS].tolist() == [0, 2, 0]
+    apply(state, result, 0, SCHEMA)
+    live = state.live_openings
+    openings = dict(
+        zip(
+            live[:, OpeningColumn.REQ_ID].astype(int).tolist(),
+            live[:, OpeningColumn.NUM_OPENINGS].astype(int).tolist(),
+            strict=True,
+        )
+    )
+    assert openings == {501: 5, 502: 1, 503: 3, 504: 1, 505: 3, 900: 2}
+    nothing = StepContext(config, 0, 0, SeedManager(1), replay=ReplayedRequisitions())
+    assert replay_requisitions(state, nothing).openings.is_empty
 
 
 def test_a_replay_fires_its_history_and_keeps_the_identities(
@@ -163,13 +237,19 @@ def test_requisitions_the_schema_can_t_hold_are_pruned(con: duckdb.DuckDBPyConne
     state = initial_state()
     ctx = StepContext(
         dataclasses.replace(config_for(narrow), run_mode=RunMode.REPLAY),
-        min(replay.opened),
+        0,
         0,
         SeedManager(1),
         replay=replay,
     )
     result = replay_requisitions(state, ctx)
+    assert int(result.flows["G"].sum()) > 0
     assert int(result.flows["G_camp"].sum()) == 0
+
+
+def first_of(run: dt.date, months: int) -> dt.date:
+    """The first of the month `months` after `run`'s."""
+    return (pd.Period(run, freq="M") + months).start_time.date()
 
 
 def config_for(schema: SimulationSchema) -> SimulationConfig:
