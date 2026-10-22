@@ -15,6 +15,13 @@ recipient already vests in each forward year after the award.
   gap is pro-rated by them; the later years are full forward years.
 - **Retention** (`RetentionGrant`): a share of each forward year's equity target (target less
   base) on top of whatever the recipient already vests, laid out by its template.
+
+Two simple alternatives size without the year-by-year gap, as baselines to compare against:
+
+- **Fixed fraction** (`FixedFraction`): a fixed share of target total compensation, at the
+  first forward year's price, split evenly over the template's years;
+- **Single year** (`SingleYear`): only the first forward year's gap, net of what the recipient
+  already vests that year, on a one-year template.
 """
 
 from __future__ import annotations
@@ -36,10 +43,12 @@ from hcsim.model.core.layouts import Buffer, EmployeeColumn
 __all__ = [
     "AnnualGapFill",
     "AwardBatch",
+    "FixedFraction",
     "GapFill",
     "InYearPlusForward",
     "NewHireGapFill",
     "RetentionGrant",
+    "SingleYear",
     "SizingContext",
     "SizingError",
     "SizingStrategy",
@@ -201,3 +210,46 @@ class RetentionGrant(GapFill):
         )
         shares = np.rint(sized.shares_float * self.fraction).astype(np.int64)
         return _batch(self.award_type, self.template, sized, shares)
+
+
+@dataclass(frozen=True)
+class FixedFraction:
+    """A fixed share of target total compensation, at the first forward year's price, split
+    evenly over the template's years, the last absorbing the remainder."""
+
+    ranges: RangeTable
+    template: VestTemplate
+    fraction: float = 0.2
+    #: Where each recipient sits in the range, by rating; flat at the midpoint by default.
+    ratings: RatingTable = field(default_factory=RatingTable.flat)
+    award_type: str = "annual"
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.fraction <= 1.0:
+            raise SizingError(f"a fixed fraction lies in (0, 1], not {self.fraction}")
+
+    def size(
+        self, rows: Buffer, prices: StockPriceModel, context: SizingContext | None = None
+    ) -> AwardBatch:
+        years = self.template.n_years
+        projected = _projected(prices, years)
+        sized = size(
+            Recipients.from_rows(rows), self.ranges, self.ratings, projected, self.template
+        )
+        total = np.rint(self.fraction * sized.target / projected[0]).astype(np.int64)
+        shares = np.repeat((total // years)[:, None], years, axis=1)
+        shares[:, -1] += total - shares.sum(axis=1)
+        return _batch(self.award_type, self.template, sized, shares)
+
+
+@dataclass(frozen=True)
+class SingleYear(GapFill):
+    """Only the first forward year's gap, net of what the recipient already vests that year,
+    on a one-year template."""
+
+    def __post_init__(self) -> None:
+        if self.template.n_years != 1:
+            raise SizingError(
+                f"a single-year grant needs a one-year template, not {self.template.name!r}'s "
+                f"{self.template.n_years} years"
+            )
