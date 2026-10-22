@@ -10,9 +10,17 @@ import numpy as np
 import pytest
 
 from hcsim.engine.config import ConfigError
-from hcsim.engine.domains import StepContext, external_fill
+from hcsim.engine.domains import StepContext
 from hcsim.engine.eligibility import EligibilityRule
-from hcsim.engine.fills import CHANNELS, CONVERSION, EXTERNAL, TRANSFER, channel_hazards, rescale
+from hcsim.engine.fills import (
+    CHANNELS,
+    CONVERSION,
+    EXTERNAL,
+    TRANSFER,
+    channel_hazards,
+    fills,
+    rescale,
+)
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.settings import to_record
 from hcsim.model.core.layouts import OpeningColumn
@@ -93,9 +101,11 @@ def test_a_planner_mix_has_no_record_yet(tmp_path: Path) -> None:
         to_record(built)
 
 
-def test_external_fill_reads_its_rescaled_channel() -> None:
+def test_a_crowded_opening_fills_by_one_channel_in_proportion() -> None:
     state = initial_state()
     ctx = StepContext(config(models=with_channels(1.0, 1.0, 0.0)), 0, 0, SeedManager(3))
-    filled = external_fill(state, ctx).employees.append
-    # Half the external hazard is left after rescaling, so about half of 12 openings fill.
-    assert 0 < len(filled) < 12
+    result = fills(state, ctx)
+    external, conversion = int(result.flows["F_ext"].sum()), int(result.flows["F_conv"].sum())
+    # Each of the 12 openings fills by exactly one channel, about half by each.
+    assert external + conversion == 12 == len(result.employees.append)
+    assert 0 < external < 12

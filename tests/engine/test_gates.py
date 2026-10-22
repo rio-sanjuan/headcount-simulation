@@ -23,7 +23,7 @@ from tests.engine.test_config_state_seeds import awards
 from tests.engine.test_config_state_seeds import config as small_config
 from tests.engine.test_loop import RUN_DATE, run
 
-DOMAINS = ("attrition", "backfill", "external_fill", "cancellation", "growth")
+DOMAINS = ("attrition", "backfill", "fills", "cancellation", "growth")
 
 
 def test_a_registration_gate_admits_by_switch_and_mode() -> None:
@@ -51,7 +51,7 @@ def test_registration_keeps_the_step_order_and_refuses_unknown_domains() -> None
         StepGate("cancellation", probability=0.5),
     ]
     registered = register(DOMAINS, gates, RunMode.UNGUIDED)
-    assert registered.domains == ("attrition", "backfill", "external_fill", "cancellation")
+    assert registered.domains == ("attrition", "backfill", "fills", "cancellation")
     assert registered.unregistered == ("growth",)
     assert len(registered.steps["cancellation"]) == 2
     assert registered.opens("attrition", 5, np.random.default_rng(0))

@@ -20,10 +20,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.config import BackfillSource, SimulationConfig
-from hcsim.engine.fills import EXTERNAL, channel_hazards
+from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
-from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
+from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.aligner import GroupAligner
@@ -37,7 +37,6 @@ from hcsim.model.core.layouts import (
     BufferLayout,
     EmployeeColumn,
     OpeningColumn,
-    copy_role,
 )
 from hcsim.model.core.schema import REQ_TYPE, UNATTRIBUTED
 from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabilities
@@ -50,7 +49,6 @@ ATTRITION: Final = "attrition"
 BACKFILL: Final = "backfill"
 BACKFILL_TRANSFER: Final = "backfill_transfer"
 TRANSFERS: Final = "transfers"
-EXTERNAL_FILL: Final = "external_fill"
 CANCELLATION: Final = "cancellation"
 GROWTH: Final = "growth"
 
@@ -77,6 +75,8 @@ class StepContext:
     trajectory: int
     seeds: SeedManager
     departures: list[Departures] = field(default_factory=list)
+    #: Openings this month's fills assigned to the transfer channel, by requisition id.
+    transfers: dict[int, int] = field(default_factory=dict)
     #: The run's known events, resolved, and the log of those fired.
     known: ResolvedPlan | None = None
     fired: FiringLog = field(default_factory=FiringLog)
@@ -175,24 +175,18 @@ def draw(
     category: GuidanceCategory,
     ctx: StepContext,
     rng: np.random.Generator,
-    known: Mask | None = None,
-    used: Ints | None = None,
+    known: Mask,
 ) -> tuple[Mask, dict[str, QuotaRecord]]:
     """Quota sampling for rows in covered groups, independent draws for the rest. Rows in
-    `known` already experience the event, and `used` counts, per group, what another domain
-    already realized of the category this step: both count against the group's quota, and
-    sampling takes only what's left of it."""
+    `known` already experience the event: they count against their group's quota, and sampling
+    takes only what's left of it."""
     independent = bernoulli(p, rng)
     if not ctx.guided(category):
         return independent, {}
     groups = ctx.guided_groups(rows, layout, category)
     quota = ctx.quota(category)
-    taken = np.zeros(len(quota), dtype=np.int64)
-    if known is not None:
-        covered = known & (groups >= 0)
-        taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
-    if used is not None:
-        taken = taken + used
+    covered = known & (groups >= 0)
+    taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
     selection = quota_select(p, groups, np.maximum(quota - taken, 0), rng)
     mask = np.where(groups >= 0, selection.mask, independent)
     record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken)
@@ -316,45 +310,6 @@ def backfill_transfer(state: SimulationState, ctx: StepContext) -> DomainResult:
 # --- external fill ----------------------------------------------------------------------------
 
 
-def external_fill(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """Each open opening fills with the model's monthly hazard, or by the external hires quota.
-    A fill hires an external candidate into the requisition's role and consumes one opening."""
-    reqs = state.live_openings
-    openings = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.int64)
-    # Openings reserved for a pending start are held back.
-    row_of = np.repeat(np.arange(len(reqs)), ctx.fillable(reqs))  # one per fillable opening
-    p = channel_hazards(reqs, ctx)[row_of, EXTERNAL]
-    used = state.category_ledger.get(GuidanceCategory.EXTERNAL_HIRES.value)
-    filled, quotas = draw(
-        p,
-        reqs[row_of],
-        OPENING,
-        GuidanceCategory.EXTERNAL_HIRES,
-        ctx,
-        ctx.rng(EXTERNAL_FILL),
-        used=used,
-    )
-    source = row_of[filled]
-    per_row = np.bincount(source, minlength=len(reqs)).astype(np.int64)
-    touched = np.flatnonzero(per_row)
-    closed = touched[per_row[touched] == openings[touched]]
-    partial = touched[per_row[touched] < openings[touched]]
-    remaining = reqs[partial].copy()
-    remaining[:, OpeningColumn.NUM_OPENINGS] -= per_row[partial]
-
-    hires = EMPLOYEE.empty(len(source))
-    copy_role(reqs[source], hires)
-    hires[:, EmployeeColumn.EMPLOYEE_ID] = -1
-    hires[:, EmployeeColumn.HIRE_STEP] = ctx.step
-    return DomainResult(
-        EXTERNAL_FILL,
-        employees=RowChange(EMPLOYEE, append=hires),
-        openings=RowChange(OPENING, drop=closed, write_index=partial, write_rows=remaining),
-        grants=(Grant("new_hire"),),
-        quotas=quotas,
-    )
-
-
 # --- cancellation -----------------------------------------------------------------------------
 
 
@@ -414,7 +369,7 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
 DOMAINS: Final[tuple[tuple[str, Handler], ...]] = (
     (ATTRITION, attrition),
     (BACKFILL, backfill),
-    (EXTERNAL_FILL, external_fill),
+    (FILLS, fills),
     (CANCELLATION, cancellation),
     (BACKFILL_TRANSFER, backfill_transfer),
     (GROWTH, growth),
