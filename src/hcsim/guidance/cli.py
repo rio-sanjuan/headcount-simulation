@@ -13,6 +13,7 @@ import duckdb
 import pandas as pd
 
 from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
+from hcsim.guidance.divergence import against_measures
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
 from hcsim.guidance.pipeline import run
@@ -45,6 +46,12 @@ def main(argv: Sequence[str]) -> int:
         "--allow-snapshot-gaps",
         action="store_true",
         help="count closures across a missing month-end in the month after",
+    )
+    actual.add_argument(
+        "--allow-divergence",
+        action="store_true",
+        help="write the artifact even where it diverges from the guidance measures beyond "
+        "what's declared",
     )
     args = parser.parse_args(list(argv))
 
@@ -93,10 +100,22 @@ def _realized(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             )
         except RealizedError as error:
             parser.error(str(error))
+        try:
+            comparison = against_measures(con, result)
+        except IngestionError as error:
+            parser.error(f"can't compare with the guidance measures: {error}")
+    if not comparison.within and not args.allow_divergence:
+        parser.error(
+            "the realized totals diverge from the guidance measures beyond what's declared: "
+            + "; ".join(comparison.problems())
+        )
+    report = {**result.report, "divergence": comparison.report()}
     result.artifact.save(args.out)
-    (args.out / "report.json").write_text(json.dumps(result.report, indent=2, default=str))
+    (args.out / "report.json").write_text(json.dumps(report, indent=2, default=str))
     print(
-        f"wrote {result.artifact.fingerprint()} to {args.out}: {result.report['window']}, "
-        f"{result.report['groups']} groups"
+        f"wrote {result.artifact.fingerprint()} to {args.out}: {report['window']}, "
+        f"{report['groups']} groups, "
+        + ("within" if comparison.within else "outside")
+        + " the declared divergences"
     )
     return 0
