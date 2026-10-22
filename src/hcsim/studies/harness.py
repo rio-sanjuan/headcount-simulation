@@ -25,7 +25,7 @@ from hcsim.engine.seeding import (
     opening_price,
     range_table_from_world,
     schema_from_world,
-    seed_state,
+    seed_for,
     snapshot_before,
 )
 from hcsim.financial.prices import AnnualGrowthPrice
@@ -85,7 +85,6 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         else:
             run_date = snapshot_before(con, dt.date.max) + dt.timedelta(days=1)
         sbc = profile.scope is ForecastScope.HEADCOUNT_AND_SBC
-        state, seed = seed_state(con, schema, run_date, with_ledger=sbc)
         fitted = fit_models(con, schema, run_date)
         awards = (
             AwardSettings(
@@ -95,19 +94,19 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             if sbc
             else None
         )
+        config = SimulationConfig(
+            run_date=run_date,
+            schema=schema,
+            models=fitted.models,
+            simulation_months=profile.months,
+            num_trajectories=profile.trajectories,
+            seed=profile.seed,
+            forecast_scope=profile.scope,
+            guidance=artifact,
+            awards=awards,
+        )
+        state, seed = seed_for(con, config)
         provenance = _world_identity(con)
-
-    config = SimulationConfig(
-        run_date=run_date,
-        schema=schema,
-        models=fitted.models,
-        simulation_months=profile.months,
-        num_trajectories=profile.trajectories,
-        seed=profile.seed,
-        forecast_scope=profile.scope,
-        guidance=artifact,
-        awards=awards,
-    )
     result = simulate(config, state)
     provenance |= {
         "hcsim_version": version("hcsim"),

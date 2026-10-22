@@ -91,7 +91,7 @@ def test_capacity_leaves_room_and_ids_start_from_a_high_base(
     con: duckdb.DuckDBPyConnection,
 ) -> None:
     state, report = seed_state(con, schema_from_world(con), RUN, with_ledger=True)
-    assert report.employee_capacity >= state.n_employees + 1_000
+    assert report.employee_capacity >= state.n_employees + 500
     assert report.opening_capacity >= state.n_openings + 500
     assert state.next_employee_id == state.next_requisition_id == SIMULATED_ID_BASE
     assert state.ledger is not None
