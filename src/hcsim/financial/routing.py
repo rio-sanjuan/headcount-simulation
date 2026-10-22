@@ -28,7 +28,7 @@ from numpy.typing import NDArray
 from hcsim.financial.calculator import SizingError
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.sizing import AwardBatch, SizingContext, SizingStrategy
-from hcsim.financial.vesting import CANONICAL_VEST_MONTHS, VestTemplate
+from hcsim.financial.vesting import CANONICAL_VEST_MONTHS, Template
 from hcsim.model.core.layouts import Buffer, EmployeeColumn
 
 Ints = NDArray[np.int64]
@@ -170,12 +170,12 @@ class Overridden:
     strategy: SizingStrategy
     scale: float = 1.0
     shares: Mapping[int, Sequence[int]] = field(default_factory=dict)
-    template: VestTemplate | None = None
+    template: Template | None = None
 
     def __post_init__(self) -> None:
         if self.template is None:
             own = getattr(self.strategy, "template", None)
-            if not isinstance(own, VestTemplate):
+            if own is None or not hasattr(own, "expand"):
                 raise SizingError("an override needs a template: its strategy has none")
             object.__setattr__(self, "template", own)
         assert self.template is not None
@@ -214,4 +214,6 @@ class Overridden:
         for row, employee in enumerate(ids):
             if int(employee) in self.shares:
                 shares[row] = np.asarray(self.shares[int(employee)], dtype=np.int64)
-        return AwardBatch(batch.award_type, batch.base_salary, shares, self.template.expand(shares))
+        month = (context or SizingContext()).calendar_month
+        schedule = self.template.expand(shares, month)
+        return AwardBatch(batch.award_type, batch.base_salary, shares, schedule)

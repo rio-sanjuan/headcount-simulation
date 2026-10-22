@@ -37,7 +37,7 @@ from hcsim.financial.calculator import RatingTable, Recipients, Sized, SizingErr
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.tracker import HolderLedger
-from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, VestTemplate
+from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, Template
 from hcsim.model.core.layouts import Buffer, EmployeeColumn
 
 __all__ = [
@@ -107,9 +107,14 @@ def _projected(prices: StockPriceModel, years: int) -> Floats:
 
 
 def _batch(
-    award_type: str, template: VestTemplate, sized: Sized, shares: NDArray[np.int64]
+    award_type: str,
+    template: Template,
+    sized: Sized,
+    shares: NDArray[np.int64],
+    context: SizingContext | None = None,
 ) -> AwardBatch:
-    return AwardBatch(award_type, sized.base, shares, template.expand(shares))
+    month = (context or SizingContext()).calendar_month
+    return AwardBatch(award_type, sized.base, shares, template.expand(shares, month))
 
 
 @dataclass(frozen=True)
@@ -118,7 +123,7 @@ class GapFill:
     vests that year."""
 
     ranges: RangeTable
-    template: VestTemplate
+    template: Template
     #: Where each recipient sits in the range, by rating; flat at the midpoint by default.
     ratings: RatingTable = field(default_factory=RatingTable.flat)
     award_type: str = "annual"
@@ -128,28 +133,29 @@ class GapFill:
     ) -> Sized:
         """Every step of the calculator, for one grant per row."""
         years = self.template.n_years
-        existing = (context or SizingContext()).existing(rows, years)
+        context = context or SizingContext()
         return size(
             Recipients.from_rows(rows),
             self.ranges,
             self.ratings,
             _projected(prices, years),
             self.template,
-            existing,
+            context.existing(rows, years),
+            context.calendar_month,
         )
 
     def size(
         self, rows: Buffer, prices: StockPriceModel, context: SizingContext | None = None
     ) -> AwardBatch:
         sized = self.sized(rows, prices, context)
-        return _batch(self.award_type, self.template, sized, sized.shares)
+        return _batch(self.award_type, self.template, sized, sized.shares, context)
 
 
 @dataclass(frozen=True)
 class NewHireGapFill(GapFill):
     """Multi-year new-hire sizing: the gap of every year the new-hire template covers."""
 
-    template: VestTemplate = NEW_HIRE_TEMPLATE
+    template: Template = NEW_HIRE_TEMPLATE
     award_type: str = "new_hire"
 
 
@@ -186,7 +192,7 @@ class InYearPlusForward(GapFill):
         share = self.months_left(context.calendar_month) / 12
         shares = sized.shares.copy()
         shares[:, 0] = np.rint(sized.shares_float[:, 0] * share).astype(np.int64)
-        return _batch(self.award_type, self.template, sized, shares)
+        return _batch(self.award_type, self.template, sized, shares, context)
 
 
 @dataclass(frozen=True)
@@ -209,7 +215,7 @@ class RetentionGrant(GapFill):
             rows, prices, dataclasses.replace(context or SizingContext(), ledger=None)
         )
         shares = np.rint(sized.shares_float * self.fraction).astype(np.int64)
-        return _batch(self.award_type, self.template, sized, shares)
+        return _batch(self.award_type, self.template, sized, shares, context)
 
 
 @dataclass(frozen=True)
@@ -218,7 +224,7 @@ class FixedFraction:
     evenly over the template's years, the last absorbing the remainder."""
 
     ranges: RangeTable
-    template: VestTemplate
+    template: Template
     fraction: float = 0.2
     #: Where each recipient sits in the range, by rating; flat at the midpoint by default.
     ratings: RatingTable = field(default_factory=RatingTable.flat)
@@ -233,13 +239,19 @@ class FixedFraction:
     ) -> AwardBatch:
         years = self.template.n_years
         projected = _projected(prices, years)
+        month = (context or SizingContext()).calendar_month
         sized = size(
-            Recipients.from_rows(rows), self.ranges, self.ratings, projected, self.template
+            Recipients.from_rows(rows),
+            self.ranges,
+            self.ratings,
+            projected,
+            self.template,
+            calendar_month=month,
         )
         total = np.rint(self.fraction * sized.target / projected[0]).astype(np.int64)
         shares = np.repeat((total // years)[:, None], years, axis=1)
         shares[:, -1] += total - shares.sum(axis=1)
-        return _batch(self.award_type, self.template, sized, shares)
+        return _batch(self.award_type, self.template, sized, shares, context)
 
 
 @dataclass(frozen=True)
