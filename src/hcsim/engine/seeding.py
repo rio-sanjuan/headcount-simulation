@@ -41,6 +41,7 @@ from hcsim.model.core.schema import (
     REQ_TYPE,
     TECH_INDICATOR,
     SimulationSchema,
+    org_levels_from_frame,
 )
 
 REQ_TYPES: Final = ("backfill", "campus", "growth")
@@ -86,7 +87,7 @@ class SeedReport:
 
 def schema_from_world(con: duckdb.DuckDBPyConnection) -> SimulationSchema:
     """Every vocabulary the run encodes through, from the world's dimension tables."""
-    org = con.execute("SELECT cost_center, org_level1 FROM dim_org").df()
+    org = con.execute("SELECT * FROM dim_org").df()
     jobs = con.execute("SELECT job_family, job_level, tech_indicator FROM dim_job").df()
     return SimulationSchema.build(
         {
@@ -99,7 +100,7 @@ def schema_from_world(con: duckdb.DuckDBPyConnection) -> SimulationSchema:
             REQ_TYPE: REQ_TYPES,
             AWARD_TYPE: AWARD_TYPES,
         },
-        org_levels={"org_level1": dict(zip(org["cost_center"], org["org_level1"], strict=True))},
+        org_levels=org_levels_from_frame(org),
     )
 
 
