@@ -8,8 +8,9 @@ from typing import Any
 
 import pytest
 
+from hcsim.guidance.config import GuidanceConfig, Reconciliation
 from hcsim.guidance.framework import Context, Pipeline, PipelineError
-from hcsim.guidance.pipeline import PipelineConfig, pipeline
+from hcsim.guidance.pipeline import pipeline
 
 
 @dataclass
@@ -110,18 +111,23 @@ def test_a_missing_slot_names_what_the_context_holds() -> None:
 
 
 def test_the_lite_pipeline_s_steps() -> None:
-    assert pipeline(PipelineConfig()).names == ("ingest", "forecast", "reconcile", "format")
-    assert pipeline(PipelineConfig(reconcile=False)).names == ("ingest", "forecast", "format")
-    assert pipeline(PipelineConfig()).check(["source", "config"]) == []
+    assert pipeline(GuidanceConfig()).names == ("ingest", "forecast", "reconcile", "format")
+    assert pipeline(GuidanceConfig(reconciliation=Reconciliation(method=None))).names == (
+        "ingest",
+        "forecast",
+        "format",
+    )
+    assert pipeline(GuidanceConfig()).check(["source", "config"]) == []
 
 
 def test_the_lite_pipeline_validates_its_source_before_reading_it() -> None:
     with pytest.raises(PipelineError, match="must be a DuckDB connection, not str") as error:
-        pipeline(PipelineConfig()).run(Context({"source": "warehouse", "config": PipelineConfig()}))
+        pipeline(GuidanceConfig()).run(Context({"source": "warehouse", "config": GuidanceConfig()}))
     assert error.value.step == "ingest"
 
 
 def test_the_lite_pipeline_refuses_a_bad_horizon_before_forecasting() -> None:
-    ctx = Context({"source": None, "config": PipelineConfig(horizon=0), "series": object()})
-    step = pipeline(PipelineConfig()).steps[1]
+    unchecked = GuidanceConfig.model_construct(horizon=0)  # past load-time validation
+    ctx = Context({"source": None, "config": unchecked, "series": object()})
+    step = pipeline(GuidanceConfig()).steps[1]
     assert step.validate(ctx) == ["the horizon must be at least 1 month, got 0"]

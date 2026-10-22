@@ -16,7 +16,7 @@ The context starts with two slots: `source`, the warehouse connection, and `conf
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Final
 
 import duckdb
@@ -24,10 +24,11 @@ import numpy as np
 import pandas as pd
 
 from hcsim.guidance import ingest as ingestion
+from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.models import ForecastError
-from hcsim.guidance.reconcile import reconcile_greedy
-from hcsim.guidance.selection import SelectionConfig, forecast
+from hcsim.guidance.reconcile import RECONCILERS
+from hcsim.guidance.selection import forecast
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory, coherency_terms
 from hcsim.model.core.guidance import GuidanceForecast
 
@@ -35,16 +36,6 @@ from hcsim.model.core.guidance import GuidanceForecast
 MISSING_TERMS: Final = ("internal_starts", "transfers_out", "conversion_out")
 
 Forecasts = dict[tuple[str, GuidanceCategory], np.ndarray]
-
-
-@dataclass(frozen=True)
-class PipelineConfig:
-    horizon: int = 12
-    grouping: str = "cost_center"
-    selection: SelectionConfig = field(default_factory=SelectionConfig)
-    reconcile: bool = True
-    tolerance: float = 1.0
-    population: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +123,7 @@ class Reconcile:
             if (group, ANCHOR) not in forecasts or any((group, c) not in forecasts for c in terms):
                 continue
             last_actual = float(series.values(group, ANCHOR).iloc[-1])
-            reconciled = reconcile_greedy(
+            reconciled = RECONCILERS.build(config.reconciliation.method)(
                 forecasts[group, ANCHOR],
                 last_actual,
                 {c.value: forecasts[group, c] for c in terms},
@@ -183,14 +174,14 @@ class Format:
         return {"artifact": artifact}
 
 
-def pipeline(config: PipelineConfig) -> Pipeline:
+def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(),) if config.reconcile else ()
     return Pipeline((Ingest(), Forecast(), *middle, Format()))
 
 
-def run(con: duckdb.DuckDBPyConnection, config: PipelineConfig | None = None) -> PipelineResult:
-    config = config or PipelineConfig()
+def run(con: duckdb.DuckDBPyConnection, config: GuidanceConfig | None = None) -> PipelineResult:
+    config = config or GuidanceConfig()
     ctx = pipeline(config).run(Context({"source": con, "config": config}))
     artifact: GuidanceForecast = ctx["artifact"]
     sections = ctx.report

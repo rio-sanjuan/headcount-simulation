@@ -76,20 +76,31 @@ class Series:
         return rows.set_index(MONTH)[VALUE].sort_index()
 
 
-def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
+def grouping_problems(grouping: str) -> list[str]:
+    """Why the series can't be grouped by `grouping`, as far as the catalog alone can tell."""
     if grouping == TOPLINE:
-        return f"'{TOPLINE_LABEL}'"
+        return []
     try:
         column = require(grouping, Use.GROUP)
     except CatalogError as error:
-        raise IngestionError(str(error)) from None
-    if column.name == "cost_center":
-        return "m.cost_center"
-    if not is_org_level(column.name):
-        raise IngestionError(
+        return [str(error)]
+    if column.name != "cost_center" and not is_org_level(column.name):
+        return [
             f"series are counted per cost center, so they can't be grouped by {grouping!r}; "
             f"supported: {', '.join(GROUPINGS)}"
-        )
+        ]
+    return []
+
+
+def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
+    if grouping == TOPLINE:
+        return f"'{TOPLINE_LABEL}'"
+    found = grouping_problems(grouping)
+    if found:
+        raise IngestionError(found[0])
+    column = require(grouping, Use.GROUP)
+    if column.name == "cost_center":
+        return "m.cost_center"
     levels = {c[0] for c in con.execute("DESCRIBE dim_org").fetchall()}
     if column.name not in levels:
         raise IngestionError(f"dim_org has no {column.name!r}")
