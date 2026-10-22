@@ -10,6 +10,9 @@ Each model registers as `statsforecast.<Name>`, built with a monthly season wher
 - the library's own benchmarks: `Naive`, `SeasonalNaive`, `HistoricAverage`, and
   `RandomWalkWithDrift`, the twins of the native ones.
 
+`AutoARIMA` reads the working-day count (`weekdays`) as an exogenous regressor when the
+pipeline gives it the calendar.
+
 Fitting, forecasting, and failing work as for every adapter (see `base`).
 """
 
@@ -24,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.guidance.adapters.base import LibraryModel, adapted
+from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry
 from hcsim.model.interface import ProbabilisticOutput
 
@@ -64,21 +68,40 @@ MODELS: Final[Mapping[str, tuple[Mapping[str, Any], frozenset[ProbabilisticOutpu
 )
 
 
+#: The models that read calendar covariates, as exogenous regressors, and the ones they read.
+COVARIATES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({"AutoARIMA": ("weekdays",)})
+
+
 class StatsForecastModel(LibraryModel):
     """One statsforecast model, fitted to one monthly series."""
 
     def _fit(self, values: Floats) -> Any:
         library = importlib.import_module("statsforecast.models")
-        return getattr(library, self.MODEL)(**self.ARGUMENTS).fit(y=values)
+        model = getattr(library, self.MODEL)(**self.ARGUMENTS)
+        if self.covariates_given:
+            return model.fit(y=values, X=self.past_covariates)
+        return model.fit(y=values)
 
     def _predict(self, fitted: Any, horizon: int) -> Any:
-        return fitted.predict(h=horizon)["mean"]
+        if not self.covariates_given:
+            return fitted.predict(h=horizon)["mean"]
+        future = self.future_covariates
+        if future is None or len(future) < horizon:
+            raise ForecastError(f"{self.NAME} needs its covariates for the {horizon} months ahead")
+        return fitted.predict(h=horizon, X=future[:horizon])["mean"]
 
 
 #: Each adapted model's class, by the library's name for it.
 ADAPTERS: Final[Mapping[str, type[StatsForecastModel]]] = MappingProxyType(
     {
-        model: adapted(StatsForecastModel, NAMESPACE, model, arguments, outputs)
+        model: adapted(
+            StatsForecastModel,
+            NAMESPACE,
+            model,
+            arguments,
+            outputs,
+            covariates=COVARIATES.get(model, ()),
+        )
         for model, (arguments, outputs) in MODELS.items()
     }
 )

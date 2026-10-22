@@ -25,6 +25,7 @@ from numpy.typing import NDArray
 
 from hcsim.guidance.adapters import darts, prophet, sktime, statsforecast
 from hcsim.guidance.baselines import BASELINES
+from hcsim.guidance.capabilities import Capabilities, declared
 from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry, Registry, RegistryError
 from hcsim.model.interface import ProbabilisticOutput, TimeSeriesModel
@@ -151,3 +152,14 @@ def build(name: str) -> Forecaster:
         return MODELS.build(name)
     except RegistryError as error:
         raise ForecastError(str(error)) from None
+
+
+def capabilities(name: str) -> Capabilities:
+    """What the model `name` declares it can read and emit, read without building it."""
+    try:
+        factory = MODELS.factory(name)
+    except RegistryError as error:
+        raise ForecastError(str(error)) from None
+    if not isinstance(factory, type):  # pragma: no cover - every model registers its class
+        raise ForecastError(f"{name} registers no class to read its capabilities from")
+    return declared(factory)

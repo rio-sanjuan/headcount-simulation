@@ -8,7 +8,8 @@ Each model registers as `sktime.<Name>`:
 - `ExponentialSmoothing` and `AutoETS`, statsmodels' exponential smoothing through sktime;
 - the reduction forecasters, which turn forecasting into regression on the last year's lags,
   applied recursively: `ReductionLinear`, on a linear regression, and `ReductionBoosted`, on
-  scikit-learn's histogram gradient boosting, seeded;
+  scikit-learn's histogram gradient boosting, seeded. Given the calendar, they read the
+  working-day count (`weekdays`) as an exogenous regressor;
 - `DeseasonalizedReduction`, a composed pipeline: the series deseasonalized, forecast by the
   linear reduction, and reseasonalized, as sktime's composition builds it.
 
@@ -28,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from hcsim.guidance.adapters.base import Floats, LibraryModel, adapted
+from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry
 from hcsim.model.interface import ProbabilisticOutput
 
@@ -76,6 +78,8 @@ class Spec:
     min_months: int
     #: The module the extra provides that the model imports.
     module: str = "sktime"
+    #: The calendar covariates it reads as exogenous regressors.
+    covariates: tuple[str, ...] = ()
 
 
 #: Each adapted model's spec, by name.
@@ -115,8 +119,8 @@ MODELS: Final[Mapping[str, Spec]] = MappingProxyType(
             _INTERVALS,
             2 * SEASON,
         ),
-        "ReductionLinear": Spec(_linear, _POINT, 2 * SEASON),
-        "ReductionBoosted": Spec(_boosted, _POINT, 2 * SEASON),
+        "ReductionLinear": Spec(_linear, _POINT, 2 * SEASON, covariates=("weekdays",)),
+        "ReductionBoosted": Spec(_boosted, _POINT, 2 * SEASON, covariates=("weekdays",)),
         "DeseasonalizedReduction": Spec(_deseasonalized, _POINT, 3 * SEASON),
     }
 )
@@ -130,15 +134,26 @@ class SktimeModel(LibraryModel):
     def _fit(self, values: Floats) -> Any:
         forecaster = self.SPEC.build()
         forecaster.set_config(remember_data=False)
-        forecaster.fit(pd.Series(values))
+        if self.covariates_given:
+            forecaster.fit(pd.Series(values), X=pd.DataFrame(self.past_covariates))
+        else:
+            forecaster.fit(pd.Series(values))
+        self._months = len(values)
         return forecaster
 
     def _predict(self, fitted: Any, horizon: int) -> Any:
-        return np.asarray(fitted.predict(np.arange(1, horizon + 1))).ravel()
+        steps = np.arange(1, horizon + 1)
+        if not self.covariates_given:
+            return np.asarray(fitted.predict(steps)).ravel()
+        future = self.future_covariates
+        if future is None or len(future) < horizon:
+            raise ForecastError(f"{self.NAME} needs its covariates for the {horizon} months ahead")
+        index = pd.RangeIndex(self._months, self._months + horizon)
+        return np.asarray(fitted.predict(steps, X=pd.DataFrame(future[:horizon], index=index)))
 
 
 def _adapter(model: str, spec: Spec) -> type[SktimeModel]:
-    cls = adapted(SktimeModel, NAMESPACE, model, {}, spec.outputs, spec.min_months)
+    cls = adapted(SktimeModel, NAMESPACE, model, {}, spec.outputs, spec.min_months, spec.covariates)
     cls.SPEC = spec
     return cls
 

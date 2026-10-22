@@ -7,7 +7,9 @@ library needs the same way:
 - a library that can't be loaded, or that fails on a series, raises `ForecastError`, so
   selection scores the model out of that fold rather than stopping the run;
 - warnings the library raises while fitting are kept on the model, not raised;
-- a forecast must be finite, one value per month of the horizon.
+- a forecast must be finite, one value per month of the horizon;
+- a model that reads calendar covariates declares them (`COVARIATES`) and is given their
+  values for its history and its horizon (`provide`) before it fits.
 
 Each library's subclass builds and drives its own model, and each adapted model is its own
 class, with its name and outputs as class variables, as `TimeSeriesModel` declares them.
@@ -36,10 +38,26 @@ class LibraryModel:
     ARGUMENTS: ClassVar[Mapping[str, Any]] = {}
     #: The fewest months the model fits.
     MIN_MONTHS: ClassVar[int] = 2
+    #: The calendar covariates the model reads, by column (see `covariates`). A model that
+    #: reads none forecasts from its own history alone.
+    COVARIATES: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self) -> None:
         self.warnings: list[str] = []
         self._fitted: Any = None
+        self.past_covariates: Floats | None = None
+        self.future_covariates: Floats | None = None
+
+    def provide(self, past: Floats, future: Floats | None) -> None:
+        """The covariates' values, one row per month and a column per `COVARIATES`, for the
+        history's months and the forecast's. A covariate-aware model given none fits on its
+        history alone."""
+        self.past_covariates = np.asarray(past, dtype=np.float64)
+        self.future_covariates = None if future is None else np.asarray(future, dtype=np.float64)
+
+    @property
+    def covariates_given(self) -> bool:
+        return bool(self.COVARIATES) and self.past_covariates is not None
 
     def _fit(self, values: Floats) -> Any:
         """The library's fitted model for `values`."""
@@ -84,6 +102,7 @@ def adapted[T: LibraryModel](
     arguments: Mapping[str, Any],
     outputs: frozenset[ProbabilisticOutput],
     min_months: int = 2,
+    covariates: tuple[str, ...] = (),
 ) -> type[T]:
     """The class adapting one library model, named `<namespace>.<model>`."""
     attributes = {
@@ -92,5 +111,6 @@ def adapted[T: LibraryModel](
         "MODEL": model,
         "ARGUMENTS": arguments,
         "MIN_MONTHS": min_months,
+        "COVARIATES": covariates,
     }
     return type(f"{base.__name__}{model}", (base,), attributes)
