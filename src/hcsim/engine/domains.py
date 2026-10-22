@@ -26,6 +26,7 @@ from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
+from hcsim.engine.roles import DEGENERATE_ROWS, fill_roles
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.aligner import GroupAligner
@@ -42,7 +43,6 @@ from hcsim.model.core.layouts import (
 )
 from hcsim.model.core.schema import REQ_TYPE, UNATTRIBUTED
 from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabilities
-from hcsim.model.ml.generative import ATTRIBUTES
 from hcsim.model.ml.sampling import apportion, bernoulli, quota_select
 
 Ints = NDArray[np.int64]
@@ -398,14 +398,15 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
     - **guided**: the residual of the requisitions-opened quota, after backfill's use of it;
     - **target-seeking**: the supply rule, `ceil(gain * (H* - S))` and never negative, so the
       plan target's gap to committed strength closes by the supply gain each month;
-    - **rate**: a Poisson count at the growth model's historical rate.
+    - **rate**: a count from the growth model's own draw at its historical rate, negative
+      binomial for the negative-binomial model, from the seeded growth stream.
 
     Every count is then clamped at the room the effective ceiling leaves, since the capacity
     veto always wins. Roles come from the required attribute generator.
     """
     n = state.n_cost_centers
     rng = ctx.rng(GROWTH)
-    counts = rng.poisson(_per_cost_center_rates(ctx.config.models.growth, n)).astype(np.int64)
+    counts = rate_counts(ctx.config.models.growth, n, rng)
     regime = regimes(state, ctx)
     strength = state.headcount + state.open_openings
     target = ctx.config.ceiling.targets(ctx.config.run_date, ctx.step)
@@ -435,16 +436,23 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
     cost_centers = np.repeat(np.arange(n, dtype=np.int64), counts)
     code = ctx.config.schema.vocabulary(REQ_TYPE).code(GROWTH)
     rows = _requisitions(len(cost_centers), cost_centers, code, ctx.step)
-    start = 0
-    for cc in np.flatnonzero(counts):
-        k = int(counts[cc])
-        rows[start : start + k][:, list(ATTRIBUTES)] = ctx.config.models.attributes.sample(
-            int(cc), k, rng
-        )
-        start += k
+    degenerate = fill_roles(rows, counts, ctx.config.models.attributes, rng)
     return DomainResult(
-        GROWTH, openings=RowChange(OPENING, append=rows), ledger=ledger, quotas=quotas
+        GROWTH,
+        openings=RowChange(OPENING, append=rows),
+        ledger=ledger,
+        quotas=quotas,
+        diagnostics={DEGENERATE_ROWS: degenerate},
     )
+
+
+def rate_counts(model: GroupRateModel, n: int, rng: np.random.Generator) -> Ints:
+    """One month's counts per cost center from the model's own draw where it has one, as the
+    growth models do, and a Poisson draw at its rate otherwise."""
+    sample = getattr(model, "sample", None)
+    if callable(sample):
+        return np.asarray(sample(np.arange(n, dtype=np.int64), rng), dtype=np.int64)
+    return rng.poisson(_per_cost_center_rates(model, n)).astype(np.int64)
 
 
 #: The step's sampled domains, in order. The order is behavior: backfill reads this step's

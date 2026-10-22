@@ -199,6 +199,8 @@ class TrajectoryResult:
     bypasses: Mapping[str, int] = field(default_factory=dict)
     #: Known events fired, by kind.
     known_fired: Mapping[str, int] = field(default_factory=dict)
+    #: Diagnostics by name, as (months, cost centers) counts, such as degenerate rows.
+    diagnostics: Mapping[str, Ints] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -298,6 +300,7 @@ def run_trajectory(
     handlers = dict(STEP_ORDER)
     bypasses = dict.fromkeys(registered.steps, 0)
     fired = FiringLog()
+    diagnostics: dict[str, Ints] = {}
 
     for step in range(months):
         if state.price is not None:
@@ -314,6 +317,8 @@ def run_trajectory(
             applied = apply(state, result, step, config.schema, awards)
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
+            for name, counts in result.diagnostics.items():
+                diagnostics.setdefault(name, np.zeros((months, n), dtype=np.int64))[step] += counts
             for req, count in result.transfers.items():
                 ctx.transfers[req] = ctx.transfers.get(req, 0) + count
             if len(result.departures):
@@ -343,6 +348,7 @@ def run_trajectory(
             prices,
             bypasses=bypasses,
             known_fired=known_fired,
+            diagnostics=diagnostics,
         )
     tranches = state.ledger.tranches()
     if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
@@ -360,6 +366,7 @@ def run_trajectory(
         sbc_frame(expense, tranches),
         bypasses,
         known_fired,
+        diagnostics,
     )
 
 
