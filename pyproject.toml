@@ -8,6 +8,7 @@ license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.2",
+    "joblib>=1.4",
     "numpy>=2.2",
     # statsforecast requires pandas below 3.0, so the whole project stays on pandas 2.x.
     "pandas>=2.2,<3",
