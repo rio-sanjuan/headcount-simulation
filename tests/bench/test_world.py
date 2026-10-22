@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,3 +103,58 @@ def test_the_cli_prints_and_writes_runs(
     monkeypatch.setattr(cli, "run", broken)
     assert cli.main(["world"]) == 1
     assert "hcsim bench: the 'tiny' preset failed" in capsys.readouterr().out
+
+
+class _FakeChild:
+    """Stands in for the preset's process: runs for `polls` polls, then exits."""
+
+    def __init__(self, polls: int, returncode: int, out: str, err: str = "") -> None:
+        self.pid, self.polls, self.returncode = 4242, polls, returncode
+        self.out, self.err, self.killed = out, err, False
+
+    def __enter__(self) -> _FakeChild:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def poll(self) -> int | None:
+        self.polls -= 1
+        return None if self.polls >= 0 and not self.killed else self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def communicate(self) -> tuple[str, str]:
+        return self.out, self.err
+
+
+def _fake_children(monkeypatch: pytest.MonkeyPatch, child: _FakeChild, rss_mib: float) -> None:
+    monkeypatch.setattr(bench, "POLL_SECONDS", 0.0)
+    monkeypatch.setattr(bench.subprocess, "Popen", lambda *_, **__: child)
+    monkeypatch.setattr(bench, "_rss_mib", lambda _: rss_mib)
+
+
+def test_a_run_reads_its_child_s_last_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    line = json.dumps(dataclasses.asdict(FAKE))
+    _fake_children(monkeypatch, _FakeChild(2, 0, f"noise\n{line}\n"), rss_mib=100.0)
+    assert run(["tiny"], max_rss_gib=1.0) == [FAKE]
+
+
+def test_a_child_past_the_limit_is_killed(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = _FakeChild(5, -9, "")
+    _fake_children(monkeypatch, child, rss_mib=2048.0)
+    with pytest.raises(BenchError, match=r"'small' preset passed its memory limit of 1\.5 GiB"):
+        run(["small"], max_rss_gib=1.5)
+    assert child.killed
+
+
+def test_a_failing_child_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_children(monkeypatch, _FakeChild(1, 1, "", "Traceback\nValueError: boom\n"), 10.0)
+    with pytest.raises(BenchError, match="ValueError: boom"):
+        run(["tiny"])
+
+
+def test_memory_is_read_from_ps() -> None:
+    assert bench._rss_mib(os.getpid()) > 0
+    assert bench._rss_mib(2**22 + 7) == 0.0  # no such process
