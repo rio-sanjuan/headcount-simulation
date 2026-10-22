@@ -18,7 +18,17 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth import awards, codes, equity, plans, population, process, quirks, structure
+from hcsim.synth import (
+    awards,
+    codes,
+    equity,
+    plans,
+    population,
+    process,
+    quirks,
+    structure,
+    truth,
+)
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -85,8 +95,12 @@ def month_ends(config: WorldConfig) -> list[pd.Timestamp]:
 @dataclass
 class World:
     config: WorldConfig
+    #: The source tables, as a warehouse would hold them.
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    #: The `truth/` manifest: every parameter and every draw the run recorded.
     truth: dict[str, Any] = field(default_factory=dict)
+    #: The `truth/` tables (see `hcsim.synth.truth`).
+    truth_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 class _Labels:
@@ -355,9 +369,9 @@ def generate_world(config: WorldConfig) -> World:
     )
     plan: LatentPlan = process_truth.pop("plan")
     headcount = process_truth.pop("headcount")
+    shock = process_truth.pop("shock")
     names = structure.cost_center_names(config)
-    world.tables["truth_latent_plan"] = plan.frame(names)
-    world.tables["plan_headcount"] = plans.vintages(
+    vintages = plans.vintages(
         config,
         plan,
         headcount,
@@ -367,6 +381,8 @@ def generate_world(config: WorldConfig) -> World:
         tops,
         plan_rng,
     )
+    # A cell's regime is the truth: the warehouse sees only the targets.
+    world.tables["plan_headcount"] = vintages.drop(columns="regime")
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
     # The world's true transactions drive the equity world; the warehouse holds them as
@@ -425,6 +441,15 @@ def generate_world(config: WorldConfig) -> World:
         "generator_version": GENERATOR_VERSION,
         "config": config.to_dict(),
         "processes": process_truth | {"equity": equity.truth_dict(comp, price, grant)},
+    }
+    world.truth_tables = {
+        "latent_plan": plan.frame(names),
+        "plan_regime": truth.plan_regime(vintages),
+        "attrition_hazard": truth.attrition_hazard(config),
+        "attrition_season": truth.attrition_season(config),
+        "attrition_shock": truth.attrition_shock(shock, ends, names),
+        "cost_center_effect": truth.cost_center_effect(process_truth),
+        "requisition_hazard": truth.requisition_hazard(config),
     }
     return world
 
@@ -485,5 +510,11 @@ def write_world(world: World, path: Path) -> None:
             {f"WHERE c.month_end NOT IN ({gaps})" if gaps else ""}
             """
         )
-        con.execute("CREATE TABLE truth_manifest (manifest JSON)")
-        con.execute("INSERT INTO truth_manifest VALUES (?)", [json.dumps(world.truth)])
+        # The truth lives in its own schema, apart from the source tables.
+        con.execute("CREATE SCHEMA truth")
+        con.execute("CREATE TABLE truth.manifest (manifest JSON)")
+        con.execute("INSERT INTO truth.manifest VALUES (?)", [json.dumps(world.truth)])
+        for name, frame in world.truth_tables.items():
+            con.register("frame", frame)
+            con.execute(f"CREATE TABLE truth.{name} AS SELECT {_select_list(frame)} FROM frame")
+            con.unregister("frame")

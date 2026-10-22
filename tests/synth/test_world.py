@@ -82,13 +82,13 @@ def test_the_world_writes_to_duckdb_with_its_truth_manifest(tmp_path: Path) -> N
     write_world(world, path)  # rewriting replaces the file
     with duckdb.connect(str(path), read_only=True) as con:
         tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
-        assert {"dim_org", "dim_job", "workforce_txn", "truth_manifest"} <= tables
+        assert {"dim_org", "dim_job", "workforce_txn"} <= tables
         (count,) = con.execute(
             "SELECT count(*) FROM workforce_txn "
             "WHERE trans_type = 'ACTIVE' AND event_date = DATE '2021-01-31' "
             "AND account = 'ACCT-100'"
         ).fetchone() or (0,)
-        (manifest,) = con.execute("SELECT manifest FROM truth_manifest").fetchone() or ("",)
+        (manifest,) = con.execute("SELECT manifest FROM truth.manifest").fetchone() or ("",)
     assert count == 200
     assert json.loads(manifest)["config"]["seed"] == 1
 

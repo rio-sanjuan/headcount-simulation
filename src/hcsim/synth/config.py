@@ -121,6 +121,36 @@ class AttritionTruth:
         result: NDArray[np.float64] = bump * fade
         return result
 
+    def seasonal_factor(self, month_of_year: int) -> float:
+        return float(
+            1
+            + self.seasonal_amplitude
+            * np.cos(2 * np.pi * (month_of_year - self.seasonal_peak_month) / 12)
+        )
+
+    def baseline(
+        self,
+        levels: NDArray[np.integer],
+        tenure_months: NDArray[np.floating],
+        ratings: NDArray[np.integer] | None = None,
+    ) -> NDArray[np.float64]:
+        """The hazard before the season, the cost center's effect, and shocks: level, tenure,
+        and rating alone."""
+        level = np.zeros(max(self.level_factor) + 1)
+        level[list(self.level_factor)] = list(self.level_factor.values())
+        rating = np.ones(len(np.asarray(levels)))
+        if ratings is not None:
+            codes = np.asarray(ratings)
+            table = np.asarray(self.rating_factor, dtype=np.float64)
+            rating = np.where(codes >= 0, table[np.maximum(codes, 0)], self.unrated_factor)
+        result: NDArray[np.float64] = (
+            self.base_monthly_hazard
+            * level[np.asarray(levels)]
+            * self.tenure_factor(tenure_months)
+            * rating
+        )
+        return result
+
     def hazards(
         self,
         levels: NDArray[np.integer],
@@ -132,22 +162,9 @@ class AttritionTruth:
     ) -> NDArray[np.float64]:
         """The monthly departure hazard for each person. `ratings` are codes into the rating
         scale, with -1 for the unrated; `shock` is the regime and org shock multiplier."""
-        season = 1 + self.seasonal_amplitude * np.cos(
-            2 * np.pi * (month_of_year - self.seasonal_peak_month) / 12
-        )
-        level = np.zeros(max(self.level_factor) + 1)
-        level[list(self.level_factor)] = list(self.level_factor.values())
-        rating = np.ones(len(np.asarray(levels)))
-        if ratings is not None:
-            codes = np.asarray(ratings)
-            table = np.asarray(self.rating_factor, dtype=np.float64)
-            rating = np.where(codes >= 0, table[np.maximum(codes, 0)], self.unrated_factor)
         h = (
-            self.base_monthly_hazard
-            * level[np.asarray(levels)]
-            * self.tenure_factor(tenure_months)
-            * rating
-            * season
+            self.baseline(levels, tenure_months, ratings)
+            * self.seasonal_factor(month_of_year)
             * np.asarray(cost_center_effect)
             * np.asarray(shock)
         )

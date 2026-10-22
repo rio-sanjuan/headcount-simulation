@@ -56,7 +56,7 @@ class StudyRun:
 
 
 def _world_identity(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
-    (manifest,) = con.execute("SELECT manifest FROM truth_manifest").fetchone() or ("{}",)
+    (manifest,) = con.execute("SELECT manifest FROM truth.manifest").fetchone() or ("{}",)
     truth = json.loads(manifest)
     config = truth.get("config", {})
     return {
