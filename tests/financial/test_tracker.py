@@ -80,3 +80,57 @@ def test_the_buffer_agrees_with_the_ledgers_live_tranches() -> None:
             axis=1,
         )
         assert np.array_equal(window, by_hand)
+
+
+# --- moves and timed grants ----------------------------------------------------------------------
+
+
+def test_a_move_starts_a_holder_interval_and_the_last_in_a_month_holds() -> None:
+    ledger = HolderLedger()
+    ledger.move(np.array([1, 2]), 4, np.array([3, 8]))
+    ledger.move(np.array([1]), 4, np.array([5]))  # moved again the same month: this one holds
+    ledger.move(np.array([1]), 9, np.array([2]))
+    moves = ledger.intervals()
+    assert list(zip(moves.holder, moves.valid_from, moves.cost_center, strict=True)) == [
+        (1, 4, 5),
+        (1, 9, 2),
+        (2, 4, 8),
+    ]
+    holders = np.array([1, 1, 1, 1, 1, 2, 2, 6])
+    months = np.array([0, 4, 8, 9, 20, 3, 4, 10])
+    granted = np.full(8, 7)
+    assert ledger.cost_center_at(holders, months, granted).tolist() == [7, 5, 5, 2, 2, 7, 8, 7]
+
+
+def test_a_timed_grant_waits_and_is_cancelled_if_its_holder_leaves_first() -> None:
+    ledger = HolderLedger()
+    ledger.buffer.cover(24)
+    # Recorded at step 2 for an award in month 6, and another for holder 4 in month 5.
+    ledger.record(
+        np.array([3, 4]),
+        6,
+        np.vstack([schedule(m3=10), schedule(m3=10)]),
+        0,
+        np.zeros(2, int),
+        np.zeros(2, int),
+    )
+    assert ledger.tranches().pending(2).tolist() == [True, True]
+    assert int(ledger.vesting_by_year(np.array([3]), 2, 1)[0, 0]) == 10  # already counted
+    ledger.forfeit(np.array([3]), 3)  # holder 3 leaves before the award
+    t = ledger.tranches()
+    assert t.cancelled.tolist() == [True, False]
+    assert t.pending(5).tolist() == [False, True]
+    assert t.pending(6).tolist() == [False, False]  # awarded
+    assert int(ledger.vesting_by_year(np.array([3]), 3, 1)[0, 0]) == 0
+
+
+def test_a_cancelled_grant_recognizes_nothing() -> None:
+    from hcsim.financial.expense import compute_expense
+
+    ledger = HolderLedger()
+    ledger.record(np.array([3]), 6, schedule(m3=10), 0, np.zeros(1, int), np.zeros(1, int))
+    ledger.forfeit(np.array([3]), 3)
+    result = compute_expense(ledger.tranches(), np.array([50.0]))
+    rows = result.rows
+    assert rows[["gross", "net", "trueup_attrition", "trueup_vesting"]].to_numpy().sum() == 0
+    assert result.max_identity_residual == 0
