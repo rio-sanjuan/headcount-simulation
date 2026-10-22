@@ -74,6 +74,10 @@ allowed-confusables = ["–"]
 [tool.ruff.lint.isort]
 known-first-party = ["hcsim", "tests", "tools"]
 
+[tool.ruff.lint.flake8-bugbear]
+# `setting(...)` returns a dataclass field, as `field(...)` does.
+extend-immutable-calls = ["hcsim.engine.config.setting"]
+
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "tests", "tools"]
