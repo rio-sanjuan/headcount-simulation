@@ -30,6 +30,7 @@ from hcsim.guidance.models import MODELS, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
 from hcsim.guidance.selection import SelectionConfig, UncertaintySettings
 from hcsim.guidance.tuning import TuningSettings
+from hcsim.model.core.aligner import TOPLINE
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 from hcsim.model.interface import ProbabilisticOutput
 
@@ -134,6 +135,26 @@ class Alignment(_Strict):
     shortfall_penalty: float = Field(default=1e4, gt=0)
 
 
+class Disaggregation(_Strict):
+    """How the forecast is split onto a finer leaf grain (see `disaggregation`). No
+    strategy keeps the forecast's own grouping."""
+
+    strategy: (
+        Literal[
+            "average_proportions",
+            "proportions_of_averages",
+            "last_proportions",
+            "exposure",
+            "equal",
+        ]
+        | None
+    ) = None
+    #: The leaf grain, which must nest in the grouping.
+    leaf: str = "cost_center"
+    window_months: int = Field(default=12, ge=1)
+    chunk_size: int = Field(default=500, ge=1)
+
+
 class GuidanceConfig(_Strict):
     horizon: int = Field(default=12, ge=1)
     grouping: str = "cost_center"
@@ -151,6 +172,7 @@ class GuidanceConfig(_Strict):
     uncertainty: Uncertainty = Uncertainty()
     coherence: Coherence = Coherence()
     alignment: Alignment = Alignment()
+    disaggregation: Disaggregation = Disaggregation()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")
@@ -212,6 +234,13 @@ class GuidanceConfig(_Strict):
             found.append(f"alignment.fixed: {bad} aren't among the categories")
         if any(w <= 0 for w in self.alignment.weights.values()):
             found.append("alignment.weights: every weight must be positive")
+        if self.disaggregation.strategy is not None:
+            leaf = self.disaggregation.leaf
+            found += [f"disaggregation.leaf: {p}" for p in grouping_problems(leaf)]
+            if leaf in (self.grouping, TOPLINE):
+                found.append(
+                    f"disaggregation.leaf: {leaf!r} is no finer than the grouping {self.grouping!r}"
+                )
         if self.reconcile and ANCHOR not in self.categories:
             found.append(
                 f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "

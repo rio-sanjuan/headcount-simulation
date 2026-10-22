@@ -261,3 +261,54 @@ def _compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.
         parts.append(values.rename(VALUE).reset_index().assign(**{CATEGORY: category.value}))
     composed = pd.concat(parts, ignore_index=True)[[MONTH, GROUP, CATEGORY, VALUE]]
     return composed.sort_values([MONTH, GROUP, CATEGORY], ignore_index=True)
+
+
+def basis_counts(
+    con: duckdb.DuckDBPyConnection,
+    grouping: str,
+    leaf: str,
+    categories: Sequence[GuidanceCategory],
+    first: pd.Period,
+    last: pd.Period,
+    groups: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """`categories`' monthly counts per group of `grouping` and leaf of `leaf`, in months
+    `first` through `last`, for `groups` when given: one row per month, group, leaf, and
+    category, an inner fill-tree node the sum of its leaves. The rows a disaggregation basis is
+    built from."""
+    measures = {c: CATEGORY_MEASURES[c] for c in counted(categories)}
+    found = problems(con, grouping, categories) + problems(con, leaf, categories)
+    if found:
+        raise IngestionError("; ".join(sorted(set(found))))
+    group, child = _group_expression(con, grouping), _group_expression(con, leaf)
+    tables = {m.table for m in measures.values()}
+    sql = consolidated_sql(list(measures.values()), {t: role_column(con, t) for t in tables})
+    within = ""
+    parameters: list[object] = [first.start_time.date(), last.start_time.date()]
+    if groups is not None:
+        within = f"AND {group} IN (SELECT unnest(?::VARCHAR[]))"
+        parameters.append(list(groups))
+    raw = con.execute(
+        f"""
+        SELECT m.month, {group} AS "group", {child} AS leaf, m.measure AS category,
+               sum(m.value)::DOUBLE AS value
+        FROM ({sql}) m
+        {_JOINS}
+        WHERE m.month BETWEEN ? AND ? {within}
+        GROUP BY ALL
+        """,
+        parameters,
+    ).df()
+    raw = raw.dropna(subset=["group", "leaf"])
+    raw["group"], raw["leaf"] = raw["group"].astype(str), raw["leaf"].astype(str)
+    raw[MONTH] = pd.to_datetime(raw[MONTH]).dt.to_period("M")
+    names = {m.name: c.value for c, m in measures.items()}
+    raw[CATEGORY] = raw[CATEGORY].map(names)
+    parts = []
+    for category in categories:
+        wanted = [leaf_.value for leaf_ in leaves(category)]
+        rows = raw[raw[CATEGORY].isin(wanted)]
+        summed = rows.groupby([MONTH, "group", "leaf"], as_index=False)[VALUE].sum()
+        parts.append(summed.assign(**{CATEGORY: category.value}))
+    columns = [MONTH, "group", "leaf", CATEGORY, VALUE]
+    return pd.concat(parts, ignore_index=True)[columns] if parts else pd.DataFrame(columns=columns)

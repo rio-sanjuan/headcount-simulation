@@ -18,7 +18,9 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
 7. **align**, when the configuration names a method, moves each group's anchor onto its plan
    targets and re-derives the flows (see `alignment`), after reconciliation, so the aligned
    values are final, and a coherence pass follows it;
-8. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`)
+8. **disaggregate**, when the configuration names a strategy, splits each group's forecasts
+   onto the leaf grain inside it (see `disaggregation`);
+9. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`)
    when the run aligned to one. Negative cells are clamped to zero there, and the report
    counts them.
 
@@ -44,6 +46,7 @@ from hcsim.guidance.coherence import PASSES, cohere
 from hcsim.guidance.coherence import Method as CoherenceMethod
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
+from hcsim.guidance.disaggregation import basis, shares, split
 from hcsim.guidance.framework import Context, Pipeline
 from hcsim.guidance.generation import generate
 from hcsim.guidance.models import ForecastError, capabilities
@@ -75,7 +78,7 @@ class PipelineResult:
 class Ingest:
     name: str = "ingest"
     needs: tuple[str, ...] = ("source", "config")
-    gives: tuple[str, ...] = ("series",)
+    gives: tuple[str, ...] = ("series", "grain")
 
     def validate(self, ctx: Context) -> list[str]:
         config = ctx["config"]
@@ -100,7 +103,7 @@ class Ingest:
             ungrouped=series.ungrouped,
             counted=[c.value for c in ingestion.counted(config.categories)],
         )
-        return {"series": series}
+        return {"series": series, "grain": config.grouping}
 
 
 @dataclass(frozen=True)
@@ -414,6 +417,53 @@ def _targets(
 
 
 @dataclass(frozen=True)
+class Disaggregate:
+    """Split each group's forecasts onto the leaf grain inside it (see `disaggregation`)."""
+
+    name: str = "disaggregate"
+    needs: tuple[str, ...] = ("source", "series", "forecasts", "paths", "grain", "config")
+    gives: tuple[str, ...] = ("forecasts", "paths", "grain")
+
+    def validate(self, ctx: Context) -> list[str]:
+        config = ctx["config"]
+        try:
+            with as_source(ctx["source"]).connect() as con:
+                return ingestion.problems(con, config.disaggregation.leaf, config.categories)
+        except SourceError as error:
+            return [str(error)]
+
+    def execute(self, ctx: Context) -> Mapping[str, Any]:
+        config, series = ctx["config"], ctx["series"]
+        rules = config.disaggregation
+        forecasts: Forecasts = ctx["forecasts"]
+        groups = sorted({group for group, _ in forecasts})
+        categories = sorted({c for _, c in forecasts}, key=list(GuidanceCategory).index)
+        with as_source(ctx["source"]).connect() as con:
+            found = basis(
+                con,
+                ctx["grain"],
+                rules.leaf,
+                groups,
+                categories,
+                series.snapshot,
+                rules.window_months,
+                rules.chunk_size,
+            )
+        weights = shares(found, list(forecasts), rules.strategy, series.snapshot)
+        leaf_forecasts, leaf_paths, uncovered = split(forecasts, ctx["paths"], weights)
+        ctx.note(
+            self.name,
+            strategy=rules.strategy,
+            leaf=rules.leaf,
+            leaves=len({leaf for leaf, _ in leaf_forecasts}),
+            chunks=found.chunks,
+            fallbacks=weights.fallbacks,
+            uncovered=[{"group": g, "category": c.value} for g, c in uncovered],
+        )
+        return {"forecasts": leaf_forecasts, "paths": leaf_paths, "grain": rules.leaf}
+
+
+@dataclass(frozen=True)
 class Format:
     """Write the artifact: the point forecasts, and with sample paths on, the paths and the
     quantiles read from them. Negative values are clamped to zero, as writers clamp.
@@ -424,14 +474,14 @@ class Format:
     adjusts the point forecasts."""
 
     name: str = "format"
-    needs: tuple[str, ...] = ("series", "forecasts", "paths", "config")
+    needs: tuple[str, ...] = ("series", "forecasts", "paths", "grain", "config")
     gives: tuple[str, ...] = ("artifact",)
 
     def validate(self, ctx: Context) -> list[str]:
         return []
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
-        series, config = ctx["series"], ctx["config"]
+        series, config, grain = ctx["series"], ctx["config"], ctx["grain"]
         raw: Forecasts = ctx["forecasts"]
         negative_cells = int(sum(int((v < 0).sum()) for v in raw.values()))
         # Writers clamp, and the final coherence pass rebuilds each parent from its clamped
@@ -453,7 +503,7 @@ class Format:
                     "forecast_month": step,
                     "category": category.value,
                     "value": float(value),
-                    config.grouping: group,
+                    grain: group,
                 }
                 if with_quantiles:
                     row |= {
@@ -461,7 +511,7 @@ class Format:
                         for q, v in zip(levels, quantiles[group, category][:, step], strict=True)
                     }
                 rows.append(row)
-        columns = ["forecast_month", "category", "value", config.grouping]
+        columns = ["forecast_month", "category", "value", grain]
         if with_quantiles:
             columns += [f"q{q}" for q in levels]
         frame = pd.DataFrame(rows, columns=columns)
@@ -470,7 +520,7 @@ class Format:
         paths = np.stack([np.maximum(drawn[k], 0.0) for k in keys]) if keys else None
         artifact = GuidanceForecast(
             frame.astype({"forecast_month": np.int64}),
-            config.grouping,
+            grain,
             series.snapshot.end_time.date().isoformat(),
             config.horizon,
             config.population,
@@ -493,6 +543,7 @@ def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(), Cohere("reconciled")) if config.reconcile else ()
     align = (Align(), Cohere("aligned")) if config.alignment.method is not None else ()
+    split_ = (Disaggregate(),) if config.disaggregation.strategy is not None else ()
     return Pipeline(
         (
             Ingest(),
@@ -502,6 +553,7 @@ def pipeline(config: GuidanceConfig) -> Pipeline:
             Cohere("generated"),
             *middle,
             *align,
+            *split_,
             Format(),
         )
     )
@@ -532,6 +584,8 @@ def run(
         ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
         "alignment": sections.get("align", {"method": None}),
+        "disaggregation": sections.get("disaggregate", {"strategy": None}),
+        "grain": ctx["grain"],
         "coherence": {
             "method": config.coherence.method,
             "closed": {
