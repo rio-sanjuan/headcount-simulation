@@ -57,6 +57,7 @@ from hcsim.engine.config import (
 )
 from hcsim.engine.eligibility import EligibilityError, EligibilityRule
 from hcsim.engine.gates import GateError, gate_from_dict
+from hcsim.financial.prices import digest as price_digest
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import SimulationSchema
@@ -348,6 +349,7 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "schema": config.schema.fingerprint(),
         "guidance": None if config.guidance is None else config.guidance.fingerprint(),
         "awards": config.awards is not None,
+        "price": None if config.awards is None else price_digest(config.awards.price_model),
         "eligibility": [rule.to_dict() for rule in config.eligibility],
         "gates": [gate.to_dict() for gate in config.gates],
         "capacity_caps": dict(sorted(config.capacity_caps.items())),
@@ -422,6 +424,12 @@ def from_record(
     if bool(record.get("awards")) != (awards is not None):
         need = "needs" if record.get("awards") else "has no"
         problems.append(f"the record {need} award settings, which the call doesn't match")
+    elif awards is not None and record.get("price") is not None:
+        given_price = price_digest(awards.price_model)
+        if record["price"] != given_price:
+            problems.append(
+                f"the record names price model {record['price']}, but the call passes {given_price}"
+            )
     try:
         layered = load_settings(env={}, overrides=record.get("settings", {}))
     except ConfigError as error:

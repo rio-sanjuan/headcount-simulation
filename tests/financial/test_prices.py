@@ -15,7 +15,12 @@ from hcsim.financial.prices import (
     PriceModelError,
     StaticPrice,
     StockPriceModel,
+    canonical,
+    covers,
+    digest,
+    from_canonical,
     from_declaration,
+    problems,
 )
 
 
@@ -163,3 +168,66 @@ def test_every_model_round_trips_through_its_declaration() -> None:
         built = from_declaration(model.declaration())
         assert built.declaration() == model.declaration()
         assert type(built) is type(model)
+
+
+# --- validation and the canonical stored form ----------------------------------------------------
+
+
+def test_a_declaration_names_every_problem_at_once() -> None:
+    assert problems({"type": "StaticPrice", "params": {"opening_price": 10.0}}) == []
+    assert problems(["StaticPrice"]) == [
+        "a price model is declared as {'type': ..., 'params': {...}}, not ['StaticPrice']"
+    ]
+    assert problems({"type": "StaticPrice", "params": 3}) == [
+        "StaticPrice: params is a mapping, not 3"
+    ]
+    found = problems({"type": "AnnualGrowthPrice", "params": {"rate": 1.1}})
+    assert found == [
+        "AnnualGrowthPrice needs ['opening_price']",
+        "AnnualGrowthPrice takes no ['rate']; it takes "
+        "['opening_price', 'growth_rate', 'growth_month']",
+    ]
+    bad = problems(
+        {"type": "AnnualGrowthPrice", "params": {"opening_price": -1.0, "growth_rate": 0.08}}
+    )
+    assert len(bad) == 1
+    assert "opening_price must be positive" in bad[0]
+    assert "write 1.08" in bad[0]
+    nested = problems(
+        {"type": "CustomPrice", "params": {"path": [1.0], "extend_with": {"type": "Nope"}}}
+    )
+    assert nested == [
+        "extend_with: unknown price model 'Nope'; known: "
+        "StaticPrice, AnnualGrowthPrice, CustomPrice, GBMPrice"
+    ]
+    with pytest.raises(PriceModelError, match="needs \\['path'\\]"):
+        from_declaration({"type": "CustomPrice", "params": {}})
+
+
+def test_the_canonical_form_is_sorted_compact_json_with_a_stable_digest() -> None:
+    model = AnnualGrowthPrice(100.0, growth_rate=1.05, growth_month=4)
+    text = canonical(model)
+    assert text == (
+        '{"params":{"growth_month":4,"growth_rate":1.05,"opening_price":100.0},'
+        '"type":"AnnualGrowthPrice"}'
+    )
+    assert canonical(model.declaration()) == text
+    assert canonical(from_canonical(text)) == text
+    assert digest(model) == digest(AnnualGrowthPrice(100.0, 1.05, 4))
+    assert digest(model).startswith("pm1-")
+    assert len(digest(model)) == len("pm1-") + 16
+    assert digest(model) != digest(AnnualGrowthPrice(100.0, 1.06, 4))
+    nested = CustomPrice([90.0, 100.0], extend_with=model)
+    assert canonical(from_canonical(canonical(nested))) == canonical(nested)
+    with pytest.raises(PriceModelError, match="isn't JSON"):
+        from_canonical("{price")
+
+
+def test_a_run_must_be_covered_by_its_price_inputs() -> None:
+    assert covers(StaticPrice(10.0), 120) == []
+    assert covers(CustomPrice([1.0, 2.0, 3.0]), 3) == []
+    assert covers(CustomPrice([1.0, 2.0, 3.0]), 4) == [
+        "the custom price path covers 3 months, but the run needs 4: "
+        "extend it, or give it an extension"
+    ]
+    assert covers(CustomPrice([1.0, 3.0], extend_with=StaticPrice(3.0)), 40) == []

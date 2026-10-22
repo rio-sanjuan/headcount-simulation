@@ -18,10 +18,12 @@ Every default is invented.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -271,13 +273,94 @@ PRICE_MODELS: dict[str, type[PriceModel]] = {
 }
 
 
-def from_declaration(declaration: dict[str, Any]) -> PriceModel:
-    """Build a model from `{"type": ..., "params": {...}}`, refusing unknown types by name. A
-    custom path's extension is itself a declaration."""
+#: Each model's parameters: those a declaration must give, and those it may.
+PARAMS: Final[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {
+    "StaticPrice": (("opening_price",), ()),
+    "AnnualGrowthPrice": (("opening_price",), ("growth_rate", "growth_month")),
+    "CustomPrice": (("path",), ("extend_with",)),
+    "GBMPrice": (("opening_price",), ("drift", "volatility", "seed")),
+}
+#: The canonical stored form's version, the prefix of its digest.
+CANONICAL_VERSION: Final = "pm1"
+
+
+def problems(declaration: Any) -> list[str]:
+    """Everything wrong with a declaration, all at once: its type, the parameters it lacks or
+    doesn't take, the model's own checks, and a custom path's extension's, prefixed."""
+    if not isinstance(declaration, dict):
+        return [
+            f"a price model is declared as {{'type': ..., 'params': {{...}}}}, not {declaration!r}"
+        ]
     kind = declaration.get("type")
     if kind not in PRICE_MODELS:
-        raise PriceModelError(f"unknown price model {kind!r}; known: {', '.join(PRICE_MODELS)}")
-    params = dict(declaration.get("params", {}))
+        return [f"unknown price model {kind!r}; known: {', '.join(PRICE_MODELS)}"]
+    params = declaration.get("params", {})
+    if not isinstance(params, dict):
+        return [f"{kind}: params is a mapping, not {params!r}"]
+    required, optional = PARAMS[kind]
+    found = []
+    missing = [p for p in required if p not in params]
+    if missing:
+        found.append(f"{kind} needs {missing}")
+    unknown = sorted(set(params) - set(required) - set(optional))
+    if unknown:
+        found.append(f"{kind} takes no {unknown}; it takes {[*required, *optional]}")
+    extension = params.get("extend_with") if kind == "CustomPrice" else None
+    if extension is not None:
+        found += [f"extend_with: {p}" for p in problems(extension)]
+    if found:
+        return found
+    try:
+        _build(kind, params)
+    except (PriceModelError, TypeError, ValueError) as error:
+        found.append(f"{kind}: {error}")
+    return found
+
+
+def _build(kind: str, params: dict[str, Any]) -> PriceModel:
+    params = dict(params)
     if kind == "CustomPrice" and params.get("extend_with") is not None:
         params["extend_with"] = from_declaration(params["extend_with"])
     return PRICE_MODELS[kind](**params)
+
+
+def from_declaration(declaration: dict[str, Any]) -> PriceModel:
+    """Build a model from `{"type": ..., "params": {...}}`, refusing, with every problem named, a
+    declaration that doesn't hold. A custom path's extension is itself a declaration."""
+    found = problems(declaration)
+    if found:
+        raise PriceModelError("; ".join(found))
+    return _build(declaration["type"], declaration.get("params", {}))
+
+
+def canonical(model: StockPriceModel | dict[str, Any]) -> str:
+    """The canonical stored form of a model, or of its declaration: its declaration as JSON,
+    keys sorted, no spaces. Equal models store equally."""
+    declaration = model if isinstance(model, dict) else model.declaration()
+    return json.dumps(declaration, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def from_canonical(text: str) -> PriceModel:
+    """The model a canonical stored form describes."""
+    try:
+        declaration = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise PriceModelError(f"a stored price model isn't JSON: {error}") from None
+    return from_declaration(declaration)
+
+
+def digest(model: StockPriceModel | dict[str, Any]) -> str:
+    """`pm1-` and 16 hex characters of a SHA-256 over the canonical stored form."""
+    text = canonical(model)
+    return f"{CANONICAL_VERSION}-" + hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def covers(model: StockPriceModel, months: int) -> list[str]:
+    """What keeps `model` from pricing every month of a run of `months`: the price inputs a
+    run requires. Only a custom path with no extension can run out."""
+    if isinstance(model, CustomPrice) and model.extend_with is None and len(model.path) < months:
+        return [
+            f"the custom price path covers {len(model.path)} months, but the run needs {months}: "
+            "extend it, or give it an extension"
+        ]
+    return []
