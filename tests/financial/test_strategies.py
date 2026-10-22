@@ -12,9 +12,11 @@ from hcsim.financial.prices import StaticPrice
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.sizing import (
     AnnualGapFill,
+    FixedFraction,
     InYearPlusForward,
     NewHireGapFill,
     RetentionGrant,
+    SingleYear,
     SizingContext,
 )
 from hcsim.financial.tracker import HolderLedger
@@ -132,3 +134,34 @@ def test_a_retention_grant_is_a_share_of_the_target_on_top_of_existing_vests() -
     assert batch.award_type == "retention"
     with pytest.raises(SizingError, match=r"a retention fraction lies in \(0, 1\]"):
         RetentionGrant(RANGES, TWO_YEARS, fraction=0.0)
+
+
+# --- simple alternatives -------------------------------------------------------------------------
+
+FOUR_YEARS = VestTemplate("four", (((12, 1.0),),) * 4)
+ONE_YEAR = VestTemplate("one", (((3, 0.25), (6, 0.25), (9, 0.25), (12, 0.25)),))
+
+
+def test_a_fixed_fraction_is_a_share_of_target_split_evenly_over_the_years() -> None:
+    # 0.2 of the 150,000 target is 30,000: 300 shares at 100, as 75 a year.
+    batch = FixedFraction(RANGES, FOUR_YEARS, fraction=0.2).size(rows(0), PRICE)
+    assert batch.shares_per_year.tolist() == [[75, 75, 75, 75]]
+    # 0.21 is 315 shares: 78 a year, the last taking the 3 left over.
+    odd = FixedFraction(RANGES, FOUR_YEARS, fraction=0.21).size(rows(0), PRICE)
+    assert odd.shares_per_year.tolist() == [[78, 78, 78, 81]]
+    with pytest.raises(SizingError, match=r"a fixed fraction lies in \(0, 1\]"):
+        FixedFraction(RANGES, FOUR_YEARS, fraction=1.5)
+
+
+def test_a_single_year_grant_fills_only_the_first_years_gap() -> None:
+    ledger = ledger_with(3, 0, {6: 100})
+    batch = SingleYear(RANGES, ONE_YEAR).size(rows(3), PRICE, SizingContext(0, 1, ledger))
+    assert batch.shares_per_year.tolist() == [[400]]
+    assert {int(c) + 1: int(v) for c, v in enumerate(batch.vest_schedule[0]) if v} == {
+        3: 100,
+        6: 100,
+        9: 100,
+        12: 100,
+    }
+    with pytest.raises(SizingError, match="a single-year grant needs a one-year template"):
+        SingleYear(RANGES, TWO_YEARS)
