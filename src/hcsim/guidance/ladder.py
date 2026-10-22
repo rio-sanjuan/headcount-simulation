@@ -17,8 +17,8 @@ against, to a combination of the rest:
 
 The fourth arm fits the series: departures are close to Poisson (`native.PoissonGLM`), hires
 come in bursts a negative binomial absorbs (`native.NegativeBinomialGLM`), and internal starts
-are intermittent (`statsforecast.CrostonSBA`). An arm with more than one
-model weights them by inverse backtest error.
+are intermittent (`statsforecast.CrostonSBA`). An arm with more than one model weights them by
+inverse backtest error.
 
 Each arm is an ordinary guidance configuration (`config_for`): the series and the headcount
 anchor, which marks every loaded month, at the study's grouping; the snapshot fixed at the
@@ -26,6 +26,16 @@ cutoff; and no reconciliation, so each arm's forecast is its models' own. `run_l
 every arm and sets its forecast beside the actuals the following months realized, by the
 guidance measures, on the grid of the arm's groups. A group an arm didn't forecast, as when its
 history was all zeros, forecasts zero.
+
+**Scoring** (`score`). Each arm is scored by its WAPE over the year after the cutoff: the summed
+absolute error over every group and month, over the summed actuals. Selection climbs each
+series' ladder from the null arm: the champion passes to the next richer arm only if that arm's
+WAPE is at least `margin` (10%) below the champion's, so a richer arm has to earn its place.
+Twelve months are few, and neighbouring months' errors are alike, so the uncertainty comes from
+a moving-block bootstrap over the months: each draw strings together blocks of `block`
+consecutive months, from random starts, into a year, and recomputes the WAPE. The intervals are
+the draws' central `level` share, for each arm's WAPE and, drawn on the same months, for each
+challenger's gain over the champion it faced.
 """
 
 from __future__ import annotations
@@ -35,7 +45,9 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 import duckdb
+import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.ingest import CATEGORY, GROUP, MONTH, VALUE, ingest
@@ -180,34 +192,36 @@ def _actuals(
     con: duckdb.DuckDBPyConnection,
     grouping: str,
     series: Sequence[GuidanceCategory],
-    cutoff: pd.Period,
+    cutoff: pd.Period | None,
     horizon: int,
-) -> pd.DataFrame:
+) -> tuple[pd.Period, pd.DataFrame]:
+    """The cutoff, by default the year before the data ends, and the actuals after it."""
     frame = ingest(con, grouping, list(series)).frame
     last = frame[MONTH].max()
+    cutoff = last - horizon if cutoff is None else cutoff
     if cutoff + horizon > last:
         raise LadderError(
             f"a cutoff of {cutoff} needs actuals through {cutoff + horizon}, but the data ends "
             f"at {last}"
         )
-    return frame[(frame[MONTH] > cutoff) & (frame[MONTH] <= cutoff + horizon)]
+    return cutoff, frame[(frame[MONTH] > cutoff) & (frame[MONTH] <= cutoff + horizon)]
 
 
 def run_ladder(
     con: duckdb.DuckDBPyConnection,
-    cutoff: pd.Period | str,
+    cutoff: pd.Period | str | None = None,
     grouping: str = "org_level1",
     horizon: int = HORIZON,
     arms: Sequence[Arm] = ARMS,
 ) -> LadderRun:
-    """Fit every arm through `cutoff` and set its forecast beside the actuals of the `horizon`
-    months after it."""
+    """Fit every arm through `cutoff`, by default `horizon` months before the data ends, and
+    set its forecast beside the actuals of the `horizon` months after it."""
     found = problems(arms)
     if found:
         raise LadderError("; ".join(found))
-    cutoff = pd.Period(cutoff, "M")
     series = list(dict.fromkeys(a.series for a in arms))
-    actuals = _actuals(con, grouping, series, cutoff, horizon)
+    given = None if cutoff is None else pd.Period(cutoff, "M")
+    cutoff, actuals = _actuals(con, grouping, series, given, horizon)
     months = pd.period_range(cutoff + 1, periods=horizon, freq="M")
     runs = []
     for arm in arms:
@@ -238,3 +252,184 @@ def run_ladder(
         }
         runs.append(ArmRun(arm, frame, len(skipped), {"weights": selection}))
     return LadderRun(cutoff, grouping, horizon, tuple(runs))
+
+
+# --- scoring -------------------------------------------------------------------------------------
+
+#: How far below the champion's WAPE a richer arm's must be to replace it.
+MARGIN: Final = 0.10
+#: The moving-block bootstrap's block length, in months, its draws, and its interval's level.
+BLOCK: Final = 3
+DRAWS: Final = 1000
+LEVEL: Final = 0.9
+
+
+def wape(forecast: NDArray[np.float64], actual: NDArray[np.float64]) -> float:
+    """The weighted absolute percentage error: summed absolute error over summed actuals."""
+    total = float(np.sum(actual))
+    if total <= 0:
+        raise LadderError("WAPE needs actuals that sum to more than zero")
+    return float(np.sum(np.abs(forecast - actual)) / total)
+
+
+def block_indices(months: int, block: int, draws: int, seed: int = 0) -> NDArray[np.int64]:
+    """(draws, months) month indices for a moving-block bootstrap: each row strings together
+    blocks of `block` consecutive months, from uniformly drawn starts, cut to `months`."""
+    if not 1 <= block <= months:
+        raise LadderError(f"a block must be 1 to {months} months, not {block}")
+    blocks = -(-months // block)
+    starts = np.random.default_rng(seed).integers(0, months - block + 1, size=(draws, blocks))
+    rows = (starts[:, :, None] + np.arange(block)).reshape(draws, blocks * block)
+    return rows[:, :months]
+
+
+def _monthly(run: ArmRun) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Each month's summed absolute error and summed actuals, over the arm's groups."""
+    frame = run.frame.assign(error=(run.frame[FORECAST] - run.frame[ACTUAL]).abs())
+    by_month = frame.groupby(MONTH)[["error", ACTUAL]].sum().sort_index()
+    return by_month["error"].to_numpy(float), by_month[ACTUAL].to_numpy(float)
+
+
+def _drawn(
+    errors: NDArray[np.float64], actuals: NDArray[np.float64], rows: NDArray[np.int64]
+) -> NDArray[np.float64]:
+    totals = actuals[rows].sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(totals > 0, errors[rows].sum(axis=1) / totals, np.nan)
+
+
+@dataclass(frozen=True)
+class ArmScore:
+    """One arm's WAPE and its interval, and how it fared against the champion it faced."""
+
+    arm: Arm
+    wape: float
+    low: float
+    high: float
+    #: The champion it challenged, its relative gain over it (1 - its WAPE over theirs), and
+    #: that gain's interval; none for the null arm.
+    challenged: str | None = None
+    gain: float | None = None
+    gain_low: float | None = None
+    gain_high: float | None = None
+    #: Whether it cleared the margin and became the champion.
+    cleared: bool = False
+
+
+@dataclass(frozen=True)
+class Scorecard:
+    """Every arm's score, and each series' selected arm."""
+
+    scores: tuple[ArmScore, ...]
+    selected: dict[GuidanceCategory, str]
+    margin: float
+    block: int
+    draws: int
+    level: float
+
+    def frame(self) -> pd.DataFrame:
+        rows = [
+            {
+                "series": s.arm.series.value,
+                "arm": s.arm.name,
+                "simplicity": s.arm.simplicity,
+                "wape": s.wape,
+                "low": s.low,
+                "high": s.high,
+                "challenged": s.challenged,
+                "gain": s.gain,
+                "gain_low": s.gain_low,
+                "gain_high": s.gain_high,
+                "cleared": s.cleared,
+                "selected": self.selected[s.arm.series] == s.arm.name,
+            }
+            for s in self.scores
+        ]
+        return pd.DataFrame(rows)
+
+
+def score(
+    ladder: LadderRun,
+    margin: float = MARGIN,
+    block: int = BLOCK,
+    draws: int = DRAWS,
+    level: float = LEVEL,
+    seed: int = 0,
+) -> Scorecard:
+    """Score every arm by its WAPE over the run's months, select each series' arm by climbing
+    its ladder with `margin`, and give moving-block bootstrap intervals."""
+    if not 0 <= margin < 1:
+        raise LadderError(f"a margin must be in [0, 1), not {margin}")
+    if not 0 < level < 1:
+        raise LadderError(f"an interval's level must be in (0, 1), not {level}")
+    rows = block_indices(ladder.horizon, block, draws, seed)
+    tails = (100 * (1 - level) / 2, 100 * (1 + level) / 2)
+    scores: list[ArmScore] = []
+    selected: dict[GuidanceCategory, str] = {}
+    for series in dict.fromkeys(r.arm.series for r in ladder.runs):
+        runs = sorted(
+            (r for r in ladder.runs if r.arm.series is series), key=lambda r: r.arm.simplicity
+        )
+        monthly = {r.arm.name: _monthly(r) for r in runs}
+        drawn = {name: _drawn(e, a, rows) for name, (e, a) in monthly.items()}
+        champion = None
+        for r in runs:
+            name = r.arm.name
+            point = wape(*(r.frame[c].to_numpy(float) for c in (FORECAST, ACTUAL)))
+            low, high = (float(v) for v in np.nanpercentile(drawn[name], tails))
+            if champion is None:
+                scores.append(ArmScore(r.arm, point, low, high, cleared=True))
+                champion = (name, point)
+                continue
+            held, best = champion
+            gain = 1 - point / best if best > 0 else 0.0
+            with np.errstate(divide="ignore", invalid="ignore"):
+                gains = 1 - drawn[name] / drawn[held]
+            gain_low, gain_high = (float(v) for v in np.nanpercentile(gains, tails))
+            cleared = point <= (1 - margin) * best
+            scores.append(
+                ArmScore(r.arm, point, low, high, held, gain, gain_low, gain_high, cleared)
+            )
+            if cleared:
+                champion = (name, point)
+        assert champion is not None
+        selected[series] = champion[0]
+    return Scorecard(tuple(scores), selected, margin, block, draws, level)
+
+
+def markdown(ladder: LadderRun, card: Scorecard) -> str:
+    """The study's report: per series, each arm's WAPE and interval, and the selection."""
+    parts = [
+        "# Guidance ladder",
+        f"Fitted through {ladder.cutoff}, scored on the {ladder.horizon} months after it at "
+        f"{ladder.grouping} grain. A richer arm replaces the champion only with a WAPE "
+        f"{card.margin:.0%} below its own. Intervals are {card.level:.0%} moving-block "
+        f"bootstrap intervals over the months, in blocks of {card.block}, from {card.draws} "
+        "draws.",
+    ]
+    for series in dict.fromkeys(s.arm.series for s in card.scores):
+        chosen = card.selected[series]
+        lines = [
+            f"## {series.value}: {chosen}",
+            "",
+            "| rank | arm | WAPE | interval | challenged | gain | gain interval | outcome |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for s in (s for s in card.scores if s.arm.series is series):
+            gain = "—" if s.gain is None else f"{s.gain:+.1%}"
+            band = "—" if s.gain_low is None else f"{s.gain_low:+.1%} to {s.gain_high:+.1%}"
+            outcome = (
+                "**selected**"
+                if s.arm.name == chosen
+                else "null"
+                if s.arm.null
+                else "cleared"
+                if s.cleared
+                else "held"
+            )
+            lines.append(
+                f"| {s.arm.simplicity} | {s.arm.name} | {s.wape:.3f} | {s.low:.3f}–{s.high:.3f} "
+                f"| {s.challenged or '—'} | {gain} | {band} | {outcome} |"
+            )
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts) + "\n"
