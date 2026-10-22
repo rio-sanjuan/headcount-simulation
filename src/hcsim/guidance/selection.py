@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.guidance.models import ForecastError, build
+from hcsim.guidance.registry import Entry, Registry
 
 Floats = NDArray[np.float64]
 
@@ -36,6 +38,7 @@ class EvaluationConfig:
 class SelectionConfig:
     suite: tuple[str, ...] = ("seasonal_naive", "historical_average")
     top_k: int = 2
+    combination: str = "inverse_error"
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
@@ -71,6 +74,12 @@ def score(name: str, series: Floats, config: EvaluationConfig) -> float:
     return float(np.mean(scores)) if scores else float("inf")
 
 
+class Combiner(Protocol):
+    """Weights for the models that combine into a forecast, from their scores."""
+
+    def __call__(self, scores: dict[str, float], top_k: int) -> dict[str, float]: ...
+
+
 def inverse_error_weights(scores: dict[str, float], top_k: int) -> dict[str, float]:
     """Keep the `top_k` lowest scores, weighted by inverse error.
 
@@ -86,6 +95,12 @@ def inverse_error_weights(scores: dict[str, float], top_k: int) -> dict[str, flo
     inverse = {name: 1.0 / scores[name] for name in finite}
     total = sum(inverse.values())
     return {name: w / total for name, w in inverse.items()}
+
+
+#: The combination methods a configuration can name.
+COMBINERS: Registry[Combiner] = Registry(
+    "combination method", (Entry("inverse_error", lambda: inverse_error_weights),)
+)
 
 
 @dataclass(frozen=True)
@@ -105,7 +120,7 @@ def forecast(
             f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
         )
     scores = {name: score(name, history, config.evaluation) for name in config.suite}
-    weights = inverse_error_weights(scores, config.top_k)
+    weights = COMBINERS.build(config.combination)(scores, config.top_k)
     combined = np.zeros(horizon)
     for name, weight in weights.items():
         combined += weight * build(name).fit(history).predict(horizon)

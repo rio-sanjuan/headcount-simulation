@@ -1,0 +1,136 @@
+"""The guidance configuration: what a pipeline run forecasts, and with which components.
+
+A configuration is read from YAML, or built in code, and frozen. Unknown keys are refused, so a
+misspelled field fails loudly instead of running its default. Loading validates the whole
+configuration, collecting every problem before it refuses:
+
+- each field's type and range;
+- every component it names, against its registry (see `registry`): the models, the combination
+  method, and the reconciliation method. An unknown name lists the known ones, and a name from
+  an uninstalled extra gives the command that installs it;
+- the grouping, against the column catalog.
+
+A configuration that loads names only components the pipeline can build.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from hcsim.guidance.ingest import grouping_problems
+from hcsim.guidance.models import MODELS
+from hcsim.guidance.reconcile import RECONCILERS
+from hcsim.guidance.selection import COMBINERS, EvaluationConfig, SelectionConfig
+
+
+class GuidanceConfigError(ValueError):
+    """A configuration that can't be read or doesn't validate."""
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class Evaluation(_Strict):
+    """Rolling-origin backtesting: how many folds, how long, and how far apart."""
+
+    n_splits: int = Field(default=5, ge=1)
+    test_months: int = Field(default=6, ge=1)
+    step_months: int = Field(default=2, ge=1)
+    min_train_months: int = Field(default=36, ge=1)
+
+
+class Combination(_Strict):
+    """How the scored models combine into one forecast."""
+
+    method: str = "inverse_error"
+    top_k: int = Field(default=2, ge=1)
+
+
+class Reconciliation(_Strict):
+    """How each group's flows are reconciled to its anchor. No method skips the step."""
+
+    method: str | None = "greedy"
+    tolerance: float = Field(default=1.0, ge=0.0)
+
+
+class GuidanceConfig(_Strict):
+    horizon: int = Field(default=12, ge=1)
+    grouping: str = "cost_center"
+    #: The population's stamp, `name@digest`, or a built-in population's name.
+    population: str | None = None
+    models: tuple[str, ...] = Field(default=("seasonal_naive", "historical_average"), min_length=1)
+    combination: Combination = Combination()
+    evaluation: Evaluation = Evaluation()
+    reconciliation: Reconciliation = Reconciliation()
+
+    @model_validator(mode="after")
+    def _registered(self) -> GuidanceConfig:
+        problems = self.problems()
+        if problems:
+            raise ValueError("\n".join(problems))
+        return self
+
+    def problems(self) -> list[str]:
+        """Every component the configuration names that can't be built, and the grouping's
+        problems."""
+        found = [f"models: {p}" for p in MODELS.problems(self.models)]
+        repeated = sorted({m for m in self.models if self.models.count(m) > 1})
+        if repeated:
+            found.append(f"models: each model is named once; {repeated} repeat")
+        found += [f"combination.method: {p}" for p in COMBINERS.problems([self.combination.method])]
+        if self.reconciliation.method is not None:
+            method = [self.reconciliation.method]
+            found += [f"reconciliation.method: {p}" for p in RECONCILERS.problems(method)]
+        found += [f"grouping: {p}" for p in grouping_problems(self.grouping)]
+        return found
+
+    @property
+    def reconcile(self) -> bool:
+        return self.reconciliation.method is not None
+
+    @property
+    def tolerance(self) -> float:
+        return self.reconciliation.tolerance
+
+    @property
+    def selection(self) -> SelectionConfig:
+        """The selection settings the forecasting step reads."""
+        e = self.evaluation
+        return SelectionConfig(
+            suite=self.models,
+            top_k=self.combination.top_k,
+            combination=self.combination.method,
+            evaluation=EvaluationConfig(
+                e.n_splits, e.test_months, e.step_months, e.min_train_months
+            ),
+        )
+
+    @classmethod
+    def from_mapping(cls, data: Any) -> GuidanceConfig:
+        try:
+            return cls.model_validate(data if data is not None else {})
+        except ValidationError as error:
+            problems = []
+            for e in error.errors():
+                where = ".".join(str(p) for p in e["loc"])
+                message = str(e["msg"]).removeprefix("Value error, ")
+                if where:
+                    problems.append(f"{where}: {message}")
+                else:  # the registry check, whose problems name their own fields
+                    problems += message.split("\n")
+            raise GuidanceConfigError(
+                "invalid guidance configuration:\n  - " + "\n  - ".join(problems)
+            ) from None
+
+    @classmethod
+    def load(cls, path: Path) -> GuidanceConfig:
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError) as error:
+            raise GuidanceConfigError(f"can't read the configuration at {path}: {error}") from None
+        return cls.from_mapping(data)

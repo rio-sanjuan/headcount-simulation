@@ -22,7 +22,7 @@ import duckdb
 import numpy as np
 import pytest
 
-from hcsim.guidance.pipeline import PipelineConfig
+from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.pipeline import run as fit_guidance
 from hcsim.studies.harness import run_study
 from hcsim.studies.profile import StudyProfile
@@ -47,7 +47,7 @@ def test_the_tiny_run_records_its_wall_clock(tmp_path: Path) -> None:
     with phase("world"):
         write_world(generate_world(preset("tiny", seed=1)), world)
     with phase("guidance"), duckdb.connect(str(world), read_only=True) as con:
-        fit_guidance(con, PipelineConfig()).artifact.save(tmp_path / "guidance")
+        fit_guidance(con, GuidanceConfig()).artifact.save(tmp_path / "guidance")
     profile = StudyProfile.from_mapping(
         {"name": "perf", "seed": 2026, "trajectories": 20, "months": 12}
     )

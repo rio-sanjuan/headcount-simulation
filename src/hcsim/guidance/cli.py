@@ -9,9 +9,10 @@ from pathlib import Path
 
 import duckdb
 
+from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.ingest import GROUPINGS, IngestionError
-from hcsim.guidance.pipeline import PipelineConfig, run
+from hcsim.guidance.pipeline import run
 
 
 def main(argv: Sequence[str]) -> int:
@@ -20,15 +21,25 @@ def main(argv: Sequence[str]) -> int:
     fit = commands.add_parser("fit", help="fit the forecast and write the artifact")
     fit.add_argument("--world", type=Path, required=True, help="the world's DuckDB file")
     fit.add_argument("--out", type=Path, required=True, help="the artifact directory to write")
-    fit.add_argument("--horizon", type=int, default=12)
-    fit.add_argument("--grouping", default="cost_center", help=f"one of {', '.join(GROUPINGS)}")
+    fit.add_argument("--config", type=Path, help="a guidance configuration (YAML)")
+    fit.add_argument("--horizon", type=int, help="overrides the configuration's horizon")
+    fit.add_argument(
+        "--grouping", help=f"overrides the configuration's grouping: one of {', '.join(GROUPINGS)}"
+    )
     args = parser.parse_args(list(argv))
 
     if not args.world.is_file():
         parser.error(f"no world at {args.world}")
+    try:
+        base = GuidanceConfig.load(args.config) if args.config else GuidanceConfig()
+        overrides = {"horizon": args.horizon, "grouping": args.grouping}
+        given = {k: v for k, v in overrides.items() if v is not None}
+        config = GuidanceConfig.from_mapping(base.model_dump() | given)
+    except GuidanceConfigError as error:
+        parser.error(str(error))
     with duckdb.connect(str(args.world), read_only=True) as con:
         try:
-            result = run(con, PipelineConfig(horizon=args.horizon, grouping=args.grouping))
+            result = run(con, config)
         except (IngestionError, PipelineError) as error:
             parser.error(str(error))
     result.artifact.save(args.out)

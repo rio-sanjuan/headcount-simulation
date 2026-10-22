@@ -7,6 +7,7 @@ from typing import ClassVar, Self
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.guidance.registry import Entry, Registry, RegistryError
 from hcsim.model.interface import ProbabilisticOutput
 
 Floats = NDArray[np.float64]
@@ -63,15 +64,17 @@ class HistoricalAverage:
         return np.full(horizon, self._mean)
 
 
+Forecaster = SeasonalNaive | HistoricalAverage
+
 #: The registered suite. A configuration names models from here.
-MODELS: dict[str, type[SeasonalNaive] | type[HistoricalAverage]] = {
-    SeasonalNaive.NAME: SeasonalNaive,
-    HistoricalAverage.NAME: HistoricalAverage,
-}
+MODELS: Registry[Forecaster] = Registry(
+    "model",
+    (Entry(SeasonalNaive.NAME, SeasonalNaive), Entry(HistoricalAverage.NAME, HistoricalAverage)),
+)
 
 
-def build(name: str) -> SeasonalNaive | HistoricalAverage:
+def build(name: str) -> Forecaster:
     try:
-        return MODELS[name]()
-    except KeyError:
-        raise ForecastError(f"unknown model {name!r}; known: {', '.join(MODELS)}") from None
+        return MODELS.build(name)
+    except RegistryError as error:
+        raise ForecastError(str(error)) from None

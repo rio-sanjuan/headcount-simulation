@@ -12,9 +12,12 @@ clamp absorbed moves on to the next flow. Whatever no flow can absorb is the res
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
+
+from hcsim.guidance.registry import Entry, Registry
 
 Floats = NDArray[np.float64]
 
@@ -52,3 +55,22 @@ def reconcile_greedy(
                 break
         residual[t] = gap
     return Reconciled(adjusted, residual)
+
+
+class Reconciler(Protocol):
+    """Flows reconciled to an anchor, by the forecast-coherency identity."""
+
+    def __call__(
+        self,
+        headcount: Floats,
+        last_actual: float,
+        flows: dict[str, Floats],
+        signs: dict[str, int],
+        tolerance: float = 1.0,
+    ) -> Reconciled: ...
+
+
+#: The reconciliation methods a configuration can name.
+RECONCILERS: Registry[Reconciler] = Registry(
+    "reconciliation method", (Entry("greedy", lambda: reconcile_greedy),)
+)

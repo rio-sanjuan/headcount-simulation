@@ -11,8 +11,9 @@ import numpy as np
 import pytest
 
 from hcsim.cli import main as hcsim
+from hcsim.guidance.config import GuidanceConfig, Reconciliation
 from hcsim.guidance.ingest import MEASURES
-from hcsim.guidance.pipeline import PipelineConfig, PipelineResult, run
+from hcsim.guidance.pipeline import PipelineResult, run
 from hcsim.guidance.reconcile import reconcile_greedy
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
@@ -76,7 +77,7 @@ def world_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def result(world_path: Path) -> Iterator[PipelineResult]:
     with duckdb.connect(str(world_path), read_only=True) as con:
-        yield run(con, PipelineConfig(horizon=12))
+        yield run(con, GuidanceConfig(horizon=12))
 
 
 def test_every_group_gets_every_category_for_the_horizon(result: PipelineResult) -> None:
@@ -133,7 +134,12 @@ def test_the_artifact_saves_and_loads(result: PipelineResult, tmp_path: Path) ->
 
 def test_a_coarser_grouping_and_no_reconciliation(world_path: Path) -> None:
     with duckdb.connect(str(world_path), read_only=True) as con:
-        topline = run(con, PipelineConfig(horizon=6, grouping="TOPLINE", reconcile=False))
+        topline = run(
+            con,
+            GuidanceConfig(
+                horizon=6, grouping="TOPLINE", reconciliation=Reconciliation(method=None)
+            ),
+        )
     assert topline.artifact.groups == ("ALL",)
     assert topline.report["reconciliation"]["max_abs_residual"] == 0.0
 
@@ -165,3 +171,17 @@ def test_guidance_fit_refuses_a_grouping_the_series_can_t_take(
         hcsim([*args, "--grouping", "job_family"])
     assert stop.value.code == 2
     assert "can't be grouped by 'job_family'" in capsys.readouterr().err
+
+
+def test_guidance_fit_reads_a_configuration_and_its_flags_override_it(
+    world_path: Path, tmp_path: Path
+) -> None:
+    config = tmp_path / "guidance.yaml"
+    config.write_text("horizon: 6\nmodels: [historical_average]\ncombination: {top_k: 1}\n")
+    args = ["guidance", "fit", "--world", str(world_path), "--config", str(config)]
+    assert hcsim([*args, "--out", str(tmp_path / "a")]) == 0
+    assert GuidanceForecast.load(tmp_path / "a").horizon == 6
+    report = json.loads((tmp_path / "a" / "report.json").read_text())
+    assert {s for v in report["selection"].values() for s in v["weights"]} == {"historical_average"}
+    assert hcsim([*args, "--out", str(tmp_path / "b"), "--horizon", "3"]) == 0
+    assert GuidanceForecast.load(tmp_path / "b").horizon == 3
