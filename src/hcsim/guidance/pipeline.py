@@ -150,6 +150,8 @@ class Forecast:
             scores[f"{group}/{category.value}"] = {
                 "scores": result.scores,
                 "weights": result.weights,
+                "folds": {m: [f.as_record() for f in fs] for m, fs in result.folds.items()},
+                "parameters": result.parameters,
             }
         suite = {name: capabilities(name).as_record() for name in config.selection.suite}
         ctx.note(self.name, series_skipped=skipped, selection=scores, capabilities=suite)

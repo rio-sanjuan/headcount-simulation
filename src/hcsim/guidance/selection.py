@@ -1,39 +1,39 @@
-"""Rolling-origin evaluation, top-k inverse-error selection, and combined forecasts.
+"""Selection: scoring the suite, combining the best, and the combined forecast.
 
-Evaluation works backwards from the end of a series. The latest fold's test window ends at the
-last observed month, each earlier fold steps back, every training window starts at the first
-month, and a fold with too little training history is dropped. A model's score is its WAPE
-averaged across folds. WAPE suits sparse count series, where MAPE is undefined on zeros.
+Every model in the suite is scored by rolling-origin evaluation (see `evaluation`). The
+configured combination method turns the scores into weights, and the selected models refit on
+the whole history, tuned first when tuning is on, and combine into the forecast.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.guidance.capabilities import CovariateModel, ExposureModel
-from hcsim.guidance.models import Forecaster, ForecastError, build
+from hcsim.guidance.evaluation import (
+    EvaluationConfig,
+    FoldScore,
+    backtest,
+    folds,
+    mape,
+    prepared,
+    score,
+    score_of,
+    tuned,
+    wape,
+)
+from hcsim.guidance.models import ForecastError
 from hcsim.guidance.registry import Entry, Registry
+from hcsim.guidance.tuning import TuningSettings
 
 Floats = NDArray[np.float64]
 
-
-@dataclass(frozen=True)
-class EvaluationConfig:
-    n_splits: int = 5
-    test_months: int = 6
-    step_months: int = 2
-    min_train_months: int = 36
-
-    @property
-    def min_length(self) -> int:
-        """A series shorter than this gets no forecast."""
-        return self.min_train_months + self.test_months
+__all__ = ["EvaluationConfig", "folds", "mape", "prepared", "score", "wape"]
 
 
 @dataclass(frozen=True)
@@ -42,73 +42,8 @@ class SelectionConfig:
     top_k: int = 2
     combination: str = "inverse_error"
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
-
-
-def folds(n_months: int, config: EvaluationConfig) -> list[tuple[int, int]]:
-    """(train end, test end) index pairs, chronological. Ends are exclusive."""
-    result = []
-    for i in range(config.n_splits):
-        test_end = n_months - i * config.step_months
-        train_end = test_end - config.test_months
-        if train_end >= config.min_train_months:
-            result.append((train_end, test_end))
-    return sorted(result)
-
-
-def wape(actual: Floats, forecast: Floats) -> float:
-    """Absolute error over absolute actuals. All-zero actuals score 0 if matched, else inf."""
-    denominator = float(np.abs(actual).sum())
-    error = float(np.abs(actual - forecast).sum())
-    if denominator == 0.0:
-        return 0.0 if error == 0.0 else float("inf")
-    return error / denominator
-
-
-def prepared(
-    name: str,
-    past: Floats | None,
-    future: Floats | None,
-    calendar: pd.DataFrame | None = None,
-    months: int = 0,
-    horizon: int = 0,
-) -> Forecaster:
-    """The model `name`, given the exposure when it models a share of one, and the calendar
-    covariates it reads, when it reads any: the first `months` rows of `calendar` for its
-    history, and the `horizon` after them for its forecast."""
-    model = build(name)
-    if isinstance(model, ExposureModel):
-        if past is None:
-            raise ForecastError(f"{name} models a share of an exposure, and this series has none")
-        model.expose(past, future)
-    columns = list(getattr(model, "COVARIATES", ()))
-    if columns and calendar is not None and isinstance(model, CovariateModel):
-        values = calendar[columns].to_numpy(dtype=np.float64)
-        ahead = values[months : months + horizon]
-        model.provide(values[:months], ahead if len(ahead) == horizon else None)
-    return model
-
-
-def score(
-    name: str,
-    series: Floats,
-    config: EvaluationConfig,
-    exposure: Floats | None = None,
-    calendar: pd.DataFrame | None = None,
-) -> float:
-    """Mean WAPE across folds. A model that fails a fold loses that fold. A model of a share
-    is scored on the exposure each fold's test months realized, and a covariate-aware model
-    reads the calendar of each fold's months."""
-    scores = []
-    for train_end, test_end in folds(len(series), config):
-        past = None if exposure is None else exposure[:train_end]
-        future = None if exposure is None else exposure[train_end:test_end]
-        try:
-            model = prepared(name, past, future, calendar, train_end, test_end - train_end)
-            prediction = model.fit(series[:train_end]).predict(test_end - train_end)
-        except ForecastError:
-            continue
-        scores.append(wape(series[train_end:test_end], prediction))
-    return float(np.mean(scores)) if scores else float("inf")
+    #: How to tune the models that declare a search space; none leaves their defaults.
+    tuning: TuningSettings | None = None
 
 
 class Combiner(Protocol):
@@ -145,6 +80,10 @@ class SeriesForecast:
     values: Floats
     scores: dict[str, float]
     weights: dict[str, float]
+    #: Each model's score on each fold.
+    folds: dict[str, list[FoldScore]] = field(default_factory=dict)
+    #: The tuned values each selected model refit with; empty for its defaults.
+    parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def forecast(
@@ -165,17 +104,26 @@ def forecast(
         raise ForecastError(
             f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
         )
-    scores = {
-        name: score(name, history, config.evaluation, exposure, calendar) for name in config.suite
+    evaluation, tuning = config.evaluation, config.tuning
+    scored = {
+        name: backtest(name, history, evaluation, exposure, calendar, tuning)
+        for name in config.suite
     }
+    scores = {name: score_of(f, evaluation.metric) for name, f in scored.items()}
     weights = COMBINERS.build(config.combination)(scores, config.top_k)
-    forecasts = {}
+    forecasts, parameters = {}, {}
     for name in weights:
+        values = (
+            {} if tuning is None else tuned(name, history, evaluation, tuning, exposure, calendar)
+        )
         try:
-            model = prepared(name, exposure, future_exposure, calendar, len(history), horizon)
+            model = prepared(
+                name, exposure, future_exposure, calendar, len(history), horizon, values
+            )
             forecasts[name] = model.fit(history).predict(horizon)
         except ForecastError:
             continue
+        parameters[name] = values
     if not forecasts:
         raise ForecastError(f"none of the selected models {sorted(weights)} could refit")
     total = sum(weights[name] for name in forecasts)
@@ -183,4 +131,4 @@ def forecast(
     combined = np.zeros(horizon)
     for name, weight in weights.items():
         combined += weight * forecasts[name]
-    return SeriesForecast(combined, scores, weights)
+    return SeriesForecast(combined, scores, weights, scored, parameters)

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar, Final
 
@@ -29,6 +29,7 @@ import numpy as np
 from hcsim.guidance.adapters.base import Floats, LibraryModel, adapted
 from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry
+from hcsim.guidance.tuning import FloatParam, IntParam, Space
 from hcsim.model.interface import ProbabilisticOutput
 
 NAMESPACE: Final = "darts"
@@ -75,6 +76,8 @@ class Spec:
     samples: int = 1
     #: The calendar covariates it reads as future covariates, at lag 0.
     covariates: tuple[str, ...] = ()
+    #: Its search space, when a tuner may tune it.
+    space: Space = field(default_factory=dict)
 
 
 #: Each adapted model's spec, by the library's name for it.
@@ -90,9 +93,18 @@ MODELS: Final[Mapping[str, Spec]] = MappingProxyType(
             2 * SEASON,
             "lightgbm",
             covariates=("weekdays",),
+            space={
+                "num_leaves": IntParam(8, 64),
+                "learning_rate": FloatParam(0.01, 0.3, log=True),
+                "lags": IntParam(6, SEASON),
+            },
         ),
         "LinearRegressionModel": Spec(
-            {"lags": SEASON}, _POINT, 2 * SEASON, covariates=("weekdays",)
+            {"lags": SEASON},
+            _POINT,
+            2 * SEASON,
+            covariates=("weekdays",),
+            space={"lags": IntParam(3, SEASON)},
         ),
         "NBEATSModel": Spec(dict(_DEEP), _POINT, 36, "torch", scaled=True),
         "TFTModel": Spec(
@@ -124,7 +136,7 @@ class DartsModel(LibraryModel):
             transformers = importlib.import_module("darts.dataprocessing.transformers")
             scaler = transformers.Scaler()
             series = scaler.fit_transform(series)
-        arguments = dict(self.ARGUMENTS)
+        arguments = self.arguments
         if self.covariates_given:
             arguments["lags_future_covariates"] = [0]
         model = getattr(importlib.import_module("darts.models"), self.MODEL)(**arguments)
@@ -164,6 +176,7 @@ def _adapter(model: str, spec: Spec) -> type[DartsModel]:
         spec.outputs,
         spec.min_months,
         spec.covariates,
+        spec.space,
     )
     cls.SPEC = spec
     return cls
