@@ -19,6 +19,7 @@ import pandas as pd
 
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
 from hcsim.model.core.categories import GuidanceCategory
+from hcsim.model.core.contract import role_column
 from hcsim.model.core.layouts import MAX_OPENINGS_PER_REQUISITION
 
 MONTH: Final = "month"
@@ -47,13 +48,13 @@ MEASURES: Final[dict[GuidanceCategory, str]] = {
     GuidanceCategory.HEADCOUNT: _FLOW.format(code="ACTIVE"),
     # A requisition counts once, in the month it opened, with the openings it opened with: the
     # most any of its state intervals carries. Openings are capped per requisition, as they
-    # are in the opening buffer.
+    # are in the opening buffer. The table's cost-center column comes from the contract.
     GuidanceCategory.REQUISITIONS_OPENED: f"""
         SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
                sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
         FROM (
-            SELECT req_id, min(opened_date) AS opened_date, any_value(cost_center) AS cost_center,
-                   max(openings) AS openings
+            SELECT req_id, min(opened_date) AS opened_date,
+                   any_value({{req_cost_center}}) AS cost_center, max(openings) AS openings
             FROM req_interval GROUP BY req_id
         )
         GROUP BY ALL
@@ -104,11 +105,13 @@ def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Ser
         raise IngestionError(f"transaction codes missing from dim_trans_type: {unknown}")
     group = _group_expression(grouping)
     parts = []
+    req_cost_center = role_column(con, "req_interval")
     for category, sql in MEASURES.items():
         frame = con.execute(
             f"""
             SELECT m.month, {group} AS "group", sum(m.value)::DOUBLE AS value
-            FROM ({sql}) m LEFT JOIN dim_org o USING (cost_center)
+            FROM ({sql.format(req_cost_center=req_cost_center)}) m
+            LEFT JOIN dim_org o USING (cost_center)
             GROUP BY ALL
             """
         ).df()

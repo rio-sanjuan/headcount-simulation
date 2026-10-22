@@ -145,6 +145,35 @@ def snapshot_gaps(
     return [str(d.date()) for d, gone in zip(month_ends, missed, strict=True) if gone]
 
 
+#: Where the cost-center aliases quirk renames the leaf cost center.
+COST_CENTER_ALIASES: dict[str, str] = {
+    "req_interval": "department",
+    "pending_start": "cost_centre",
+    "plan_headcount": "org_unit",
+    "equity_award": "cc",
+    "equity_holder": "cc",
+}
+
+
+def cost_center_columns(config: WorldConfig, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """`contract_columns`: the column holding the leaf cost center in every table that has
+    one, so a reader can find it whatever a table calls it."""
+    aliases = COST_CENTER_ALIASES if config.quirks.cost_center_aliases else {}
+    rows = [
+        {"table_name": name, "role": "cost_center", "column_name": aliases.get(name, "cost_center")}
+        for name, frame in sorted(tables.items())
+        if "cost_center" in frame.columns
+    ]
+    return pd.DataFrame(rows)
+
+
+def rename_cost_centers(config: WorldConfig, tables: dict[str, pd.DataFrame]) -> None:
+    if not config.quirks.cost_center_aliases:
+        return
+    for name, column in COST_CENTER_ALIASES.items():
+        tables[name] = tables[name].rename(columns={"cost_center": column})
+
+
 def aggregate_only(
     config: WorldConfig, agg: pd.DataFrame, rng: np.random.Generator
 ) -> pd.DataFrame:
