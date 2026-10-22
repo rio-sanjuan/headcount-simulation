@@ -11,7 +11,10 @@ from hcsim.model.data.grain import GrainRelation, Placement
 from hcsim.model.data.quotas import (
     Derivation,
     QuotaError,
+    QuotaRefused,
     RakingMarginals,
+    Refusal,
+    check_derivation,
     derive,
     disaggregate,
     inside_shares,
@@ -21,12 +24,14 @@ from hcsim.model.data.quotas import (
 D = Derivation
 GROUPS = ("ORG-A", "ORG-B", "ORG-C")
 PLACED = Placement(GrainRelation.CROSSING, ("ORG-A",), ("ORG-B",), ("ORG-C",))
+COVERED = Placement(GrainRelation.COVERED, ("ORG-A",), (), ("ORG-B", "ORG-C"))
+UNREACHABLE = Placement(GrainRelation.UNREACHABLE, (), (), GROUPS)
 
 
 def test_each_derivation_gives_the_subset_its_quota() -> None:
     quota = np.array([10.0, 20.0, 30.0])
-    assert derive(quota, GROUPS, PLACED, D.UNCHANGED).tolist() == [10, 20, 30]  # type: ignore[union-attr]
-    assert derive(quota, GROUPS, PLACED, D.RESTRICT).tolist() == [10, 0, 0]  # type: ignore[union-attr]
+    assert derive(quota, GROUPS, None, D.UNCHANGED).tolist() == [10, 20, 30]  # type: ignore[union-attr]
+    assert derive(quota, GROUPS, COVERED, D.RESTRICT).tolist() == [10, 0, 0]  # type: ignore[union-attr]
     reshared = derive(quota, GROUPS, PLACED, D.RESHARE, shares=[1.0, 0.25, 1.0])
     assert reshared is not None
     assert reshared.tolist() == [10, 5, 0]  # outside groups get nothing, whatever their share
@@ -43,9 +48,9 @@ def test_derivations_work_step_by_step() -> None:
 
 def test_bad_derivation_inputs_are_refused() -> None:
     with pytest.raises(QuotaError, match="quotas have 2 groups, the artifact 3"):
-        derive([1.0, 2.0], GROUPS, PLACED, D.RESTRICT)
+        derive([1.0, 2.0], GROUPS, COVERED, D.RESTRICT)
     with pytest.raises(QuotaError, match="non-negative"):
-        derive([1.0, -2.0, 0.0], GROUPS, PLACED, D.RESTRICT)
+        derive([1.0, -2.0, 0.0], GROUPS, COVERED, D.RESTRICT)
     with pytest.raises(QuotaError, match="needs each group's share"):
         derive([1.0, 2.0, 3.0], GROUPS, PLACED, D.RESHARE)
     with pytest.raises(QuotaError, match="one value in \\[0, 1\\] per group"):
@@ -113,3 +118,39 @@ def test_raking_refuses_inconsistent_or_impossible_margins() -> None:
         rake(np.ones((1, 2)), margins)
     with pytest.raises(QuotaError, match="didn't converge in 1 iterations"):
         rake(np.array([[1.0, 2.0], [3.0, 4.0]]), margins, max_iterations=1)
+
+
+@pytest.mark.parametrize(
+    ("derivation", "placement", "refusal", "hint"),
+    [
+        (D.UNCHANGED, COVERED, Refusal.UNCHANGED_FOR_SUBSET, "use restrict, reshare"),
+        (D.RESTRICT, None, Refusal.SUBSET_DERIVATION_WITHOUT_SUBSET, "use unchanged"),
+        (D.RESHARE, None, Refusal.SUBSET_DERIVATION_WITHOUT_SUBSET, "use unchanged"),
+        (D.RESTRICT, PLACED, Refusal.RESTRICT_CROSSING, "groups ['ORG-B'] cross"),
+        (D.RESHARE, UNREACHABLE, Refusal.NO_GROUP_REACHES, "use refit or unguided"),
+        (D.RESTRICT, UNREACHABLE, Refusal.NO_GROUP_REACHES, "nothing to read"),
+        (D.DISAGGREGATE, None, Refusal.DISAGGREGATE_NOT_COARSER, "nothing to split"),
+    ],
+)
+def test_refusals_are_named(
+    derivation: Derivation, placement: Placement | None, refusal: Refusal, hint: str
+) -> None:
+    with pytest.raises(QuotaRefused, match=f"^{refusal.value}: ") as error:
+        check_derivation(derivation, placement)
+    assert error.value.refusal is refusal
+    assert hint in str(error.value)
+
+
+def test_what_every_run_can_do() -> None:
+    for placement in (None, COVERED, PLACED, UNREACHABLE):
+        for derivation in (D.REFIT, D.UNGUIDED):
+            check_derivation(derivation, placement)
+    check_derivation(D.UNCHANGED, None)
+    check_derivation(D.RESHARE, COVERED)  # resharing a covered subset keeps whole groups
+    check_derivation(D.DISAGGREGATE, None, coarser=True)
+    check_derivation(D.DISAGGREGATE, COVERED, coarser=True)
+
+
+def test_derive_refuses_through_the_same_checks() -> None:
+    with pytest.raises(QuotaRefused, match=r"^restrict_crossing: "):
+        derive([1.0, 2.0, 3.0], GROUPS, PLACED, D.RESTRICT)
