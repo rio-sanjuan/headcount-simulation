@@ -47,6 +47,8 @@ class Applied:
     unsized_grants: int = 0
     #: Grant recipients who took a recorded award.
     replayed_grants: int = 0
+    #: Grant recipients an eligibility cutoff left out.
+    ineligible_grants: int = 0
 
 
 def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
@@ -182,7 +184,7 @@ def apply(
 
     # 7. Route, size, and record grants, for the appended employees or the written ones: a
     # recorded award where the recipient holds one, sizing otherwise.
-    recorded = unsized = replayed = 0
+    recorded = unsized = replayed = ineligible = 0
     if result.grants and awards is not None and state.ledger is not None:
         first = state.n_employees - len(appended)
         for grant in result.grants:
@@ -191,6 +193,13 @@ def apply(
                 continue
             if state.price is None:
                 raise RuntimeError("a run that sizes awards needs a price model in its state")
+            cutoff = awards.eligibility.get(grant.award_type)
+            if cutoff is not None:
+                keep = cutoff.eligible(state.employees[positions], step, calendar_month)
+                ineligible += int((~keep).sum())
+                positions = positions[keep]
+                if not len(positions):
+                    continue
             rows = state.employees[positions]
             routed = route(
                 awards.sizer(grant.award_type),
@@ -236,5 +245,13 @@ def apply(
         state.category_ledger[category] = used.copy() if current is None else current + used
 
     return Applied(
-        dropped, appended, dropped_reqs, appended_reqs, forfeited, recorded, unsized, replayed
+        dropped,
+        appended,
+        dropped_reqs,
+        appended_reqs,
+        forfeited,
+        recorded,
+        unsized,
+        replayed,
+        ineligible,
     )

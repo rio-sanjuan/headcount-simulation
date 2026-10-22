@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 from hcsim.financial.calculator import SizingError
-from hcsim.financial.timing import MAX_LAG, AwardTiming, LagDistribution
+from hcsim.financial.timing import MAX_LAG, AnnualCutoff, AwardTiming, LagDistribution
+from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn
 
 
 def rng(seed: int = 0) -> np.random.Generator:
@@ -68,3 +69,27 @@ def test_award_timing_is_checked() -> None:
         AwardTiming(suppressed=frozenset(range(1, 13)))
     with pytest.raises(SizingError, match="a calendar month runs 1-12"):
         AwardTiming().award_steps(0, 0, 1, rng())
+
+
+# --- the annual eligibility cutoff ---------------------------------------------------------------
+
+
+def test_the_cutoff_is_the_latest_cutoff_month_at_or_before_the_award() -> None:
+    october = AnnualCutoff(cutoff_month=10)
+    assert october.cutoff_step(20, 4) == 14  # an April award: the October six months before
+    assert october.cutoff_step(20, 10) == 20  # in October itself
+    assert october.cutoff_step(20, 11) == 19
+
+
+def test_only_those_hired_before_the_cutoff_are_eligible() -> None:
+    rows = EMPLOYEE.empty(4)
+    # A seeded veteran, a September hire, an October hire, and one hired this month.
+    rows[:, EmployeeColumn.HIRE_STEP] = [-30, 13, 14, 20]
+    assert AnnualCutoff(10).eligible(rows, 20, 4).tolist() == [True, True, False, False]
+
+
+def test_a_cutoff_month_is_checked() -> None:
+    with pytest.raises(SizingError, match="a cutoff is a calendar month 1-12"):
+        AnnualCutoff(0)
+    with pytest.raises(SizingError, match="a calendar month runs 1-12"):
+        AnnualCutoff(10).cutoff_step(0, 13)

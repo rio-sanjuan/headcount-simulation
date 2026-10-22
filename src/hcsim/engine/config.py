@@ -41,7 +41,7 @@ from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.routing import HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
-from hcsim.financial.timing import AwardTiming
+from hcsim.financial.timing import AnnualCutoff, AwardTiming
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
@@ -252,6 +252,9 @@ class AwardSettings:
     #: Per award type, when its grants are awarded after dispatch. A type without one is
     #: awarded in its dispatch month.
     timing: Mapping[str, AwardTiming] = field(default_factory=dict)
+    #: Per award type, who's eligible by hire date. A type without a cutoff grants everyone
+    #: its domain dispatches.
+    eligibility: Mapping[str, AnnualCutoff] = field(default_factory=dict)
 
     @property
     def window(self) -> HybridWindow:
