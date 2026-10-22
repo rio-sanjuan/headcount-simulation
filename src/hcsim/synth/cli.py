@@ -26,5 +26,7 @@ def main(argv: Sequence[str]) -> int:
     elapsed = time.perf_counter() - started
     print(f"wrote the {args.preset!r} world (seed {args.seed}) to {args.out} in {elapsed:.1f}s")
     for name, frame in sorted(world.tables.items()):
-        print(f"  {name:16} {len(frame):>8} rows")
+        print(f"  {name:26} {len(frame):>8} rows")
+    for name, frame in sorted(world.truth_tables.items()):
+        print(f"  {'truth.' + name:26} {len(frame):>8} rows")
     return 0

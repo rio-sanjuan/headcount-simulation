@@ -14,8 +14,11 @@ from tests.support.stat_check import stat_check
 
 @pytest.fixture
 def vintages(small_world: World) -> pd.DataFrame:
-    return small_world.tables["plan_headcount"].assign(
-        month=lambda f: pd.to_datetime(f["month_end"]).dt.to_period("M"),
+    """The vintages, with each cell's regime from the truth."""
+    return (
+        small_world.tables["plan_headcount"]
+        .merge(small_world.truth_tables["plan_regime"], on=["vintage", "cost_center"], how="left")
+        .assign(month=lambda f: pd.to_datetime(f["month_end"]).dt.to_period("M"))
     )
 
 
@@ -29,7 +32,7 @@ def by_cost_center(vintages: pd.DataFrame) -> pd.DataFrame:
 
 def _latent(world: World) -> pd.Series:
     return (
-        world.tables["truth_latent_plan"]
+        world.truth_tables["latent_plan"]
         .assign(month=lambda f: pd.to_datetime(f["month_end"]).dt.to_period("M"))
         .set_index(["month", "cost_center"])["target_headcount"]
     )

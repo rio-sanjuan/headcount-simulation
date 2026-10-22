@@ -29,10 +29,19 @@ def test_an_unknown_command_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
 def test_synth_generate_writes_a_world(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "world.duckdb"
     assert main(["synth", "generate", "--preset", "tiny", "--seed", "3", "--out", str(out)]) == 0
-    assert "workforce_txn" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "workforce_txn" in printed
+    assert "truth.latent_plan" in printed
     with duckdb.connect(str(out), read_only=True) as con:
         tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
-    assert {"workforce_txn", "dim_org", "truth_manifest"} <= tables
+        truth = {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'truth'"
+            ).fetchall()
+        }
+    assert {"workforce_txn", "dim_org"} <= tables
+    assert {"manifest", "latent_plan"} <= truth
 
 
 def test_synth_refuses_an_unknown_preset(tmp_path: Path) -> None:

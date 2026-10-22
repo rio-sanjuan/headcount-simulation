@@ -136,6 +136,21 @@ def _shock_multiplier(world: World, months: list[pd.Period]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def test_the_truth_tables_hold_the_shocks_the_manifest_records(small_world: World) -> None:
+    table = small_world.truth_tables["attrition_shock"].assign(
+        month=lambda f: pd.to_datetime(f["month_end"]).dt.to_period("M")
+    )
+    assert len(table) > 0
+    months = [pd.Period("2021-02", freq="M") + k for k in range(59)]
+    recorded = _shock_multiplier(small_world, months)
+    recorded = recorded[recorded["shock"] != 1.0]
+    pd.testing.assert_series_equal(
+        table.set_index(["month", "cost_center"])["factor"].sort_index(),
+        recorded.set_index(["month", "cost_center"])["shock"].sort_index(),
+        check_names=False,
+    )
+
+
 def test_departures_recover_the_true_hazard(small_world: World) -> None:
     """Departures match the full true hazard: level, tenure, rating, season, the cost center's
     random effect, and the regime and org shocks the manifest records."""

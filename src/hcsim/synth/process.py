@@ -62,6 +62,7 @@ class Shocks:
         self.remaining = np.zeros(int(org_of_cost_center.max(initial=-1)) + 1, dtype=np.int64)
         self.regime: list[bool] = []
         self.org_shocks: list[tuple[int, int]] = []  # (month, org)
+        self.multipliers: list[NDArray[np.float64]] = []
 
     def step(self, month: int, rng: np.random.Generator) -> NDArray[np.float64]:
         """Advance one month and return each cost center's multiplier."""
@@ -77,6 +78,7 @@ class Shocks:
         org_factor = np.where(self.remaining > 0, t.org_shock_factor, 1.0)
         regime = t.turbulent_factor if self.turbulent else 1.0
         multiplier: NDArray[np.float64] = regime * org_factor[self.org]
+        self.multipliers.append(multiplier)
         return multiplier
 
 
@@ -395,6 +397,7 @@ def simulate(
             ],
         },
         "plan": plan,
+        "shock": np.stack(shocks.multipliers) if shocks.multipliers else np.ones((0, n)),
         "headcount": headcount,
         "family_headcount": family_headcount,
     }
