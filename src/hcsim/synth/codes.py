@@ -34,6 +34,9 @@ CATALOG: Final[dict[str, tuple[str, int, str]]] = {
     "CTG_START": ("excluded", 1, "A contingent worker's start"),
     "CTG_END": ("excluded", -1, "A contingent worker's end"),
     "ADMIN": ("ignored", 0, "An administrative change with no effect on headcount"),
+    "HIRE_REV": ("measured", -1, "Reverses a hire recorded in error"),
+    "TERM_REV": ("measured", 1, "Reverses a departure recorded in error"),
+    "HIRE_PENDING": ("measured", 0, "An accepted offer, dated on the future start"),
 }
 DISPOSITIONS: Final = ("measured", "excluded", "ignored")
 

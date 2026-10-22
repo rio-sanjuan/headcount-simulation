@@ -904,6 +904,33 @@ class PlanTruth:
         return found
 
 
+@dataclass(frozen=True)
+class QuirkTruth:
+    """Data quirks: realistic flaws in how the warehouse records the world. Every quirk is off
+    by default, so the canonical worlds stay clean; each one has its own toggle, so readers can
+    be tested against it. Quirks change only the emitted tables, never the world's processes.
+    """
+
+    #: A share of events reported 30 to 90 days after they happened.
+    backdated_share: float = 0.0
+    #: A share of hires and departures first recorded on a wrong date, then reversed
+    #: (`HIRE_REV`, `TERM_REV`) and recorded again on the right one.
+    correction_share: float = 0.0
+    #: A share of no-shows recorded as a hire on the day they were due, then reversed with
+    #: `HIRE_REV` later that month.
+    no_show_pair_share: float = 0.0
+    #: Record every accepted offer as `HIRE_PENDING`: reported on the offer's day, and dated
+    #: on the future start.
+    pending_hire_rows: bool = False
+
+    def problems(self) -> list[str]:
+        found = []
+        for name in ("backdated_share", "correction_share", "no_show_pair_share"):
+            if not 0 <= getattr(self, name) <= 1:
+                found.append(f"quirks.{name} must lie in [0, 1]")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -975,6 +1002,7 @@ class WorldConfig:
     openings: OpeningsTruth = field(default_factory=OpeningsTruth)
     offers: OfferTruth = field(default_factory=OfferTruth)
     plans: PlanTruth = field(default_factory=PlanTruth)
+    quirks: QuirkTruth = field(default_factory=QuirkTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -1052,6 +1080,7 @@ class WorldConfig:
         problems += self.openings.problems()
         problems += self.offers.problems()
         problems += self.plans.problems()
+        problems += self.quirks.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:

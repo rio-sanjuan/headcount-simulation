@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.synth import awards, codes, equity, plans, population, process, structure
+from hcsim.synth import awards, codes, equity, plans, population, process, quirks, structure
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -303,7 +303,7 @@ def _rating_dimension(config: WorldConfig) -> pd.DataFrame:
 def generate_world(config: WorldConfig) -> World:
     # One spawned stream per subsystem, so adding a subsystem never perturbs the others.
     # A stream's draws depend only on its position, so new streams go at the end.
-    streams = np.random.SeedSequence(config.seed).spawn(12)
+    streams = np.random.SeedSequence(config.seed).spawn(13)
     (
         population_rng,
         process_rng,
@@ -317,6 +317,7 @@ def generate_world(config: WorldConfig) -> World:
         offer_rng,
         reporting_rng,
         plan_rng,
+        quirk_rng,
     ) = (np.random.default_rng(s) for s in streams)
     world = World(config)
     world.tables["dim_org"] = structure.org_dimension(config, structure_rng)
@@ -368,7 +369,10 @@ def generate_world(config: WorldConfig) -> World:
     )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
-    txn = _transactions(workforce, labels, reporting_rng)
+    # The world's true transactions drive the equity world; the warehouse holds them as
+    # recorded, quirks and all, and its aggregate is built from what it holds.
+    clean = _transactions(workforce, labels, reporting_rng)
+    txn = quirks.apply(config, clean, offers, quirk_rng)
     world.tables["workforce_txn"] = txn
     world.tables["workforce_agg"] = _aggregate(txn, world.tables["dim_job"])
     world.tables["dim_rating"] = _rating_dimension(config)
@@ -396,7 +400,7 @@ def generate_world(config: WorldConfig) -> World:
     )
     equity_tables = awards.make_awards(
         config,
-        txn,
+        clean,
         rating_codes,
         world.tables["dim_job"],
         daily,
