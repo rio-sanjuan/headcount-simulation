@@ -569,6 +569,43 @@ class CampusTruth:
         return found
 
 
+@dataclass(frozen=True)
+class OpeningsTruth:
+    """How many openings a growth requisition carries. Invented, round values.
+
+    Most carry one. A share carries a few, and a small share is a bulk placeholder: one
+    requisition standing for many openings of the same role. Backfill and campus requisitions
+    always carry one.
+    """
+
+    multi_share: float = 0.15
+    multi_range: tuple[int, int] = (2, 5)
+    bulk_share: float = 0.02
+    bulk_range: tuple[int, int] = (15, 60)
+
+    def problems(self) -> list[str]:
+        found = []
+        if (
+            not 0 <= self.multi_share + self.bulk_share <= 1
+            or min(self.multi_share, self.bulk_share) < 0
+        ):
+            found.append("openings shares must be non-negative and sum to at most 1")
+        for name in ("multi_range", "bulk_range"):
+            low, high = getattr(self, name)
+            if not 2 <= low <= high:
+                found.append(f"openings.{name} must be a range from 2 up")
+        return found
+
+    def draw(self, n: int, rng: np.random.Generator) -> NDArray[np.int16]:
+        u = rng.random(n)
+        multi = rng.integers(self.multi_range[0], self.multi_range[1] + 1, n)
+        bulk = rng.integers(self.bulk_range[0], self.bulk_range[1] + 1, n)
+        count = np.where(
+            u < self.bulk_share, bulk, np.where(u < self.bulk_share + self.multi_share, multi, 1)
+        )
+        return count.astype(np.int16)
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -637,6 +674,7 @@ class WorldConfig:
     growth: GrowthTruth = field(default_factory=GrowthTruth)
     backfill: BackfillTruth = field(default_factory=BackfillTruth)
     campus: CampusTruth = field(default_factory=CampusTruth)
+    openings: OpeningsTruth = field(default_factory=OpeningsTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -702,6 +740,7 @@ class WorldConfig:
         problems += self.growth.problems()
         problems += self.backfill.problems(self.levels)
         problems += self.campus.problems(self.levels)
+        problems += self.openings.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:

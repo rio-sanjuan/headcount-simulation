@@ -25,7 +25,13 @@ from hcsim.synth.movements import MovementProcess
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
 from hcsim.synth.ratings import RATING_DTYPES, RatingProcess
-from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
+from hcsim.synth.requisitions import (
+    CLOSE_REASONS,
+    INTERVAL_DTYPES,
+    OPEN,
+    REQ_TYPES,
+    RequisitionBook,
+)
 from hcsim.synth.workforce import TRANS_TYPES, TXN_DTYPES, Workforce
 
 GENERATOR_VERSION = 1
@@ -58,6 +64,7 @@ REQ_COLUMNS = [
     "is_manager",
     "openings",
     "opened_date",
+    "interval_start",
     "closed_date",
     "close_reason",
     "filled_by",
@@ -134,31 +141,46 @@ def _transactions(workforce: Workforce, labels: _Labels) -> pd.DataFrame:
 
 
 def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
+    """One row per requisition and state interval. `openings` are those still to fill during
+    the interval. `closed_date` and `close_reason` say how the interval ended, and both are
+    empty for a requisition's current interval while it stays open."""
     config = labels.config
     col = book.column
-    filled_by = pd.array(col("filled_by"), dtype="Int64")
-    filled_by[col("filled_by") < 0] = pd.NA
-    backfill_of = pd.array(col("backfill_of"), dtype="Int64")
-    backfill_of[col("backfill_of") < 0] = pd.NA
-    return pd.DataFrame(
+    ended = book.intervals.collect(INTERVAL_DTYPES)
+    current = book.open_requisitions()
+    req = np.concatenate([ended["req"], current])
+    start = np.concatenate([ended["interval_start"], col("interval_start")[current]])
+    end = np.concatenate([ended["interval_end"], np.full(len(current), np.datetime64("NaT", "D"))])
+    openings = np.concatenate([ended["openings"], col("remaining")[current]]).astype(np.int64)
+    reason = np.concatenate([ended["end_reason"], np.full(len(current), OPEN)])
+    filler = np.concatenate([ended["filled_by"], np.full(len(current), -1)])
+    filled_by = pd.array(filler, dtype="Int64")
+    filled_by[filler < 0] = pd.NA
+    backfill_of = pd.array(col("backfill_of")[req], dtype="Int64")
+    backfill_of[col("backfill_of")[req] < 0] = pd.NA
+    frame = pd.DataFrame(
         {
-            "req_id": col("req_id"),
-            "req_type": labels.of(col("req_type"), REQ_TYPES),
-            "cost_center": labels.of(col("cost_center"), labels.cost_centers),
-            "job_code": labels.job(col("family"), col("level"), col("is_manager")),
-            "job_family": labels.of(col("family"), config.families),
-            "job_level": col("level").astype(np.int64),
-            "location": labels.of(col("location"), config.locations),
-            "company": labels.of(col("company"), config.companies),
-            "is_manager": col("is_manager"),
-            "openings": np.ones(len(book), dtype=np.int64),
-            "opened_date": labels.dates(col("opened_date")),
-            "closed_date": labels.dates(col("closed_date")),
-            "close_reason": labels.of(col("close_reason"), CLOSE_REASONS),
+            "req_id": col("req_id")[req],
+            "req_type": labels.of(col("req_type")[req], REQ_TYPES),
+            "cost_center": labels.of(col("cost_center")[req], labels.cost_centers),
+            "job_code": labels.job(col("family")[req], col("level")[req], col("is_manager")[req]),
+            "job_family": labels.of(col("family")[req], config.families),
+            "job_level": col("level")[req].astype(np.int64),
+            "location": labels.of(col("location")[req], config.locations),
+            "company": labels.of(col("company")[req], config.companies),
+            "is_manager": col("is_manager")[req],
+            "openings": openings,
+            "opened_date": labels.dates(col("opened_date")[req]),
+            "interval_start": labels.dates(start),
+            "closed_date": labels.dates(end),
+            "close_reason": labels.of(reason, CLOSE_REASONS),
             "filled_by": filled_by,
             "backfill_of": backfill_of,
         },
         columns=REQ_COLUMNS,
+    )
+    return frame.sort_values(
+        ["req_id", "interval_start", "closed_date"], na_position="last", ignore_index=True
     )
 
 
@@ -287,8 +309,9 @@ def write_world(world: World, path: Path) -> None:
             con.register("frame", frame)
             con.execute(f"CREATE TABLE {name} AS SELECT {_select_list(frame)} FROM frame")
             con.unregister("frame")
-        # Month-end snapshots of every open requisition. A requisition opened and closed
-        # inside one month never appears, as with real snapshot data.
+        # Month-end snapshots of every open requisition, with the openings still to fill then.
+        # A requisition opened and closed inside one month never appears, as with real
+        # snapshot data.
         con.execute(
             """
             CREATE VIEW req_snapshot AS
@@ -297,7 +320,7 @@ def write_world(world: World, path: Path) -> None:
                    'open' AS state, r.opened_date
             FROM calendar c
             JOIN req_interval r
-              ON r.opened_date <= c.month_end
+              ON r.interval_start <= c.month_end
              AND (r.closed_date IS NULL OR r.closed_date > c.month_end)
             """
         )

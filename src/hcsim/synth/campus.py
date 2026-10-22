@@ -9,7 +9,7 @@ import pandas as pd
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.dates import MonthDays
 from hcsim.synth.population import draw_roles
-from hcsim.synth.requisitions import REQ_TYPES, RequisitionBook
+from hcsim.synth.requisitions import CLOSE_REASONS, REQ_TYPES, RequisitionBook
 from hcsim.synth.workforce import Workforce
 
 CAMPUS = REQ_TYPES.index("campus")
@@ -49,14 +49,11 @@ def campus_month(
     k = t.start_months.index(month.month)
     reqs = campus_requisitions(book)
     filled = reqs[rng.random(len(reqs)) < t.fill_probability[k]]
-    opened = book.column("opened_date")[filled]
-    starts = days.sample("start", len(filled), rng, opened)
+    starts = days.sample("start", len(filled), rng, book.column("interval_start")[filled])
     hired = workforce.hire(book.roles(filled), starts)
-    book.close(filled, starts, "filled_campus", hired)
+    book.fill(filled, starts, np.full(len(filled), CLOSE_REASONS.index("filled_campus")), hired)
     if k == len(t.start_months) - 1:
         rest = campus_requisitions(book)
-        book.close(
-            rest,
-            days.sample("business", len(rest), rng, book.column("opened_date")[rest]),
-            "unfilled",
+        book.exit(
+            rest, days.sample("business", len(rest), rng, book.column("interval_start")[rest])
         )
