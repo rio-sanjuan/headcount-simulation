@@ -35,6 +35,7 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
+from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
 from hcsim.financial.sizing import NewHireGapFill
@@ -317,6 +318,11 @@ class SimulationConfig:
     )
     transfers_level_band: int = setting(
         "transfers", 1, "how many levels from an opening's own a transfer may come from"
+    )
+    transfers_shortfall_policy: ShortfallPolicy = setting(
+        "transfers",
+        ShortfallPolicy.KEEP_OPEN,
+        "keep an unmatched transfer opening open, or spill it to another fill channel",
     )
     # replay
     replay_boundary_fill: bool = setting(
