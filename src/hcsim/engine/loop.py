@@ -18,7 +18,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 import numpy as np
@@ -36,6 +36,8 @@ from hcsim.engine.domains import (
     GROWTH,
     StepContext,
 )
+from hcsim.engine.gates import Registered, register
+from hcsim.engine.modes import RunMode
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -84,12 +86,16 @@ class TrajectoryResult:
     tranches: Tranches | None = None
     expense: ExpenseResult | None = None
     sbc: pd.DataFrame | None = None
+    #: Months a step gate kept each registered domain from running.
+    bypasses: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SimulationResult:
     config: SimulationConfig
     trajectories: tuple[TrajectoryResult, ...]
+    #: Domains no registration gate admitted.
+    unregistered: tuple[str, ...] = ()
 
     @property
     def headcount(self) -> Ints:
@@ -128,6 +134,7 @@ def run_trajectory(
     seeds: SeedManager,
     *,
     validate: bool = False,
+    registered: Registered | None = None,
 ) -> TrajectoryResult:
     """Run one trajectory from a copy of `initial`. `validate` recounts state after every
     domain, which costs a pass over both buffers each time."""
@@ -144,6 +151,9 @@ def run_trajectory(
     prices = np.zeros(months if awards is not None else 0)
     quotas: list[QuotaRow] = []
     headcount[0], open_openings[0] = state.headcount, state.open_openings
+    registered = registered or _register(config)
+    handlers = dict(DOMAINS)
+    bypasses = dict.fromkeys(registered.steps, 0)
 
     for step in range(months):
         if state.price is not None:
@@ -151,8 +161,12 @@ def run_trajectory(
             prices[step] = state.price.price
         state.category_ledger = {}
         ctx = StepContext(config, step, trajectory, seeds)
-        for domain, handler in DOMAINS:
-            result = handler(state, ctx)
+        month = calendar_month(config.run_date, step)
+        for domain in registered.domains:
+            if not registered.opens(domain, month, ctx.rng(f"gate:{domain}")):
+                bypasses[domain] += 1
+                continue
+            result = handlers[domain](state, ctx)
             applied = apply(state, result, step, config.schema, awards)
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
@@ -163,7 +177,15 @@ def run_trajectory(
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
 
     if awards is None or state.ledger is None:
-        return TrajectoryResult(trajectory, headcount, open_openings, flows, tuple(quotas), prices)
+        return TrajectoryResult(
+            trajectory,
+            headcount,
+            open_openings,
+            flows,
+            tuple(quotas),
+            prices,
+            bypasses=bypasses,
+        )
     tranches = state.ledger.tranches()
     if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
         raise ValueError("every tranche must be awarded during the run to be valued at its price")
@@ -178,6 +200,7 @@ def run_trajectory(
         tranches,
         expense,
         sbc_frame(expense, tranches),
+        bypasses,
     )
 
 
@@ -186,8 +209,14 @@ def simulate(
 ) -> SimulationResult:
     """Run every trajectory of `config` from the seeded state `initial`, which stays untouched."""
     seeds = SeedManager(config.seed)
+    registered = _register(config)
     trajectories = tuple(
-        run_trajectory(config, initial, j, seeds, validate=validate)
+        run_trajectory(config, initial, j, seeds, validate=validate, registered=registered)
         for j in range(config.num_trajectories)
     )
-    return SimulationResult(config, trajectories)
+    return SimulationResult(config, trajectories, registered.unregistered)
+
+
+def _register(config: SimulationConfig) -> Registered:
+    mode = config.run_mode or RunMode.UNGUIDED
+    return register([name for name, _ in DOMAINS], config.gates, mode)

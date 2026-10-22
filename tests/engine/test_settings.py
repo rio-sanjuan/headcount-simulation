@@ -52,6 +52,7 @@ def test_every_setting_belongs_to_a_group_and_is_documented() -> None:
         "guidance",
         "awards",
         "eligibility",
+        "gates",
         "aligner",
         "resolved_eligibility",
     }
