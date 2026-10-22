@@ -44,6 +44,7 @@ TRANS_TYPES: Final = (
     "CTG_END",
     "RIF",
     "TERM_PENDING",
+    "ADMIN",
 )
 _CODE = {name: code for code, name in enumerate(TRANS_TYPES)}
 
@@ -58,6 +59,9 @@ TXN_DTYPES: Final[dict[str, DTypeLike]] = {
     "cost_center_previous": np.int32,
     "family_previous": np.int16,
     "level_previous": np.int16,
+    "location_previous": np.int16,
+    "company_previous": np.int16,
+    "account_previous": np.int16,
     "is_manager_previous": np.bool_,
     "hire_date": "datetime64[D]",
 }
@@ -134,6 +138,9 @@ class Workforce:
             cost_center_previous=before["cost_center"],
             family_previous=before["family"],
             level_previous=before["level"],
+            location_previous=before["location"],
+            company_previous=before["company"],
+            account_previous=before["account"],
             is_manager_previous=before["is_manager"],
             hire_date=self.people.column("hire_date")[index],
             **now,
@@ -267,6 +274,10 @@ class Workforce:
         self.people.column("hire_date")[index] = dates
         self.people.column("readiness")[index] = 0.0
         self._record(index, "CONV_IN", +1, dates, previous=before)
+
+    def administer(self, index: Index, dates: NDArray[np.datetime64]) -> None:
+        """Administrative changes with no effect on headcount: one `ADMIN` row each."""
+        self._record(index, "ADMIN", 0, dates)
 
     def snapshot(self, month_end: np.datetime64) -> None:
         """One `ACTIVE` row per person in post, regular or contingent."""

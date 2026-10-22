@@ -30,6 +30,7 @@ FLOW_SIGN = {
     "RECLASS": 0,
     "RIF": -1,
     "TERM_PENDING": 0,
+    "ADMIN": 0,
 }
 
 

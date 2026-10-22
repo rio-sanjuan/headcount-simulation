@@ -103,6 +103,20 @@ def schema_from_world(con: duckdb.DuckDBPyConnection) -> SimulationSchema:
     )
 
 
+def check_transaction_codes(con: duckdb.DuckDBPyConnection) -> None:
+    """Refuse transactions whose code the warehouse's catalog doesn't define. An unknown code
+    has no disposition, so counting it, or skipping it, would be a guess."""
+    unknown = [
+        row[0]
+        for row in con.execute(
+            "SELECT DISTINCT trans_type FROM workforce_txn "
+            "WHERE trans_type NOT IN (SELECT trans_type FROM dim_trans_type) ORDER BY 1"
+        ).fetchall()
+    ]
+    if unknown:
+        raise SeedingError(f"transaction codes missing from dim_trans_type: {unknown}")
+
+
 def snapshot_before(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> dt.date:
     """The last month-end with an active stock before `run_date`."""
     (snapshot,) = con.execute(
@@ -142,6 +156,7 @@ def seed_state(
     opening_ceiling: int | None = None,
     with_ledger: bool = False,
 ) -> tuple[SimulationState, SeedReport]:
+    check_transaction_codes(con)
     snapshot = snapshot_before(con, run_date)
     people = con.execute(
         f"""

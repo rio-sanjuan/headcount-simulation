@@ -69,6 +69,8 @@ def test_the_world_follows_the_profiles(small_world: World) -> None:
     [
         (DateTruth(start_weekday=6), "dates.start_weekday"),
         (DateTruth(exit_month_end_weight=0.0), "dates.exit_month_end_weight"),
+        (DateTruth(reporting_lag_days=0), "dates reporting lags"),
+        (DateTruth(admin_change_rate=2.0), "dates.admin_change_rate"),
     ],
 )
 def test_a_bad_date_truth_is_refused(truth: DateTruth, message: str) -> None:

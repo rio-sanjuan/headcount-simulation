@@ -119,6 +119,9 @@ class MovementProcess:
         pool = wf.contingent_pool()
         ending = pool[self.rng.random(len(pool)) < t.contingent_end_hazard]
         wf.end_contingent(ending, days.sample("exit", len(ending), self.rng))
+        admin = np.flatnonzero(wf.column("active"))
+        admin = admin[self.rng.random(len(admin)) < self.config.dates.admin_change_rate]
+        wf.administer(admin, days.sample("business", len(admin), self.rng))
         starts = int(self.rng.poisson(t.contingent_start_rate * len(wf.active())))
         wf.start_contingent(self._contingent_roles(starts), days.sample("start", starts, self.rng))
 
