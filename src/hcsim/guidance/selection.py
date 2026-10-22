@@ -15,7 +15,8 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from hcsim.guidance.models import ForecastError, build
+from hcsim.guidance.baselines import ExposureModel
+from hcsim.guidance.models import Forecaster, ForecastError, build
 from hcsim.guidance.registry import Entry, Registry
 
 Floats = NDArray[np.float64]
@@ -62,12 +63,28 @@ def wape(actual: Floats, forecast: Floats) -> float:
     return error / denominator
 
 
-def score(name: str, series: Floats, config: EvaluationConfig) -> float:
-    """Mean WAPE across folds. A model that fails a fold loses that fold."""
+def prepared(name: str, past: Floats | None, future: Floats | None) -> Forecaster:
+    """The model `name`, given the exposure when it models a share of one."""
+    model = build(name)
+    if isinstance(model, ExposureModel):
+        if past is None:
+            raise ForecastError(f"{name} models a share of an exposure, and this series has none")
+        model.expose(past, future)
+    return model
+
+
+def score(
+    name: str, series: Floats, config: EvaluationConfig, exposure: Floats | None = None
+) -> float:
+    """Mean WAPE across folds. A model that fails a fold loses that fold. A model of a share
+    is scored on the exposure each fold's test months realized."""
     scores = []
     for train_end, test_end in folds(len(series), config):
+        past = None if exposure is None else exposure[:train_end]
+        future = None if exposure is None else exposure[train_end:test_end]
         try:
-            prediction = build(name).fit(series[:train_end]).predict(test_end - train_end)
+            model = prepared(name, past, future)
+            prediction = model.fit(series[:train_end]).predict(test_end - train_end)
         except ForecastError:
             continue
         scores.append(wape(series[train_end:test_end], prediction))
@@ -111,17 +128,35 @@ class SeriesForecast:
 
 
 def forecast(
-    series: Sequence[float] | Floats, horizon: int, config: SelectionConfig
+    series: Sequence[float] | Floats,
+    horizon: int,
+    config: SelectionConfig,
+    exposure: Floats | None = None,
+    future_exposure: Floats | None = None,
 ) -> SeriesForecast:
-    """Evaluate the suite, select, refit on the full history, and combine."""
+    """Evaluate the suite, select, refit on the full history, and combine. `exposure` is the
+    series' exposure, such as its group's headcount, and `future_exposure` its forecast, for
+    the models of a share. A selected model that can't refit leaves the combination, and the
+    rest share its weight."""
     history = np.asarray(series, dtype=np.float64)
     if len(history) < config.evaluation.min_length:
         raise ForecastError(
             f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
         )
-    scores = {name: score(name, history, config.evaluation) for name in config.suite}
+    scores = {name: score(name, history, config.evaluation, exposure) for name in config.suite}
     weights = COMBINERS.build(config.combination)(scores, config.top_k)
+    forecasts = {}
+    for name in weights:
+        try:
+            model = prepared(name, exposure, future_exposure)
+            forecasts[name] = model.fit(history).predict(horizon)
+        except ForecastError:
+            continue
+    if not forecasts:
+        raise ForecastError(f"none of the selected models {sorted(weights)} could refit")
+    total = sum(weights[name] for name in forecasts)
+    weights = {name: weights[name] / total for name in forecasts}
     combined = np.zeros(horizon)
     for name, weight in weights.items():
-        combined += weight * build(name).fit(history).predict(horizon)
+        combined += weight * forecasts[name]
     return SeriesForecast(combined, scores, weights)

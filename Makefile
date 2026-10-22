@@ -79,7 +79,7 @@ test-heavy: ## Slow, acceptance, and e2e tests
 
 # The adapters' optional extras. darts-deep stays out: PyTorch on Linux brings CUDA with it, so
 # the deep models are checked where it's installed, and skip elsewhere.
-EXTRAS := darts sktime
+EXTRAS := darts sktime prophet
 test-extras: ## The optional extras' adapter tests, with the extras installed
 	$(UV_RUN) $(foreach extra,$(EXTRAS),--extra $(extra)) pytest -n auto -m extras $(TESTS) \
 		|| [ $$? -eq 5 ]

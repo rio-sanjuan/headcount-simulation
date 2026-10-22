@@ -16,7 +16,8 @@ from typing import ClassVar, Self
 import numpy as np
 from numpy.typing import NDArray
 
-from hcsim.guidance.adapters import darts, sktime, statsforecast
+from hcsim.guidance.adapters import darts, prophet, sktime, statsforecast
+from hcsim.guidance.baselines import BASELINES
 from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry, Registry, RegistryError
 from hcsim.model.interface import ProbabilisticOutput, TimeSeriesModel
@@ -128,9 +129,11 @@ MODELS: Registry[Forecaster] = Registry(
         Entry(SeasonalNaive.NAME, SeasonalNaive),
         Entry(HistoricalAverage.NAME, HistoricalAverage),
         Entry(Drift.NAME, Drift),
+        *(Entry(model.NAME, model) for model in BASELINES),
         *statsforecast.ENTRIES,
         *darts.ENTRIES,
         *sktime.ENTRIES,
+        *prophet.ENTRIES,
     ),
 )
 
