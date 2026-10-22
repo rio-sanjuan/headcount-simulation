@@ -12,6 +12,13 @@ trajectory holds its own copy. It supports three changes:
   the ledger. If its holder leaves before the award month, it's cancelled, never awarded: it
   forfeits before it accrues anything.
 
+**Scratch.** A subset run publishes SBC only for holders inside its subset (see
+`model.data.publication`), so the ledger keeps run-scoped scratch for the rest: a holder who
+`leave`s the subset, as by moving out of it, and one not yet inside, as a known future entrant
+recorded before they start, has their tranches in scratch until they `join` it. Their tranches
+move in and out of scratch with them, and are never forfeited for it. `inside` says, per holder
+and month, which side a tranche's expense falls on, and scratch is never published.
+
 **The vest buffer** (`VestBuffer`) keeps each holder's live shares by vest month, so what a
 recipient already vests in a forward year is a slice, not a scan of the ledger. It spans every
 month of the run and a 120-month tail after it, enough for any grant the run makes: a 72-month
@@ -166,6 +173,7 @@ class HolderLedger:
     _rows: Ints = field(default_factory=lambda: np.zeros((0, 8), dtype=np.int64))
     buffer: VestBuffer = field(default_factory=VestBuffer)
     _moves: list[Ints] = field(default_factory=list)
+    _membership: list[Ints] = field(default_factory=list)
 
     # Column order of the consolidated rows.
     HOLDER, AWARD, VEST, SHARES, FORFEIT, TYPE, LEVEL, CC = range(8)
@@ -245,6 +253,37 @@ class HolderLedger:
         rows = rows[last]
         return Intervals(rows[:, 0].copy(), rows[:, 1].copy(), rows[:, 2].copy())
 
+    def leave(self, holders: Ints, month: int) -> int:
+        """Put each holder outside the subset from `month`: their tranches go to scratch."""
+        return self._log_membership(holders, month, inside=False)
+
+    def join(self, holders: Ints, month: int) -> int:
+        """Bring each holder inside the subset from `month`: their tranches leave scratch."""
+        return self._log_membership(holders, month, inside=True)
+
+    def _log_membership(self, holders: Ints, month: int, inside: bool) -> int:
+        holders = np.asarray(holders, dtype=np.int64)
+        if len(holders):
+            rows = np.empty((len(holders), 3), dtype=np.int64)
+            rows[:, 0], rows[:, 1], rows[:, 2] = holders, month, int(inside)
+            self._membership.append(rows)
+        return len(holders)
+
+    def inside(self, holders: Ints, months: Ints) -> NDArray[np.bool_]:
+        """Each (holder, month)'s side of the subset: inside unless they left it, or were put
+        outside before joining, and haven't joined since. The last change in a month holds."""
+        holders, months = np.asarray(holders, np.int64), np.asarray(months, np.int64)
+        latest = _latest(self._membership, holders, months)
+        out: NDArray[np.bool_] = np.where(latest >= 0, latest == 1, True)
+        return out
+
+    def scratch(self, month: int) -> NDArray[np.bool_]:
+        """Which tranches are in scratch at `month`: live, with their holder outside the subset."""
+        t = self.tranches()
+        live = (t.forfeit_month == NOT_FORFEITED) | (t.forfeit_month > month)
+        out: NDArray[np.bool_] = live & ~self.inside(t.holder, np.full(len(t), month))
+        return out
+
     def cost_center_at(self, holders: Ints, months: Ints, granted: Ints) -> Ints:
         """Each (holder, month)'s cost center: their latest interval's at or before the month,
         else `granted`, the cost center they were granted in."""
@@ -276,3 +315,19 @@ class HolderLedger:
 
     def __len__(self) -> int:
         return len(self._consolidate())
+
+
+def _latest(log: list[Ints], holders: Ints, months: Ints) -> Ints:
+    """Each (holder, month)'s value from the latest (holder, month, value) row at or before the
+    month, the last row in a month holding; -1 where there's none."""
+    out = np.full(len(holders), -1, dtype=np.int64)
+    if not log or not len(holders):
+        return out
+    rows = np.concatenate(log)
+    order = np.lexsort((np.arange(len(rows)), rows[:, 1], rows[:, 0]))
+    rows = rows[order]
+    key = rows[:, 0] * (1 << 32) + rows[:, 1]
+    at = np.searchsorted(key, holders * (1 << 32) + months, side="right") - 1
+    found = (at >= 0) & (rows[np.maximum(at, 0), 0] == holders)
+    out[found] = rows[at[found], 2]
+    return out
