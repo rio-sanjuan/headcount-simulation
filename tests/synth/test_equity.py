@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from hcsim.synth.config import preset
+from hcsim.synth.config import PriceTruth, WorldConfig, preset
 from hcsim.synth.equity import add_months
 from hcsim.synth.world import World, generate_world
 
@@ -32,7 +33,28 @@ def test_prices_are_positive_month_end_closes(world: World) -> None:
     prices = world.tables["stock_price"]
     assert len(prices) == 60
     assert (prices["close"] > 0).all()
-    assert prices["close"].iloc[0] == 100.0
+
+
+def test_daily_prices_close_each_month_and_set_fair_value(world: World) -> None:
+    daily = world.tables["stock_price_daily"].assign(day=lambda f: pd.to_datetime(f["price_date"]))
+    assert (daily["day"].dt.weekday < 5).all()  # business days only
+    assert daily["close"].iloc[0] == 100.0
+    last = daily.groupby(daily["day"].dt.to_period("M"))["close"].last().to_numpy()
+    assert last.tolist() == world.tables["stock_price"]["close"].tolist()
+    window = world.config.prices.averaging_days
+    expected = daily["close"].rolling(window, min_periods=1).mean()
+    assert np.allclose(daily["fair_value"], expected, atol=1e-3)
+    assert (daily["fair_value"] != daily["close"]).mean() > 0.9  # it differs from the close
+    # Monthly log returns carry the configured volatility.
+    returns = np.diff(np.log(world.tables["stock_price"]["close"].to_numpy()))
+    assert returns.std() == pytest.approx(world.config.prices.monthly_volatility, rel=0.35)
+
+
+def test_awards_take_the_fair_value_of_their_business_day(world: World) -> None:
+    awards = world.tables["equity_award"]
+    daily = world.tables["stock_price_daily"].set_index("price_date")["fair_value"]
+    assert (pd.to_datetime(awards["award_date"]).dt.weekday < 5).all()
+    assert (awards["fair_value"].to_numpy() == daily.loc[awards["award_date"]].to_numpy()).all()
 
 
 def test_awards_go_to_external_hires_still_there_on_the_award_date(world: World) -> None:
@@ -114,3 +136,15 @@ def test_ledger_signs(world: World) -> None:
 )
 def test_add_months_clamps_to_short_months(date: dt.date, months: int, expected: dt.date) -> None:
     assert add_months(date, months) == expected
+
+
+@pytest.mark.parametrize(
+    ("prices", "message"),
+    [
+        (PriceTruth(start_price=0.0), "positive start"),
+        (PriceTruth(averaging_days=0), "positive trading and averaging days"),
+    ],
+)
+def test_bad_price_settings_are_refused(prices: PriceTruth, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(prices=prices)

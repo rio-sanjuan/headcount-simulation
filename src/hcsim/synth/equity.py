@@ -63,14 +63,39 @@ def compensation_ranges(
     return frame
 
 
-def stock_prices(
+def daily_prices(
     month_ends: list[pd.Timestamp], truth: PriceTruth, rng: np.random.Generator
 ) -> pd.DataFrame:
-    """Month-end closes on a geometric Brownian motion."""
-    sigma = truth.monthly_volatility
-    shocks = rng.normal(truth.monthly_drift - sigma**2 / 2, sigma, len(month_ends) - 1)
+    """A close on every business day of the world, and each day's grant-date fair value: the
+    trailing average close over `averaging_days` business days (fewer at the start)."""
+    first = month_ends[0].to_period("M").start_time
+    days = pd.bdate_range(first, month_ends[-1])
+    n = truth.trading_days_per_month
+    drift, sigma = truth.monthly_drift / n, truth.monthly_volatility / np.sqrt(n)
+    shocks = rng.normal(drift - sigma**2 / 2, sigma, len(days) - 1)
     closes = truth.start_price * np.exp(np.r_[0.0, np.cumsum(shocks)])
-    return pd.DataFrame({"month_end": [d.date() for d in month_ends], "close": closes.round(4)})
+    fair = pd.Series(closes).rolling(truth.averaging_days, min_periods=1).mean().to_numpy()
+    return pd.DataFrame(
+        {"price_date": days.date, "close": closes.round(4), "fair_value": fair.round(4)}
+    )
+
+
+def month_end_closes(daily: pd.DataFrame, month_ends: list[pd.Timestamp]) -> pd.DataFrame:
+    """Each month's close: the close of its last business day."""
+    month = pd.to_datetime(daily["price_date"]).dt.to_period("M")
+    last = {str(k): float(v) for k, v in daily.groupby(month)["close"].last().items()}
+    return pd.DataFrame(
+        {
+            "month_end": [d.date() for d in month_ends],
+            "close": [last[str(d.to_period("M"))] for d in month_ends],
+        }
+    )
+
+
+def business_day_on_or_after(date: dt.date) -> dt.date:
+    while date.weekday() >= 5:
+        date += dt.timedelta(days=1)
+    return date
 
 
 def add_months(date: dt.date, months: int) -> dt.date:
@@ -83,30 +108,25 @@ def new_hire_awards(
     hires: pd.DataFrame,
     terms: pd.DataFrame,
     jobs: pd.DataFrame,
-    prices: pd.DataFrame,
+    daily: pd.DataFrame,
     truth: GrantTruth,
-    price_truth: PriceTruth,
     world_end: dt.date,
     rng: np.random.Generator,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """One award per external hire still employed on the award date, and its vest tranches.
-    Awards after the world ends are never made."""
+    """One award per hire still employed on the award date, a business day, and its vest
+    tranches. Its fair value is that day's. Awards after the world ends are never made."""
     level = dict(zip(jobs["job_code"], jobs["job_level"], strict=True))
     left = dict(zip(terms["employee_id"], terms["event_date"], strict=True))
-    close = {
-        pd.Period(d, freq="M"): float(c)
-        for d, c in zip(prices["month_end"], prices["close"], strict=True)
-    }
+    fair_values = dict(zip(daily["price_date"], daily["fair_value"], strict=True))
     awards: list[dict[str, Any]] = []
     vests: list[dict[str, Any]] = []
     for award_id, hire in enumerate(hires.to_dict("records"), start=900_001):
         lag = int(rng.integers(truth.award_lag_days[0], truth.award_lag_days[1] + 1))
-        award_date: dt.date = hire["event_date"] + dt.timedelta(days=lag)
+        award_date = business_day_on_or_after(hire["event_date"] + dt.timedelta(days=lag))
         employee_id = int(hire["employee_id"])
         if award_date > world_end or (employee_id in left and left[employee_id] <= award_date):
             continue  # only employees still there on the award date receive it
-        lo, hi = price_truth.fair_value_band
-        fair_value = close[pd.Period(award_date, freq="M")] * float(rng.uniform(lo, hi))
+        fair_value = float(fair_values[award_date])
         job_level = int(level[hire["job_code"]])
         value = truth.new_hire_value_by_level[job_level] * float(
             np.exp(rng.normal(0, truth.value_sigma))
