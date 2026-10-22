@@ -931,6 +931,9 @@ class QuirkTruth:
     #: From this month (`YYYY-MM`) on, `req_snapshot` spells its state `OPEN` instead of
     #: `open`, as across a migration from one feed to another.
     state_seam_month: str | None = None
+    #: Name the leaf cost center differently across tables, as systems built apart do. The
+    #: `contract_columns` table says which column holds it in each table.
+    cost_center_aliases: bool = False
 
     def problems(self) -> list[str]:
         found = []

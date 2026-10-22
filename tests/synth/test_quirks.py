@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +12,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from hcsim.engine.seeding import schema_from_world
 from hcsim.guidance.ingest import ingest
+from hcsim.studies.inputs import fit_models
 from hcsim.synth.codes import CATALOG
 from hcsim.synth.config import QuirkTruth, WorldConfig, preset
+from hcsim.synth.quirks import COST_CENTER_ALIASES
 from hcsim.synth.world import World, generate_world, write_world
 from tests.support.stat_check import stat_check
 
@@ -251,3 +255,44 @@ def test_closures_are_right_censored_at_the_world_s_end(tmp_path: Path) -> None:
 def test_a_bad_seam_month_is_refused() -> None:
     with pytest.raises(ValueError, match=r"quirks\.state_seam_month"):
         WorldConfig(quirks=QuirkTruth(state_seam_month="July"))
+
+
+def test_cost_center_aliases_rename_the_column_and_nothing_else(clean: World) -> None:
+    assert set(clean.tables["contract_columns"]["column_name"]) == {"cost_center"}
+    aliased = world_with(cost_center_aliases=True)
+    contract = aliased.tables["contract_columns"].set_index("table_name")["column_name"]
+    renamed = contract[contract != "cost_center"]
+    assert renamed.to_dict() == COST_CENTER_ALIASES
+    assert renamed.nunique() > 1  # several spellings, not one
+    assert "workforce_txn" in contract.index  # unaliased tables are listed too
+    for table, column in zip(contract.index.astype(str), contract, strict=True):
+        frame = aliased.tables[table]
+        assert column in frame.columns
+        assert column == "cost_center" or "cost_center" not in frame.columns
+        pd.testing.assert_frame_equal(
+            frame.rename(columns={column: "cost_center"}), clean.tables[table]
+        )
+
+
+def test_readers_find_the_cost_center_through_the_contract(clean: World, tmp_path: Path) -> None:
+    """The guidance series, the study inputs, and the snapshot view are the same whatever
+    the requisition table calls its cost center."""
+    results = []
+    for name, world in (("plain", clean), ("aliased", world_with(cost_center_aliases=True))):
+        path = tmp_path / f"{name}.duckdb"
+        write_world(world, path)
+        with duckdb.connect(str(path), read_only=True) as con:
+            fitted = fit_models(con, schema_from_world(con), dt.date(2026, 1, 1))
+            results.append(
+                (
+                    ingest(con).frame,
+                    fitted.rates,
+                    fitted.models.attributes.sample(0, 20, np.random.default_rng(0)),
+                    con.execute("SELECT * FROM req_snapshot ORDER BY ALL").df(),
+                )
+            )
+    (series, rates, roles, snapshot), aliased = results
+    pd.testing.assert_frame_equal(series, aliased[0])
+    assert rates == aliased[1]
+    np.testing.assert_array_equal(roles, aliased[2])
+    pd.testing.assert_frame_equal(snapshot, aliased[3])

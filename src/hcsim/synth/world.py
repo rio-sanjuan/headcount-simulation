@@ -417,6 +417,8 @@ def generate_world(config: WorldConfig) -> World:
     world.tables["equity_expense"] = awards.reference_ledger(
         config, equity_tables["equity_award"], equity_tables["equity_vest"], estimates, ends
     )
+    world.tables["contract_columns"] = quirks.cost_center_columns(config, world.tables)
+    quirks.rename_cost_centers(config, world.tables)
     gaps = quirks.snapshot_gaps(config, ends, quirk_rng)
     world.truth = {
         "quirks": {"snapshot_gaps": gaps},
@@ -457,6 +459,12 @@ def write_world(world: World, path: Path) -> None:
         recorded = world.truth.get("quirks", {})
         gaps = ", ".join(f"DATE '{d}'" for d in recorded.get("snapshot_gaps", []))
         seam = world.config.quirks.state_seam_month
+        # The snapshot feed names the cost center its own way: the canonical name.
+        req_cost_center = (
+            quirks.COST_CENTER_ALIASES["req_interval"]
+            if world.config.quirks.cost_center_aliases
+            else "cost_center"
+        )
         state = (
             f"CASE WHEN c.month_end >= DATE '{pd.Period(seam, freq='M').start_time.date()}' "
             "THEN 'OPEN' ELSE 'open' END"
@@ -466,7 +474,8 @@ def write_world(world: World, path: Path) -> None:
         con.execute(
             f"""
             CREATE VIEW req_snapshot AS
-            SELECT c.month_end AS snapshot_date, r.req_id, r.req_type, r.cost_center,
+            SELECT c.month_end AS snapshot_date, r.req_id, r.req_type,
+                   r.{req_cost_center} AS cost_center,
                    r.job_code, r.location, r.company, r.is_manager, r.openings,
                    {state} AS state, r.opened_date
             FROM calendar c
