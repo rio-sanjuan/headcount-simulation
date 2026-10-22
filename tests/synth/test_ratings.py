@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from hcsim.synth.config import RatingTruth, WorldConfig, preset
+from hcsim.synth.config import RatingScaleChange, RatingTruth, WorldConfig, preset
 from hcsim.synth.ratings import last_cycle_before
 from hcsim.synth.world import World, generate_world
 from tests.support.stat_check import stat_check
@@ -145,3 +145,39 @@ def test_low_ratings_leave_more_often(world: World) -> None:
 def test_a_bad_rating_truth_is_refused(truth: RatingTruth, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         WorldConfig(ratings=truth)
+
+
+def test_a_scale_change_relabels_ratings_from_its_first_year() -> None:
+    """The change is one of reporting: the workforce is identical, and from the first year on
+    each rating reads as its mapping on the new scale."""
+    change = RatingScaleChange(first_year=2023)
+    base = preset("tiny", seed=6)
+    changed = dataclasses.replace(base, ratings=RatingTruth(scale_change=change))
+    a, b = generate_world(base), generate_world(changed)
+    pd.testing.assert_frame_equal(a.tables["workforce_txn"], b.tables["workforce_txn"])
+    before = pd.to_datetime(b.tables["rating"]["cycle_date"]).dt.year < 2023
+    assert set(b.tables["rating"].loc[before, "rating_scale"]) == {"original"}
+    assert set(b.tables["rating"].loc[~before, "rating_scale"]) == {"revised"}
+    assert set(b.tables["rating"].loc[~before, "rating"].astype(str)) <= set(change.scale)
+    original = a.tables["rating"]["rating"].astype(str).map(list(RatingTruth().scale).index)
+    expected = np.where(before, original + 1, np.asarray(change.mapping)[original] + 1)
+    assert (b.tables["rating"]["rating_rank"].to_numpy() == expected).all()
+    assert b.truth["config"]["ratings"]["scale_change"]["first_year"] == 2023
+
+
+def test_without_a_change_every_rating_is_on_the_original_scale(world: World) -> None:
+    assert set(world.tables["rating"]["rating_scale"]) == {"original"}
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (RatingScaleChange(2023, scale=("N1",), mapping=(0,) * 5), "at least two distinct labels"),
+        (RatingScaleChange(2023, scale=("R1", "N2")), "must not reuse the original labels"),
+        (RatingScaleChange(2023, mapping=(0, 1, 2)), "a new rating for each original one"),
+        (RatingScaleChange(2023, mapping=(0, 2, 1, 2, 2)), "keep the order of the ratings"),
+    ],
+)
+def test_a_bad_scale_change_is_refused(change: RatingScaleChange, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorldConfig(ratings=RatingTruth(scale_change=change))

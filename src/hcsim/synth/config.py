@@ -303,6 +303,36 @@ class GrantTruth:
 
 
 @dataclass(frozen=True)
+class RatingScaleChange:
+    """A change in the scale ratings are reported on, from the calibration in `first_year`.
+
+    It's a change of reporting, not of performance: each rating on the original scale maps to
+    one on the new scale, monotonically, and the processes keep reading the original. Data
+    from before and after the change no longer share labels, as when a real rating scale is
+    redesigned.
+    """
+
+    first_year: int
+    scale: tuple[str, ...] = ("N1", "N2", "N3")
+    #: The new rating for each original one, worst to best.
+    mapping: tuple[int, ...] = (0, 0, 1, 2, 2)
+
+    def problems(self, original: tuple[str, ...]) -> list[str]:
+        found = []
+        if len(set(self.scale)) != len(self.scale) or len(self.scale) < 2:
+            found.append("ratings.scale_change.scale needs at least two distinct labels")
+        if set(self.scale) & set(original):
+            found.append("ratings.scale_change.scale must not reuse the original labels")
+        if len(self.mapping) != len(original) or not all(
+            0 <= code < len(self.scale) for code in self.mapping
+        ):
+            found.append("ratings.scale_change.mapping needs a new rating for each original one")
+        elif any(b < a for a, b in zip(self.mapping, self.mapping[1:], strict=False)):
+            found.append("ratings.scale_change.mapping must keep the order of the ratings")
+        return found
+
+
+@dataclass(frozen=True)
 class RatingTruth:
     """Performance ratings: calibration cycles, a Markov chain between cycles, and a separate
     distribution for first ratings. Ratings are plain ordered labels, worst to best."""
@@ -322,6 +352,8 @@ class RatingTruth:
         (0.01, 0.05, 0.34, 0.45, 0.15),
         (0.00, 0.03, 0.22, 0.35, 0.40),
     )
+    #: An optional change in the reporting scale. None keeps one scale throughout.
+    scale_change: RatingScaleChange | None = None
 
     def stationary(self) -> NDArray[np.float64]:
         """The chain's long-run distribution: the incumbents' ratings when the world starts."""
@@ -343,6 +375,8 @@ class RatingTruth:
             found.append("ratings.transitions must be a square stochastic matrix over the scale")
         if entry.shape != (k,) or (entry < 0).any() or not np.isclose(entry.sum(), 1):
             found.append("ratings.entry_distribution must be a distribution over the scale")
+        if self.scale_change is not None:
+            found += self.scale_change.problems(self.scale)
         return found
 
 
