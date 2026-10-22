@@ -20,7 +20,15 @@ import pandas as pd
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
-from hcsim.model.core.layouts import MAX_OPENINGS_PER_REQUISITION
+from hcsim.model.core.measures import (
+    HEADCOUNT_STOCK,
+    NET_DEPARTURES,
+    NET_HIRES,
+    REQUISITIONS_OPENED,
+    Measure,
+    MeasureError,
+)
+from hcsim.model.core.transactions import TransTypeCatalog, TransTypeError
 
 MONTH: Final = "month"
 GROUP: Final = "group"
@@ -30,35 +38,14 @@ VALUE: Final = "value"
 #: Supported grouping columns. Org levels resolve through dim_org.
 GROUPINGS: Final = ("cost_center", "org_level1", TOPLINE)
 
-# Each measure is a SQL query yielding (month, cost_center, value). Workforce measures read
-# the pre-summed fact, `workforce_agg`, as the data contract intends for the guidance pipeline.
-# The trans_type codes are the contract's. Headcount measures count regular employees only:
-# contingent and temporary workers book to their own account groups.
-_FLOW = """
-    SELECT date_trunc('month', CAST(period AS DATE)) AS month, cost_center,
-           sum(headcount) AS value
-    FROM workforce_agg
-    WHERE trans_type = '{code}'
-      AND account IN (SELECT account FROM dim_account WHERE account_group = 'regular')
-    GROUP BY ALL
-"""
-MEASURES: Final[dict[GuidanceCategory, str]] = {
-    GuidanceCategory.ATTRITION: _FLOW.format(code="TERM"),
-    GuidanceCategory.HIRES: _FLOW.format(code="HIRE"),
-    GuidanceCategory.HEADCOUNT: _FLOW.format(code="ACTIVE"),
-    # A requisition counts once, in the month it opened, with the openings it opened with: the
-    # most any of its state intervals carries. Openings are capped per requisition, as they
-    # are in the opening buffer. The table's cost-center column comes from the contract.
-    GuidanceCategory.REQUISITIONS_OPENED: f"""
-        SELECT date_trunc('month', CAST(opened_date AS DATE)) AS month, cost_center,
-               sum(least(openings, {MAX_OPENINGS_PER_REQUISITION})) AS value
-        FROM (
-            SELECT req_id, min(opened_date) AS opened_date,
-                   any_value({{req_cost_center}}) AS cost_center, max(openings) AS openings
-            FROM req_interval GROUP BY req_id
-        )
-        GROUP BY ALL
-    """,
+# Each category is counted by one measure, a SQL query yielding (month, cost_center, value).
+# Workforce measures read the pre-summed fact, `workforce_agg`, as the data contract intends
+# for the guidance pipeline, and count regular employees only.
+MEASURES: Final[dict[GuidanceCategory, Measure]] = {
+    GuidanceCategory.ATTRITION: NET_DEPARTURES,
+    GuidanceCategory.HIRES: NET_HIRES,
+    GuidanceCategory.HEADCOUNT: HEADCOUNT_STOCK,
+    GuidanceCategory.REQUISITIONS_OPENED: REQUISITIONS_OPENED,
 }
 
 
@@ -94,23 +81,22 @@ def _group_expression(grouping: str) -> str:
 
 
 def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
-    unknown = [
-        row[0]
-        for row in con.execute(
-            "SELECT DISTINCT trans_type FROM workforce_agg "
-            "WHERE trans_type NOT IN (SELECT trans_type FROM dim_trans_type) ORDER BY 1"
-        ).fetchall()
-    ]
-    if unknown:
-        raise IngestionError(f"transaction codes missing from dim_trans_type: {unknown}")
+    try:
+        catalog = TransTypeCatalog.from_warehouse(con)
+        used = con.execute("SELECT DISTINCT trans_type FROM workforce_agg").fetchall()
+        catalog.check(row[0] for row in used)
+        for measure in MEASURES.values():
+            measure.check(catalog)
+    except (TransTypeError, MeasureError) as error:
+        raise IngestionError(str(error)) from None
     group = _group_expression(grouping)
     parts = []
-    req_cost_center = role_column(con, "req_interval")
-    for category, sql in MEASURES.items():
+    for category, measure in MEASURES.items():
+        sql = measure.sql(role_column(con, measure.table))
         frame = con.execute(
             f"""
             SELECT m.month, {group} AS "group", sum(m.value)::DOUBLE AS value
-            FROM ({sql.format(req_cost_center=req_cost_center)}) m
+            FROM ({sql}) m
             LEFT JOIN dim_org o USING (cost_center)
             GROUP BY ALL
             """
