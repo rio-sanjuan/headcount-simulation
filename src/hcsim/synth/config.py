@@ -730,6 +730,16 @@ class PlanTruth:
     vintage_noise_sigma: float = 0.03
     decay_months: float = 6.0
     future_months: int = 24
+    #: Each vintage moves targets between the cost centers of a level-1 org, keeping the org's
+    #: total: vintages agree at the top and disagree at cost-center grain.
+    reallocation_sigma: float = 0.08
+    #: The share of a vintage's cost centers where one family's cell turns negative, its
+    #: excess moved to another family of the same cost center.
+    negative_cell_share: float = 0.03
+    #: Each level-1 org's hedge, a pseudo cost center holding this share of the org's plan,
+    #: give or take `hedge_sigma`. Positive or negative.
+    hedge_share: float = 0.02
+    hedge_sigma: float = 0.02
 
     def problems(self) -> list[str]:
         found = []
@@ -743,6 +753,10 @@ class PlanTruth:
             found.append("plans.regime_shares must be a distribution over three regimes")
         if self.vintage_noise_sigma < 0 or self.decay_months <= 0:
             found.append("plans need non-negative noise and a positive decay time")
+        if min(self.reallocation_sigma, self.hedge_sigma) < 0:
+            found.append("plans spreads must be non-negative")
+        if not 0 <= self.negative_cell_share <= 1:
+            found.append("plans.negative_cell_share must lie in [0, 1]")
         return found
 
 

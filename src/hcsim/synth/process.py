@@ -35,6 +35,7 @@ from hcsim.synth.dates import MonthDays
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
 from hcsim.synth.offers import Offers, direct_hires
+from hcsim.synth.plans import publications
 from hcsim.synth.population import Roles, draw_roles
 from hcsim.synth.programs import TerminationPrograms
 from hcsim.synth.promotions import PromotionProcess
@@ -238,6 +239,10 @@ def simulate(
     plan = LatentPlan(config.growth, start.astype(np.int64), plan_months, rng)
     headcount = np.zeros((len(month_ends), n), dtype=np.int64)
     headcount[0] = start
+    # Headcount by cost center and family at each month-end a plan vintage is built from.
+    families = len(config.families)
+    needed = {(p - first).n - 1 for p in publications(config)}
+    family_headcount: dict[int, NDArray[np.int64]] = {}
 
     if ratings is not None:
         ratings.seed(pd.Period(month_ends[0], freq="M"))
@@ -360,7 +365,14 @@ def simulate(
         # 4. Campus: openings on the schedule, and fills in the start months.
         campus_month(config, workforce, book, month, m, days, rng)
         workforce.snapshot(end)
-        headcount[m] = np.bincount(workforce.column("cost_center")[workforce.active()], minlength=n)
+        active = workforce.active()
+        headcount[m] = np.bincount(workforce.column("cost_center")[active], minlength=n)
+        if m in needed:
+            cells = (
+                workforce.column("cost_center")[active] * families
+                + workforce.column("family")[active]
+            )
+            family_headcount[m] = np.bincount(cells, minlength=n * families).reshape(n, families)
         if offers is not None:
             offers.snapshot(end)
         if promotions is not None:
@@ -384,6 +396,7 @@ def simulate(
         },
         "plan": plan,
         "headcount": headcount,
+        "family_headcount": family_headcount,
     }
 
 

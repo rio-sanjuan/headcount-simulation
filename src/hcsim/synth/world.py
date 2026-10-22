@@ -361,7 +361,16 @@ def generate_world(config: WorldConfig) -> World:
     headcount = process_truth.pop("headcount")
     names = structure.cost_center_names(config)
     world.tables["truth_latent_plan"] = plan.frame(names)
-    world.tables["plan_headcount"] = plans.vintages(config, plan, headcount, names, plan_rng)
+    world.tables["plan_headcount"] = plans.vintages(
+        config,
+        plan,
+        headcount,
+        process_truth.pop("family_headcount"),
+        names,
+        org_of_cost_center,
+        tops,
+        plan_rng,
+    )
     labels = _Labels(config)
     world.tables["rating"] = _ratings(ratings, config)
     txn = _transactions(workforce, labels, reporting_rng)
