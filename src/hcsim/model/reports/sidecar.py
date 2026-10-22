@@ -14,7 +14,9 @@ and the run.
   gained something;
 - a version reads as a model version, and each provenance version is its domain's champion's.
 
-A sidecar is plain data, so tools other than this package can read it.
+A sidecar may also hold recovery rows, each a quantity's truth, fit, and held-out value, but only
+for a synthetic world, which has a truth to recover. A sidecar is plain data, so tools other
+than this package can read it.
 """
 
 from __future__ import annotations
@@ -22,9 +24,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from collections.abc import Mapping, Sequence
 from importlib.metadata import version
 from pathlib import Path
-from typing import Final, Literal, Self
+from typing import Any, Final, Literal, Self
 
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -135,14 +138,27 @@ class DomainMetrics(_Strict):
         return self
 
 
+class RecoveryRow(_Strict):
+    """One quantity's truth, its fit, and what the held-out data showed."""
+
+    quantity: str = Field(min_length=1)
+    truth: float
+    fitted: float
+    observed: float | None = None
+
+
 class MetricsSidecar(_Strict):
     sidecar_version: Literal[1] = SIDECAR_VERSION
     provenance: Provenance
     domains: dict[str, DomainMetrics]
+    #: Each recovery's rows, from a synthetic world's truth.
+    recovery: dict[str, list[RecoveryRow]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _holds(self) -> Self:
         problems = []
+        if self.recovery and self.provenance.source != "synthetic_world":
+            problems.append("recovery needs a synthetic world's truth")
         for domain, model in self.provenance.models.items():
             if domain not in self.domains:
                 problems.append(f"the provenance names a model for {domain}, which has no metrics")
@@ -153,7 +169,12 @@ class MetricsSidecar(_Strict):
         return self
 
     @classmethod
-    def of(cls, run: TrainingRun, provenance: Provenance) -> MetricsSidecar:
+    def of(
+        cls,
+        run: TrainingRun,
+        provenance: Provenance,
+        recovery: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    ) -> MetricsSidecar:
         data = run.to_dict()
         domains = {}
         for name, result in data["domains"].items():
@@ -166,7 +187,13 @@ class MetricsSidecar(_Strict):
                 "arms": result["arms"],
                 "decisions": result["decisions"],
             }
-        return cls.validated({"provenance": provenance.model_dump(), "domains": domains})
+        return cls.validated(
+            {
+                "provenance": provenance.model_dump(),
+                "domains": domains,
+                "recovery": {k: list(v) for k, v in (recovery or {}).items()},
+            }
+        )
 
     @classmethod
     def validated(cls, data: object) -> MetricsSidecar:
