@@ -7,6 +7,7 @@
   population and `aligned_to` stamps, the configuration's digest, the source, and the hcsim
   version;
 - **Series**: how many were forecast, and each one skipped, with why;
+- **Clamped cells**: the negative cells written as zero, by category and group;
 - **Selection**: per category, the combination methods that weighed the series and each
   model's mean weight;
 - **Reconciliation, coherence, alignment, uncertainty, disaggregation**: what each step
@@ -149,6 +150,18 @@ def markdown(result: PipelineResult) -> tuple[str, dict[str, str]]:
                 [[s["group"], s["category"], s["reason"]] for s in skipped],
             )
         )
+    clamped = report.get("clamped_cells", {})
+    parts += [
+        "## Clamped cells",
+        f"{report.get('clamped_negative_cells', 0)} negative cells clamped to zero.",
+    ]
+    if clamped:
+        rows = [
+            [c, g, n]
+            for c, by_group in sorted(clamped.items())
+            for g, n in sorted(by_group.items())
+        ]
+        parts.append(table(["category", "group", "cells"], rows))
     parts += ["## Selection", _selection(report)]
     for title in ("reconciliation", "coherence", "alignment", "uncertainty", "disaggregation"):
         entries = report.get(title)

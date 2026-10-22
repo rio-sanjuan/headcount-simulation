@@ -486,7 +486,12 @@ class Format:
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config, grain = ctx["series"], ctx["config"], ctx["grain"]
         raw: Forecasts = ctx["forecasts"]
-        negative_cells = int(sum(int((v < 0).sum()) for v in raw.values()))
+        clamped_cells: dict[str, dict[str, int]] = {}
+        for (group, category), values in raw.items():
+            negative = int((values < 0).sum())
+            if negative:
+                clamped_cells.setdefault(category.value, {})[group] = negative
+        negative_cells = sum(n for by_group in clamped_cells.values() for n in by_group.values())
         # Writers clamp, and the final coherence pass rebuilds each parent from its clamped
         # children, which leaves nothing negative.
         clamped = {key: np.maximum(v, 0.0) for key, v in raw.items()}
@@ -534,6 +539,7 @@ class Format:
         ctx.note(
             self.name,
             clamped_negative_cells=negative_cells,
+            clamped_cells=clamped_cells,
             coherence_closed=closed,
             clamped_path_values=clamped_paths,
             series_with_paths=len(keys),
@@ -588,6 +594,8 @@ def run(
             *sections["generate"]["series_skipped"],
         ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
+        #: The clamped cells by category and group.
+        "clamped_cells": sections["format"]["clamped_cells"],
         "alignment": sections.get("align", {"method": None}),
         "disaggregation": sections.get("disaggregate", {"strategy": None}),
         "grain": ctx["grain"],
