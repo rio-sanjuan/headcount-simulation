@@ -72,6 +72,13 @@ memory: ## Peak-memory limits (pytest-memray)
 test-heavy: ## Slow, acceptance, and e2e tests
 	$(UV_RUN) pytest -n auto -m "$(HEAVY)" $(TESTS) || [ $$? -eq 5 ]
 
+# The adapters' optional extras. darts-deep stays out: PyTorch on Linux brings CUDA with it, so
+# the deep models are checked where it's installed, and skip elsewhere.
+EXTRAS := darts
+test-extras: ## The optional extras' adapter tests, with the extras installed
+	$(UV_RUN) $(foreach extra,$(EXTRAS),--extra $(extra)) pytest -n auto -m extras $(TESTS) \
+		|| [ $$? -eq 5 ]
+
 # Each preset in its own process, timed, with its peak memory. Timing is recorded, never gated.
 # The memory limit stops a preset too big for the machine before it swaps.
 BENCH_PRESETS ?= tiny small medium
