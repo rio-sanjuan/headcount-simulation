@@ -92,12 +92,13 @@ def test_gates_round_trip_through_plain_data_and_records(tmp_path: Path) -> None
 
 def test_an_unregistered_domain_never_runs() -> None:
     result = run(gates=(RegistrationGate("growth", enabled=False),))
-    assert result.unregistered == ("other_movement", "growth")
+    assert result.unregistered == ("other_movement", "performance", "growth")
     assert int(result.flow("G").sum()) == 0
     assert int(run().flow("G").sum()) > 0
-    # Other movement comes only from replayed history, so it's unregistered by default.
-    assert run().unregistered == ("other_movement",)
-    assert run(run_mode="replay").unregistered == ()
+    # Other movement comes only from replayed history, and performance needs a model, so
+    # both are unregistered by default.
+    assert run().unregistered == ("other_movement", "performance")
+    assert run(run_mode="replay").unregistered == ("performance",)
 
 
 def test_a_step_gate_bypasses_its_domain_and_counts_each_bypass() -> None:

@@ -40,6 +40,7 @@ from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.schema import COST_CENTER, SchemaError, SimulationSchema
 from hcsim.model.interface import EntityModel, GroupRateModel
 from hcsim.model.ml.generative import EmpiricalAttributeGenerator
+from hcsim.model.ml.markov import MarkovModel
 
 
 class ConfigError(ValueError):
@@ -148,6 +149,8 @@ class DomainModels:
     backfill: GroupRateModel  # a rate per departure, by cost center code
     growth: GroupRateModel  # mean growth requisitions per month, by cost center code
     attributes: EmpiricalAttributeGenerator  # attributes of generated requisitions
+    #: Rating transitions and first ratings. Without it, ratings stay as seeded.
+    performance: MarkovModel | None = None
     #: Artifact versions, by model field.
     versions: Mapping[str, str] = field(default_factory=dict)
 
@@ -158,9 +161,14 @@ class DomainModels:
         object.__setattr__(self, "versions", dict(self.versions))
 
     @property
+    def present(self) -> list[str]:
+        """The model fields that hold a model."""
+        return [name for name in MODEL_FIELDS if getattr(self, name) is not None]
+
+    @property
     def unversioned(self) -> list[str]:
         """The models that weren't loaded from an artifact."""
-        return [name for name in MODEL_FIELDS if name not in self.versions]
+        return [name for name in self.present if name not in self.versions]
 
 
 #: The model fields, in order.
@@ -171,7 +179,10 @@ MODEL_FIELDS: Final = (
     "backfill",
     "growth",
     "attributes",
+    "performance",
 )
+#: The model fields a run may leave empty.
+OPTIONAL_MODELS: Final = frozenset({"performance"})
 #: The artifact domain a model field loads from, where it isn't the field's own name.
 ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "job_family"})
 
