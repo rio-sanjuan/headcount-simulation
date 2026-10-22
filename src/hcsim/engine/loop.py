@@ -2,14 +2,16 @@
 
 Each trajectory runs on its own deep copy of the seeded state, with its own price path and
 holder ledger, and draws from its own random streams. A month advances the price, clears the
-category ledger, then runs the domains in order, applying each result before the next domain
-reads state. After the last month, every recorded tranche is valued at the price in its award
-month and amortized.
+category ledger, then runs the registered domains in order, applying each result before the
+next domain reads state. The known-event domains run first, so the sampled domains see the
+workforce they leave. After the last month, every recorded tranche is valued at the price in
+its award month and amortized, and every known event of a registered kind must have fired.
 
 Histories are per cost center: stocks at the start of every month plus the end of the last
-(`months + 1` rows), and each domain's flow per month, named as in the notation:
+(`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
+accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
-    H(t+1) = H(t) + F_ext - A
+    H(t+1) = H(t) + F_ext - A - V_conv + R_in - R_out + W_in - W_out
     O(t+1) = O(t) + G + B_att - U - F_ext
 """
 
@@ -34,9 +36,20 @@ from hcsim.engine.domains import (
     DOMAINS,
     EXTERNAL_FILL,
     GROWTH,
+    Handler,
     StepContext,
 )
-from hcsim.engine.gates import Registered, register
+from hcsim.engine.gates import Registered, RegistrationGate, register
+from hcsim.engine.known_domains import (
+    CONVERSION_OUT,
+    KINDS,
+    OTHER_MOVEMENT,
+    REORGANIZATION,
+    conversion_out,
+    other_movement,
+    reorganization,
+)
+from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
 from hcsim.engine.modes import RunMode
 from hcsim.engine.results import QuotaRecord
 from hcsim.engine.seeds import SeedManager
@@ -47,7 +60,7 @@ from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 
 Ints = NDArray[np.int64]
 
-#: The flow each domain contributes, by its symbol in the notation.
+#: The flow each single-flow domain contributes, by its symbol in the notation.
 FLOWS: Final[Mapping[str, str]] = {
     ATTRITION: "A",
     BACKFILL: "B_att",
@@ -55,6 +68,30 @@ FLOWS: Final[Mapping[str, str]] = {
     CANCELLATION: "U",
     GROWTH: "G",
 }
+#: Every flow a run records.
+FLOW_SYMBOLS: Final = (*FLOWS.values(), "V_conv", "R_in", "R_out", "W_in", "W_out")
+#: The runtime accounting identities: each flow's sign in the change of a stock.
+HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {
+    "F_ext": +1,
+    "A": -1,
+    "V_conv": -1,
+    "R_in": +1,
+    "R_out": -1,
+    "W_in": +1,
+    "W_out": -1,
+}
+OPENING_IDENTITY: Final[Mapping[str, int]] = {"G": +1, "B_att": +1, "U": -1, "F_ext": -1}
+#: Every domain, in step order: the known-event domains, then the sampled ones.
+STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
+    (CONVERSION_OUT, conversion_out),
+    (REORGANIZATION, reorganization),
+    (OTHER_MOVEMENT, other_movement),
+    *DOMAINS,
+)
+#: Gates every run has: other movement comes only from replayed history.
+DEFAULT_GATES: Final = (
+    RegistrationGate(OTHER_MOVEMENT, modes=(RunMode.REPLAY,), reason="replay only"),
+)
 
 
 class InvariantError(AssertionError):
@@ -88,6 +125,8 @@ class TrajectoryResult:
     sbc: pd.DataFrame | None = None
     #: Months a step gate kept each registered domain from running.
     bypasses: Mapping[str, int] = field(default_factory=dict)
+    #: Known events fired, by kind.
+    known_fired: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -135,6 +174,7 @@ def run_trajectory(
     *,
     validate: bool = False,
     registered: Registered | None = None,
+    known: ResolvedPlan | None = None,
 ) -> TrajectoryResult:
     """Run one trajectory from a copy of `initial`. `validate` recounts state after every
     domain, which costs a pass over both buffers each time."""
@@ -147,20 +187,21 @@ def run_trajectory(
     months, n = config.simulation_months, state.n_cost_centers
     headcount = np.zeros((months + 1, n), dtype=np.int64)
     open_openings = np.zeros((months + 1, n), dtype=np.int64)
-    flows = {symbol: np.zeros((months, n), dtype=np.int64) for symbol in FLOWS.values()}
+    flows = {symbol: np.zeros((months, n), dtype=np.int64) for symbol in FLOW_SYMBOLS}
     prices = np.zeros(months if awards is not None else 0)
     quotas: list[QuotaRow] = []
     headcount[0], open_openings[0] = state.headcount, state.open_openings
     registered = registered or _register(config)
-    handlers = dict(DOMAINS)
+    handlers = dict(STEP_ORDER)
     bypasses = dict.fromkeys(registered.steps, 0)
+    fired = FiringLog()
 
     for step in range(months):
         if state.price is not None:
             state.price.step(calendar_month(config.run_date, step))
             prices[step] = state.price.price
         state.category_ledger = {}
-        ctx = StepContext(config, step, trajectory, seeds)
+        ctx = StepContext(config, step, trajectory, seeds, known=known, fired=fired)
         month = calendar_month(config.run_date, step)
         for domain in registered.domains:
             if not registered.opens(domain, month, ctx.rng(f"gate:{domain}")):
@@ -172,10 +213,21 @@ def run_trajectory(
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
             if len(result.departures):
                 ctx.departures.append(result.departures)
-            flows[FLOWS[domain]][step] = _flow(domain, applied, n)
+            if result.flows:
+                for symbol, counts in result.flows.items():
+                    flows[symbol][step] = counts
+            else:
+                flows[FLOWS[domain]][step] = _flow(domain, applied, n)
             quotas += [QuotaRow(step, domain, c, r) for c, r in result.quotas.items()]
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
 
+    known_fired: dict[str, int] = {}
+    if known is not None:
+        kinds = [KINDS[d] for d in registered.domains if d in KINDS]
+        check_fired(known, fired, kinds)
+        for e in known.events:
+            if e.event.key in fired.fired:
+                known_fired[e.event.kind.value] = known_fired.get(e.event.kind.value, 0) + 1
     if awards is None or state.ledger is None:
         return TrajectoryResult(
             trajectory,
@@ -185,6 +237,7 @@ def run_trajectory(
             tuple(quotas),
             prices,
             bypasses=bypasses,
+            known_fired=known_fired,
         )
     tranches = state.ledger.tranches()
     if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
@@ -201,17 +254,25 @@ def run_trajectory(
         expense,
         sbc_frame(expense, tranches),
         bypasses,
+        known_fired,
     )
 
 
 def simulate(
-    config: SimulationConfig, initial: SimulationState, *, validate: bool = False
+    config: SimulationConfig,
+    initial: SimulationState,
+    *,
+    known: ResolvedPlan | None = None,
+    validate: bool = False,
 ) -> SimulationResult:
-    """Run every trajectory of `config` from the seeded state `initial`, which stays untouched."""
+    """Run every trajectory of `config` from the seeded state `initial`, which stays untouched,
+    with the run's resolved known events."""
     seeds = SeedManager(config.seed)
     registered = _register(config)
     trajectories = tuple(
-        run_trajectory(config, initial, j, seeds, validate=validate, registered=registered)
+        run_trajectory(
+            config, initial, j, seeds, validate=validate, registered=registered, known=known
+        )
         for j in range(config.num_trajectories)
     )
     return SimulationResult(config, trajectories, registered.unregistered)
@@ -219,4 +280,6 @@ def simulate(
 
 def _register(config: SimulationConfig) -> Registered:
     mode = config.run_mode or RunMode.UNGUIDED
-    return register([name for name, _ in DOMAINS], config.gates, mode)
+    names = [name for name, _ in STEP_ORDER]
+    defaults = [g for g in DEFAULT_GATES if g.domain in names]
+    return register(names, (*defaults, *config.gates), mode)

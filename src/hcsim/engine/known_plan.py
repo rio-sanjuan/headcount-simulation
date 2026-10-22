@@ -6,7 +6,8 @@ events are put in order and checked against the seed state. Each dropped event i
 the first cause that drops it:
 
 1. `not_in_seed`: an employee event for someone the seed doesn't hold. A pending start is for
-   someone joining, so it's exempt;
+   someone joining, so it's exempt, and so is a reorganization, which brings someone in across
+   the run's boundary: it's kept, marked `boundary: in`, and must carry a whole role;
 2. `duplicate`: the same kind of event for the same person in the same month as one already kept;
 3. `outranked`: another event for the same person in the same month ranks above it. Events rank
    by their *class*, from an exit (termination, then conversion out) through the movements
@@ -28,6 +29,7 @@ it.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -60,6 +62,9 @@ SOURCE_ORDER: Final = (
 #: The kinds that take someone out of the workforce.
 EXITS: Final = frozenset({EventKind.TERMINATION, EventKind.CONVERSION_OUT})
 CAUSES: Final = ("not_in_seed", "duplicate", "outranked", "after_exit")
+#: The destination key that marks a reorganization across the run's boundary: `in` brings
+#: someone into the run, and `out` takes them out of it.
+BOUNDARY: Final = "boundary"
 
 
 def rank(event: KnownEvent) -> tuple[int, int]:
@@ -130,6 +135,8 @@ def sanitize(
     for e in events.events:
         if e.employee_id is None or e.kind is EventKind.PENDING_START:
             kept.append(e)
+        elif e.employee_id not in in_seed and e.kind is EventKind.REORGANIZATION:
+            kept.append(dataclasses.replace(e, destination={**e.destination, BOUNDARY: "in"}))
         elif e.employee_id not in in_seed:
             dropped["not_in_seed"] += 1
         else:

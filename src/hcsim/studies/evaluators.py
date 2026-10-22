@@ -5,7 +5,8 @@ them; the metric baselines compare them. Each of the `invariants` checks holds b
 so any failure is a defect, never noise:
 
 - **Quota.** Every guided draw realizes exactly `min(quota, eligible)` in every group.
-- **Headcount identity.** `H(t+1) = H(t) + F_ext - A`, exactly, per cost center.
+- **Headcount identity.** `H(t+1) = H(t) + F_ext - A - V_conv + R_in - R_out + W_in - W_out`,
+  exactly, per cost center.
 - **Opening identity.** `O(t+1) = O(t) + G + B_att - U - F_ext`, exactly, per cost center.
 - **Accounting identity.** Every tranche's recognized expense ties to its vested value.
 
@@ -16,15 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
 
 import numpy as np
 
-from hcsim.engine.loop import SimulationResult
+from hcsim.engine.loop import HEADCOUNT_IDENTITY, OPENING_IDENTITY, SimulationResult
 
 #: The skeleton's identities, as flow symbol to sign. They grow as M4 adds flows.
-HEADCOUNT_IDENTITY: Final[Mapping[str, int]] = {"F_ext": +1, "A": -1}
-OPENING_IDENTITY: Final[Mapping[str, int]] = {"G": +1, "B_att": +1, "U": -1, "F_ext": -1}
 
 
 @dataclass(frozen=True)

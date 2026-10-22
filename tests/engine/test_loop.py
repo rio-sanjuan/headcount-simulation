@@ -20,7 +20,14 @@ from hcsim.engine.domains import (
     external_fill,
     growth,
 )
-from hcsim.engine.loop import FLOWS, InvariantError, SimulationResult, calendar_month, simulate
+from hcsim.engine.loop import (
+    FLOW_SYMBOLS,
+    HEADCOUNT_IDENTITY,
+    InvariantError,
+    SimulationResult,
+    calendar_month,
+    simulate,
+)
 from hcsim.engine.results import DomainResult
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
@@ -261,8 +268,9 @@ def test_a_guided_handler_without_guidance_refuses() -> None:
 def test_the_stock_flow_identities_hold_exactly(cells: dict[str, dict[str, float]] | None) -> None:
     result = run(guidance=None if cells is None else guidance(cells))
     h, o = result.headcount, result.open_openings
-    f = {symbol: result.flow(symbol) for symbol in FLOWS.values()}
-    assert np.array_equal(h[:, 1:], h[:, :-1] + f["F_ext"] - f["A"])
+    f = {symbol: result.flow(symbol) for symbol in FLOW_SYMBOLS}
+    change = sum(sign * f[symbol] for symbol, sign in HEADCOUNT_IDENTITY.items())
+    assert np.array_equal(h[:, 1:], h[:, :-1] + change)
     assert np.array_equal(o[:, 1:], o[:, :-1] + f["G"] + f["B_att"] - f["U"] - f["F_ext"])
     assert h.shape == (3, 7, 3)
     assert (h[:, 0] == [30, 30, 30]).all()
@@ -315,7 +323,7 @@ def test_a_run_is_reproducible_and_trajectories_are_independent_of_the_count() -
     assert np.array_equal(first.headcount, second.headcount)
     assert np.array_equal(first.open_openings, second.open_openings)
     for a, b in zip(first.trajectories, second.trajectories, strict=True):
-        assert all(np.array_equal(a.flows[s], b.flows[s]) for s in FLOWS.values())
+        assert all(np.array_equal(a.flows[s], b.flows[s]) for s in FLOW_SYMBOLS)
         assert a.sbc is not None
         assert b.sbc is not None
         pd.testing.assert_frame_equal(a.sbc, b.sbc)
@@ -373,7 +381,7 @@ def test_validation_catches_a_handler_that_writes_state(monkeypatch: pytest.Monk
         state.n_employees += 1  # a write that bypasses the apply step
         return DomainResult("rogue")
 
-    monkeypatch.setattr(loop, "DOMAINS", ((ATTRITION, rogue),))
+    monkeypatch.setattr(loop, "STEP_ORDER", ((ATTRITION, rogue),))
     with pytest.raises(InvariantError, match="after attrition at step 0"):
         simulate(config(), initial_state(), validate=True)
 
