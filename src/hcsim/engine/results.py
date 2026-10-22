@@ -113,6 +113,8 @@ class DomainResult:
     flows: Mapping[str, Ints] = field(default_factory=dict)
     #: Openings assigned to the transfer channel, by requisition id, for matching to place.
     transfers: Mapping[int, int] = field(default_factory=dict)
+    #: Diagnostic counts per cost center, by name, such as degenerate generated rows.
+    diagnostics: Mapping[str, Ints] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.employees.layout is not EMPLOYEE or self.openings.layout is not OPENING:

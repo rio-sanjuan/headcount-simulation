@@ -32,6 +32,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.results import DomainResult, Grant, RowChange
+from hcsim.engine.roles import DEGENERATE_ROWS, fill_roles
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.layouts import (
     EMPLOYEE,
@@ -42,11 +43,11 @@ from hcsim.model.core.layouts import (
     copy_role,
 )
 from hcsim.model.core.schema import COST_CENTER, REQ_TYPE, SimulationSchema
-from hcsim.model.ml.generative import ATTRIBUTES
 from hcsim.model.ml.sampling import bernoulli
 
 if TYPE_CHECKING:
     from hcsim.engine.domains import StepContext
+
 
 Ints = NDArray[np.int64]
 CAMPUS: Final = "campus"
@@ -115,12 +116,8 @@ def campus(state: SimulationState, ctx: StepContext) -> DomainResult:
     opened[:, OpeningColumn.CREATION_STEP] = ctx.step
     opened[:, OpeningColumn.REQ_TYPE] = code
     opened[:, OpeningColumn.NUM_OPENINGS] = 1
-    start = 0
-    for cc in np.flatnonzero(counts):
-        k = int(counts[cc])
-        opened[start : start + k, OpeningColumn.COST_CENTER] = cc
-        opened[start : start + k][:, list(ATTRIBUTES)] = generator.sample(int(cc), k, rng)
-        start += k
+    opened[:, OpeningColumn.COST_CENTER] = np.repeat(np.arange(n, dtype=np.int64), counts)
+    degenerate = fill_roles(opened, counts, generator, rng)
     reqs = state.live_openings
     filled = np.zeros(len(reqs), dtype=bool)
     if ctx.month in schedule.start_months:
@@ -140,6 +137,7 @@ def campus(state: SimulationState, ctx: StepContext) -> DomainResult:
         employees=RowChange(EMPLOYEE, append=hires),
         openings=RowChange(OPENING, drop=rows, append=opened),
         grants=(Grant("new_hire"),),
+        diagnostics={DEGENERATE_ROWS: degenerate},
         flows={
             "G_camp": counts,
             "F_camp": np.bincount(
