@@ -25,6 +25,7 @@ from numpy.typing import NDArray
 from hcsim.engine.config import AwardSettings
 from hcsim.engine.results import DomainResult, RowChange
 from hcsim.engine.state import SimulationState
+from hcsim.financial.routing import route
 from hcsim.financial.sizing import SizingContext
 from hcsim.model.core.layouts import Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import AWARD_TYPE, SimulationSchema
@@ -42,8 +43,10 @@ class Applied:
     appended_openings: Buffer
     forfeited_tranches: int
     recorded_tranches: int
-    #: Grant recipients no sizer covered.
+    #: Grant recipients no recorded award or sizer covered.
     unsized_grants: int = 0
+    #: Grant recipients who took a recorded award.
+    replayed_grants: int = 0
 
 
 def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
@@ -175,8 +178,9 @@ def apply(
         state.open_openings += per_cost_center(appended_reqs, occ, n, num)
         state.open_rows += per_cost_center(appended_reqs, occ, n)
 
-    # 7. Size and record grants, for the appended employees or the written ones.
-    recorded = unsized = 0
+    # 7. Route, size, and record grants, for the appended employees or the written ones: a
+    # recorded award where the recipient holds one, sizing otherwise.
+    recorded = unsized = replayed = 0
     if result.grants and awards is not None and state.ledger is not None:
         first = state.n_employees - len(appended)
         for grant in result.grants:
@@ -186,21 +190,25 @@ def apply(
             if state.price is None:
                 raise RuntimeError("a run that sizes awards needs a price model in its state")
             rows = state.employees[positions]
-            recorded_batch = (
-                None
-                if awards.replayed is None
-                else awards.replayed.batch(rows, step, grant.award_type, state.price)
+            routed = route(
+                awards.sizer(grant.award_type),
+                grant.award_type,
+                rows,
+                state.price,
+                SizingContext(step, calendar_month, state.ledger),
+                awards.replayed,
+                awards.window,
             )
-            sizer = awards.sizer(grant.award_type)
-            if recorded_batch is not None:
-                batch = recorded_batch
-            elif sizer is not None:
-                context = SizingContext(step, calendar_month, state.ledger)
-                batch = sizer.size(rows, state.price, context)
-            else:
+            if routed is None:
                 unsized += len(positions)
                 continue
-            state.employees[positions, EmployeeColumn.BASE_SALARY] = batch.base_salary
+            granted = routed.replayed | routed.sized
+            unsized += int((~granted).sum())
+            replayed += int(routed.replayed.sum())
+            batch = routed.batch
+            state.employees[positions[granted], EmployeeColumn.BASE_SALARY] = batch.base_salary[
+                granted
+            ]
             recorded += state.ledger.record(
                 rows[:, EmployeeColumn.VEST_INDEX].astype(np.int64),
                 step,
@@ -216,4 +224,6 @@ def apply(
         current = state.category_ledger.get(category)
         state.category_ledger[category] = used.copy() if current is None else current + used
 
-    return Applied(dropped, appended, dropped_reqs, appended_reqs, forfeited, recorded, unsized)
+    return Applied(
+        dropped, appended, dropped_reqs, appended_reqs, forfeited, recorded, unsized, replayed
+    )

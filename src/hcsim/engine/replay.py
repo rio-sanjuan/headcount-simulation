@@ -47,9 +47,10 @@ reads history at the month-end before it:
 open openings first, then its reserved ones. While it holds more, a shown opening that fills
 brings a held-back one into view.
 
-**Replayed awards.** A run that replays awards passes a `ReplayedAwards` hook in its award
-settings: for a grant it covers, the hook returns the award as recorded, and the apply step
-records it instead of sizing one.
+**Replayed awards.** `recorded_awards` reads the primary-plan awards granted during the run's
+window, as recorded: each recipient's tranches as a monthly schedule from its award month. With
+them in its award settings, the apply step routes a grant's recipients who hold one to it, and
+sizes the rest (see `financial.routing`).
 """
 
 from __future__ import annotations
@@ -57,17 +58,17 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final
 
 import duckdb
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.engine.known_events import EventKind, step_of
 from hcsim.engine.results import DomainResult, RowChange
 from hcsim.engine.state import SimulationState
-from hcsim.financial.prices import StockPriceModel
-from hcsim.financial.sizing import AwardBatch
+from hcsim.financial.routing import RecordedAwards
 from hcsim.model.core.contract import role_column
 from hcsim.model.core.layouts import (
     MAX_OPENINGS_PER_REQUISITION,
@@ -129,12 +130,26 @@ ORDER BY step, req_id
 """
 
 
-class ReplayedAwards(Protocol):
-    """Awards as recorded, for the grants a replay covers."""
+_RECORDED: Final = """
+SELECT a.employee_id, a.award_type,
+       datediff('month', date_trunc('month', $run), date_trunc('month', a.award_date)) AS step,
+       datediff('month', date_trunc('month', a.award_date), date_trunc('month', v.vest_date))
+           AS after,
+       v.shares
+FROM equity_award a JOIN equity_vest v USING (award_id)
+WHERE a.plan = 'primary' AND a.award_date >= $run AND a.award_date < $end
+ORDER BY a.award_id, v.vest_number
+"""
 
-    def batch(
-        self, rows: Buffer, step: int, award_type: str, prices: StockPriceModel
-    ) -> AwardBatch | None: ...
+
+def recorded_awards(
+    con: duckdb.DuckDBPyConnection, run_date: dt.date, months: int
+) -> RecordedAwards:
+    """The primary-plan awards granted during the run's `months` months from `run_date`, as
+    recorded."""
+    end = (pd.Period(run_date, "M") + months).start_time.date()
+    frame = con.execute(_RECORDED, {"run": run_date, "end": end}).df()
+    return RecordedAwards.from_frame(frame)
 
 
 @dataclass(frozen=True)
