@@ -29,13 +29,14 @@ VALUE: Final = "value"
 #: Supported grouping columns. Org levels resolve through dim_org.
 GROUPINGS: Final = ("cost_center", "org_level1", TOPLINE)
 
-# Each measure is a SQL query yielding (month, cost_center, value). The trans_type codes are
-# the data contract's. Headcount measures count regular employees only: contingent and
-# temporary workers book to their own account groups.
+# Each measure is a SQL query yielding (month, cost_center, value). Workforce measures read
+# the pre-summed fact, `workforce_agg`, as the data contract intends for the guidance pipeline.
+# The trans_type codes are the contract's. Headcount measures count regular employees only:
+# contingent and temporary workers book to their own account groups.
 _FLOW = """
-    SELECT date_trunc('month', CAST(event_date AS DATE)) AS month, cost_center,
-           count(*) AS value
-    FROM workforce_txn
+    SELECT date_trunc('month', CAST(period AS DATE)) AS month, cost_center,
+           sum(headcount) AS value
+    FROM workforce_agg
     WHERE trans_type = '{code}'
       AND account IN (SELECT account FROM dim_account WHERE account_group = 'regular')
     GROUP BY ALL
@@ -95,7 +96,7 @@ def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Ser
     unknown = [
         row[0]
         for row in con.execute(
-            "SELECT DISTINCT trans_type FROM workforce_txn "
+            "SELECT DISTINCT trans_type FROM workforce_agg "
             "WHERE trans_type NOT IN (SELECT trans_type FROM dim_trans_type) ORDER BY 1"
         ).fetchall()
     ]

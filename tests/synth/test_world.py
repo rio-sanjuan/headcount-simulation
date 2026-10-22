@@ -91,3 +91,38 @@ def test_the_world_writes_to_duckdb_with_its_truth_manifest(tmp_path: Path) -> N
         (manifest,) = con.execute("SELECT manifest FROM truth_manifest").fetchone() or ("",)
     assert count == 200
     assert json.loads(manifest)["config"]["seed"] == 1
+
+
+def test_the_aggregate_fact_sums_the_transactions(tmp_path: Path) -> None:
+    world = generate_world(preset("tiny", seed=4))
+    path = tmp_path / "w.duckdb"
+    write_world(world, path)
+    with duckdb.connect(str(path), read_only=True) as con:
+        mismatched = con.execute(
+            """
+            WITH fact AS (
+                SELECT last_day(t.event_date) AS period, t.cost_center, j.job_family,
+                       j.job_level, t.location, t.company, t.account, t.trans_type,
+                       count(*) AS headcount, sum(t.amount) AS amount
+                FROM workforce_txn t JOIN dim_job j USING (job_code) GROUP BY ALL
+            )
+            SELECT count(*) FROM fact FULL JOIN workforce_agg a
+              USING (period, cost_center, job_family, job_level, location, company, account,
+                     trans_type)
+            WHERE fact.headcount IS DISTINCT FROM a.headcount
+               OR fact.amount IS DISTINCT FROM a.amount
+            """
+        ).fetchone() or (1,)
+        periods = {
+            row[0] for row in con.execute("SELECT DISTINCT period FROM workforce_agg").fetchall()
+        }
+    assert mismatched == (0,)
+    assert all(p == p.replace(day=1) + pd.offsets.MonthEnd(0) for p in map(pd.Timestamp, periods))
+
+
+def test_the_rating_dimension_lists_every_label() -> None:
+    world = generate_world(preset("tiny", seed=4))
+    ratings = world.tables["dim_rating"]
+    assert ratings["rating"].tolist() == ["R1", "R2", "R3", "R4", "R5"]
+    assert ratings["rating_rank"].tolist() == [1, 2, 3, 4, 5]
+    assert set(world.tables["rating"]["rating"].astype(str)) <= set(ratings["rating"])
