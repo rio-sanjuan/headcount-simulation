@@ -388,16 +388,17 @@ def generate_world(config: WorldConfig) -> World:
         comp,
         np.random.default_rng([config.seed, 257]),
     )
-    world.tables["stock_price"] = equity.stock_prices(ends, price, price_rng)
+    daily = equity.daily_prices(ends, price, price_rng)
+    world.tables["stock_price_daily"] = daily
+    world.tables["stock_price"] = equity.month_end_closes(daily, ends)
     hires = _as_dates(txn[txn["trans_type"] == "HIRE"].astype({"job_code": str}), "event_date")
     terms = _as_dates(txn[txn["trans_type"] == "TERM"], "event_date")
     awards, vests = equity.new_hire_awards(
         hires,
         terms,
         world.tables["dim_job"],
-        world.tables["stock_price"],
+        daily,
         grant,
-        price,
         ends[-1].date(),
         grant_rng,
     )

@@ -283,11 +283,16 @@ class CompensationTruth:
 
 @dataclass(frozen=True)
 class PriceTruth:
+    """The share price: a geometric Brownian motion over business days, with the given
+    monthly drift and volatility. A grant's fair value is the trailing average close over
+    `averaging_days` business days, a synthetic convention that differs from the day's close.
+    Invented, round values."""
+
     start_price: float = 100.0
     monthly_drift: float = 0.008
     monthly_volatility: float = 0.07
-    #: Grant-date fair value = month-end close times a uniform factor in this band.
-    fair_value_band: tuple[float, float] = (0.97, 1.03)
+    trading_days_per_month: int = 21
+    averaging_days: int = 20
 
 
 @dataclass(frozen=True)
@@ -900,6 +905,10 @@ class WorldConfig:
             problems.append(f"compensation.family_factor has no value for {no_factor}")
         if extra := sorted(set(self.requisitions.growth_level_mix) - levels):
             problems.append(f"requisitions.growth_level_mix names unknown levels {extra}")
+        if self.prices.start_price <= 0 or self.prices.monthly_volatility < 0:
+            problems.append("prices need a positive start and a non-negative volatility")
+        if self.prices.trading_days_per_month < 1 or self.prices.averaging_days < 1:
+            problems.append("prices need positive trading and averaging days")
         problems += self.ratings.problems()
         problems += self.attrition.problems(len(self.ratings.scale))
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
