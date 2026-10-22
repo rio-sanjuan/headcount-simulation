@@ -100,7 +100,7 @@ def test_program_terminations_open_no_backfill(world: World) -> None:
     vacancies = int(
         (txn["trans_type"] == "TERM").sum() + (reqs["close_reason"] == "filled_transfer").sum()
     )
-    assert int((reqs["req_type"] == "backfill").sum()) == vacancies
+    assert int(reqs.loc[reqs["req_type"] == "backfill", "req_id"].nunique()) == vacancies
     assert (txn["trans_type"] == "RIF").sum() > 0
 
 

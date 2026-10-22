@@ -14,13 +14,21 @@ from tests.support.stat_check import stat_check
 def per_requisition(world: World) -> pd.DataFrame:
     reqs = world.tables["req_interval"].astype({"req_type": str, "close_reason": object})
     filled = reqs["close_reason"].astype(str).str.startswith("filled")
+    # A no-show gives an opening back: as an interval ending `reopened`, or as a new interval
+    # after the one that filled the last opening.
+    group = reqs.groupby("req_id")
+    after_last = filled.groupby(reqs["req_id"]).shift(fill_value=False) & (
+        group["openings"].shift() == 1
+    )
+    reopened = (reqs["close_reason"] == "reopened") | after_last
     return (
-        reqs.assign(fill=filled)
+        reqs.assign(fill=filled, reopen=reopened)
         .groupby("req_id")
         .agg(
             req_type=("req_type", "first"),
             openings=("openings", "max"),
             fills=("fill", "sum"),
+            reopens=("reopen", "sum"),
             # The final row, missing values included: `last` would skip an open interval's.
             last_openings=("openings", lambda s: s.iloc[-1]),
             last_reason=("close_reason", lambda s: s.iloc[-1]),
@@ -46,7 +54,7 @@ def test_every_opening_is_filled_exited_or_still_open(small_world: World) -> Non
     still_open = reqs["last_reason"].isna()
     unfilled = reqs["last_reason"] == "unfilled"
     left = np.where(still_open | unfilled, reqs["last_openings"], 0)
-    assert (reqs["fills"] + left == reqs["openings"]).all()
+    assert (reqs["fills"] - reqs["reopens"] + left == reqs["openings"]).all()
 
 
 def test_bulk_requisitions_fill_over_several_months(small_world: World) -> None:

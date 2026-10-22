@@ -17,17 +17,21 @@ def world() -> World:
     return generate_world(preset("tiny", seed=11))
 
 
-def test_every_hire_fills_an_external_or_campus_requisition_in_its_role(world: World) -> None:
+def test_hires_take_the_role_of_the_requisition_they_filled(world: World) -> None:
+    """A campus hire starts the day its requisition fills; an external hire starts after its
+    offer. Hires that fill nothing joined with no requisition."""
     txn, reqs = world.tables["workforce_txn"], world.tables["req_interval"]
     hires = txn[txn["trans_type"] == "HIRE"].set_index("employee_id")
-    filled = reqs["close_reason"].isin(["filled_external", "filled_campus"])
-    external = reqs[filled].set_index("filled_by")
-    assert len(hires) == len(external) > 0
-    joined = hires.join(external, rsuffix="_req", how="inner")
-    assert len(joined) == len(hires)
+    filled = reqs[reqs["close_reason"].isin(["filled_external", "filled_campus"])].set_index(
+        "filled_by"
+    )
+    joined = hires.join(filled, rsuffix="_req", how="inner")
+    assert len(joined) > 0
     assert (joined["cost_center"] == joined["cost_center_req"]).all()
     assert (joined["job_code"] == joined["job_code_req"]).all()
-    assert (joined["event_date"] == joined["closed_date"]).all()
+    campus = joined["close_reason"] == "filled_campus"
+    assert (joined.loc[campus, "event_date"] == joined.loc[campus, "closed_date"]).all()
+    assert (joined.loc[~campus, "event_date"] > joined.loc[~campus, "closed_date"]).all()
 
 
 def test_every_transfer_in_fills_a_transfer_requisition(world: World) -> None:
@@ -49,8 +53,9 @@ def test_intervals_are_consistent(world: World) -> None:
         "filled_conversion",
         "filled_campus",
         "unfilled",
+        "reopened",
     }
-    filled = closed["close_reason"].str.startswith("filled")
+    filled = closed["close_reason"].astype(str).str.startswith("filled")
     assert closed.loc[filled, "filled_by"].notna().all()
     assert closed.loc[~filled, "filled_by"].isna().all()
     assert set(reqs["req_type"]) == {"backfill", "campus", "growth"}
@@ -58,17 +63,25 @@ def test_intervals_are_consistent(world: World) -> None:
 
 
 def test_each_requisition_s_intervals_chain_and_count_down(world: World) -> None:
-    """Intervals follow each other without gaps; each fill takes one opening; the requisition
-    ends filled from its last opening, unfilled, or still open in its last interval."""
+    """Each fill takes one opening, and the next interval starts that day. A no-show gives one
+    back: an open requisition's interval ends `reopened`, and a filled one opens a new
+    interval after a gap. A requisition ends filled from its last opening, unfilled, or still
+    open in its last interval."""
     reqs = world.tables["req_interval"]
     for _, rows in reqs.groupby("req_id"):
         starts = pd.to_datetime(rows["interval_start"]).tolist()
         ends = pd.to_datetime(rows["closed_date"]).tolist()
         openings = rows["openings"].tolist()
         reasons = rows["close_reason"].astype(object).tolist()
-        assert starts[1:] == ends[:-1]
-        assert openings == list(range(openings[0], openings[0] - len(rows), -1))
-        assert all(str(r).startswith("filled") for r in reasons[:-1])
+        for k in range(1, len(rows)):
+            if reasons[k - 1] == "reopened":
+                assert (starts[k], openings[k]) == (ends[k - 1], openings[k - 1] + 1)
+            elif starts[k] == ends[k - 1] and openings[k - 1] > 1:
+                assert openings[k] == openings[k - 1] - 1
+            else:  # a filled requisition reopened by a no-show
+                assert starts[k] >= ends[k - 1]
+                assert (openings[k - 1], openings[k]) == (1, 1)
+        assert all(str(r).startswith("filled") or r == "reopened" for r in reasons[:-1])
         last = reasons[-1]
         assert pd.isna(last) or last == "unfilled" or openings[-1] == 1
 

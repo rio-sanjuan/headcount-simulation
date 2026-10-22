@@ -639,6 +639,33 @@ class OpeningsTruth:
         return count.astype(np.int16)
 
 
+@dataclass(frozen=True)
+class OfferTruth:
+    """Offers, pending starts, no-shows, and hires with no requisition. Invented, round values.
+
+    An external fill is an accepted offer on the day it's made: the opening closes then. The
+    person starts `start_lag_days` later, on the next start weekday, and is a pending start
+    until then. With `no_show_probability`, they never start, and the opening reopens on the
+    day they were due. Separately, each month a Poisson count of `no_requisition_hire_rate`
+    times regular headcount joins with no requisition at all.
+    """
+
+    start_lag_days: tuple[int, int] = (14, 60)
+    no_show_probability: float = 0.05
+    no_requisition_hire_rate: float = 0.001
+
+    def problems(self) -> list[str]:
+        found = []
+        low, high = self.start_lag_days
+        if not 0 <= low <= high:
+            found.append("offers.start_lag_days must be a range of days from 0")
+        if not 0 <= self.no_show_probability <= 1:
+            found.append("offers.no_show_probability must lie in [0, 1]")
+        if not 0 <= self.no_requisition_hire_rate <= 1:
+            found.append("offers.no_requisition_hire_rate must lie in [0, 1]")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -708,6 +735,7 @@ class WorldConfig:
     backfill: BackfillTruth = field(default_factory=BackfillTruth)
     campus: CampusTruth = field(default_factory=CampusTruth)
     openings: OpeningsTruth = field(default_factory=OpeningsTruth)
+    offers: OfferTruth = field(default_factory=OfferTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -775,6 +803,7 @@ class WorldConfig:
         problems += self.backfill.problems(self.levels)
         problems += self.campus.problems(self.levels)
         problems += self.openings.problems()
+        problems += self.offers.problems()
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:
