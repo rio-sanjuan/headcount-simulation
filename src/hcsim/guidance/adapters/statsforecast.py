@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 from hcsim.guidance.adapters.base import LibraryModel, adapted
 from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry
+from hcsim.guidance.tuning import FloatParam, IntParam, Space
 from hcsim.model.interface import ProbabilisticOutput
 
 Floats = NDArray[np.float64]
@@ -70,6 +71,14 @@ MODELS: Final[Mapping[str, tuple[Mapping[str, Any], frozenset[ProbabilisticOutpu
 
 #: The models that read calendar covariates, as exogenous regressors, and the ones they read.
 COVARIATES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({"AutoARIMA": ("weekdays",)})
+#: The models a tuner may tune, and their search spaces.
+SPACES: Final[Mapping[str, Space]] = MappingProxyType(
+    {
+        "WindowAverage": {"window_size": IntParam(3, 24)},
+        "SeasonalWindowAverage": {"window_size": IntParam(1, 5)},
+        "TSB": {"alpha_d": FloatParam(0.05, 0.5), "alpha_p": FloatParam(0.05, 0.5)},
+    }
+)
 
 
 class StatsForecastModel(LibraryModel):
@@ -77,7 +86,7 @@ class StatsForecastModel(LibraryModel):
 
     def _fit(self, values: Floats) -> Any:
         library = importlib.import_module("statsforecast.models")
-        model = getattr(library, self.MODEL)(**self.ARGUMENTS)
+        model = getattr(library, self.MODEL)(**self.arguments)
         if self.covariates_given:
             return model.fit(y=values, X=self.past_covariates)
         return model.fit(y=values)
@@ -101,6 +110,7 @@ ADAPTERS: Final[Mapping[str, type[StatsForecastModel]]] = MappingProxyType(
             arguments,
             outputs,
             covariates=COVARIATES.get(model, ()),
+            space=SPACES.get(model),
         )
         for model, (arguments, outputs) in MODELS.items()
     }

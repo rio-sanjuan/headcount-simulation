@@ -22,10 +22,12 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from hcsim.guidance.evaluation import EvaluationConfig, space_of
 from hcsim.guidance.ingest import DEFAULT_CATEGORIES, grouping_problems
 from hcsim.guidance.models import MODELS
 from hcsim.guidance.reconcile import RECONCILERS
-from hcsim.guidance.selection import COMBINERS, EvaluationConfig, SelectionConfig
+from hcsim.guidance.selection import COMBINERS, SelectionConfig
+from hcsim.guidance.tuning import TuningSettings
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 
 
@@ -38,12 +40,25 @@ class _Strict(BaseModel):
 
 
 class Evaluation(_Strict):
-    """Rolling-origin backtesting: how many folds, how long, and how far apart."""
+    """Rolling-origin backtesting: how many folds, how long, how far apart, and the metric a
+    model's score averages (see `evaluation`)."""
 
     n_splits: int = Field(default=5, ge=1)
     test_months: int = Field(default=6, ge=1)
     step_months: int = Field(default=2, ge=1)
     min_train_months: int = Field(default=36, ge=1)
+    metric: Literal["wape", "mape"] = "wape"
+
+
+class Tuning(_Strict):
+    """Nested TPE tuning of the models that declare a search space (see `tuning`). Off by
+    default, which leaves every model its defaults."""
+
+    enabled: bool = False
+    trials: int = Field(default=20, ge=1)
+    seed: int = Field(default=0, ge=0)
+    inner_splits: int = Field(default=2, ge=1)
+    inner_min_train_months: int = Field(default=24, ge=1)
 
 
 class Combination(_Strict):
@@ -84,6 +99,7 @@ class GuidanceConfig(_Strict):
     combination: Combination = Combination()
     evaluation: Evaluation = Evaluation()
     validation: Validation = Validation()
+    tuning: Tuning = Tuning()
     reconciliation: Reconciliation = Reconciliation()
 
     @model_validator(mode="after")
@@ -108,6 +124,13 @@ class GuidanceConfig(_Strict):
         repeated = sorted({c.value for c in self.categories if self.categories.count(c) > 1})
         if repeated:
             found.append(f"categories: each category is named once; {repeated} repeat")
+        if self.tuning.enabled and not any(
+            MODELS.problems([m]) == [] and space_of(m) for m in self.models
+        ):
+            found.append(
+                "tuning: tuning is on, but no model in the suite has a search space; models "
+                "that do include native.PoissonGLM and statsforecast.WindowAverage"
+            )
         if self.reconcile and ANCHOR not in self.categories:
             found.append(
                 f"categories: reconciliation holds the {ANCHOR.value!r} anchor fixed, so it "
@@ -127,12 +150,18 @@ class GuidanceConfig(_Strict):
     def selection(self) -> SelectionConfig:
         """The selection settings the forecasting step reads."""
         e = self.evaluation
+        t = self.tuning
         return SelectionConfig(
             suite=self.models,
             top_k=self.combination.top_k,
             combination=self.combination.method,
             evaluation=EvaluationConfig(
-                e.n_splits, e.test_months, e.step_months, e.min_train_months
+                e.n_splits, e.test_months, e.step_months, e.min_train_months, e.metric
+            ),
+            tuning=(
+                TuningSettings(t.trials, t.seed, t.inner_splits, t.inner_min_train_months)
+                if t.enabled
+                else None
             ),
         )
 

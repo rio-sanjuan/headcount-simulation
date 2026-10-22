@@ -10,7 +10,8 @@
   `native.NegativeBinomialGLM`) regress the count, through a log link, on a level, a linear trend,
   and the first two annual harmonics. Both harmonics' sine and cosine are fitted, so the
   season's phase is learned whatever month the series starts in. The negative binomial
-  estimates its dispersion, so it fits overdispersed counts the Poisson can't.
+  estimates its dispersion, so it fits overdispersed counts the Poisson can't. The number of
+  harmonics, one to three, is tunable.
 
 The ARIMAs run on statsforecast and the GLMs on statsmodels, both in the core install and
 imported when a model first fits. Fitting, forecasting, and failing work as for every adapter
@@ -20,12 +21,14 @@ imported when a model first fits. Fitting, forecasting, and failing work as for 
 from __future__ import annotations
 
 import importlib
+from types import MappingProxyType
 from typing import Any, ClassVar, Final, Self
 
 import numpy as np
 
 from hcsim.guidance.adapters.base import Floats, LibraryModel
 from hcsim.guidance.errors import ForecastError
+from hcsim.guidance.tuning import IntParam, Space
 from hcsim.model.interface import ProbabilisticOutput
 
 SEASON: Final = 12
@@ -62,8 +65,8 @@ class LogitRateARIMA(LibraryModel):
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _POINT
     MIN_MONTHS: ClassVar[int] = 2 * SEASON
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **parameters: Any) -> None:
+        super().__init__(**parameters)
         self._past: Floats | None = None
         self._future: Floats | None = None
 
@@ -88,21 +91,27 @@ class LogitRateARIMA(LibraryModel):
         return self._future[:horizon] / (1 + np.exp(-logit))
 
 
-def _design(start: int, months: int) -> Floats:
-    """The level, the trend in years, and the first two annual harmonics, by month."""
+def _design(start: int, months: int, harmonics: int = 2) -> Floats:
+    """The level, the trend in years, and the first `harmonics` annual harmonics, by month."""
     t = np.arange(start, start + months, dtype=np.float64)
     angle = 2 * np.pi * t / SEASON
     columns = [np.ones(months), t / SEASON]
-    columns += [np.sin(angle), np.cos(angle), np.sin(2 * angle), np.cos(2 * angle)]
+    for k in range(1, harmonics + 1):
+        columns += [np.sin(k * angle), np.cos(k * angle)]
     return np.column_stack(columns)
 
 
 class _HarmonicGLM(LibraryModel):
     OUTPUTS: ClassVar[frozenset[ProbabilisticOutput]] = _PARAMETRIC
     MIN_MONTHS: ClassVar[int] = 2 * SEASON
+    SPACE: ClassVar[Space] = MappingProxyType({"harmonics": IntParam(1, 3)})
 
-    def __init__(self) -> None:
-        super().__init__()
+    @property
+    def harmonics(self) -> int:
+        return int(self.parameters.get("harmonics", 2))
+
+    def __init__(self, **parameters: Any) -> None:
+        super().__init__(**parameters)
         self._months = 0
 
     def _model(self, counts: Floats, design: Floats) -> Any:
@@ -117,10 +126,10 @@ class _HarmonicGLM(LibraryModel):
             raise ForecastError(f"{self.NAME} fits counts, which can't be negative")
         if not values.any():
             raise ForecastError(f"{self.NAME} can't fit a series that's zero throughout")
-        return self._model(values, _design(0, len(values)))
+        return self._model(values, _design(0, len(values), self.harmonics))
 
     def _predict(self, fitted: Any, horizon: int) -> Any:
-        design = _design(self._months, horizon)
+        design = _design(self._months, horizon, self.harmonics)
         return np.exp(design @ np.asarray(fitted.params, dtype=np.float64)[: design.shape[1]])
 
 

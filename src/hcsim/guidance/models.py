@@ -18,7 +18,7 @@ baselines are in `baselines`.
 
 from __future__ import annotations
 
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import numpy as np
 from numpy.typing import NDArray
@@ -147,11 +147,16 @@ MODELS: Registry[Forecaster] = Registry(
 )
 
 
-def build(name: str) -> Forecaster:
+def build(name: str, **parameters: Any) -> Forecaster:
+    """The model `name`, with `parameters` overriding its defaults when it's been tuned."""
     try:
-        return MODELS.build(name)
+        if not parameters:
+            return MODELS.build(name)
+        factory: Any = MODELS.factory(name)
     except RegistryError as error:
         raise ForecastError(str(error)) from None
+    model: Forecaster = factory(**parameters)
+    return model
 
 
 def capabilities(name: str) -> Capabilities:
