@@ -182,9 +182,10 @@ def _transactions(workforce: Workforce, labels: _Labels, rng: np.random.Generato
 
 
 def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
-    """One row per requisition and state interval. `openings` are those still to fill during
-    the interval. `closed_date` and `close_reason` say how the interval ended, and both are
-    empty for a requisition's current interval while it stays open."""
+    """One row per requisition and state interval, numbered from 1 within the requisition.
+    `openings` are those still to fill during the interval. `closed_date` and `close_reason`
+    say how the interval ended, and both are empty for a requisition's current interval while
+    it stays open."""
     config = labels.config
     col = book.column
     ended = book.intervals.collect(INTERVAL_DTYPES)
@@ -220,9 +221,15 @@ def _requisitions(book: RequisitionBook, labels: _Labels) -> pd.DataFrame:
         },
         columns=REQ_COLUMNS,
     )
-    return frame.sort_values(
-        ["req_id", "interval_start", "closed_date"], na_position="last", ignore_index=True
+    # Ties keep the order the intervals ended in, which is the order of the state changes.
+    frame = frame.sort_values(
+        ["req_id", "interval_start", "closed_date"],
+        na_position="last",
+        ignore_index=True,
+        kind="stable",
     )
+    frame.insert(1, "interval_number", frame.groupby("req_id").cumcount().add(1))
+    return frame
 
 
 def _pending_starts(offers: Offers, book: RequisitionBook, labels: _Labels) -> pd.DataFrame:

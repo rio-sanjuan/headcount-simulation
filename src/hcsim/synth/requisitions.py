@@ -145,8 +145,9 @@ class RequisitionBook:
         """Give back one opening per entry, as when an accepted offer never starts. A filled
         requisition opens a new state interval; an open one ends its interval and starts the
         next with one opening more. A requisition that exited unfilled stays closed: it was
-        cancelled, so there's nothing to give back to."""
-        for j, day in zip(index.tolist(), dates, strict=True):
+        cancelled, so there's nothing to give back to. Entries apply in date order."""
+        order = np.argsort(dates, kind="stable")
+        for j, day in zip(np.asarray(index)[order].tolist(), np.asarray(dates)[order], strict=True):
             if self.reqs.column("close_reason")[j] == UNFILLED:
                 continue
             if self.reqs.column("close_reason")[j] == OPEN:
