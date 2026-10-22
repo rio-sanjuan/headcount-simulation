@@ -11,7 +11,7 @@
   and the first two annual harmonics. Both harmonics' sine and cosine are fitted, so the
   season's phase is learned whatever month the series starts in. The negative binomial
   estimates its dispersion, so it fits overdispersed counts the Poisson can't. The number of
-  harmonics, one to three, is tunable.
+  harmonics, one to three, is tunable. Both sample paths from their fitted distribution.
 
 The ARIMAs run on statsforecast and the GLMs on statsmodels, both in the core install and
 imported when a model first fits. Fitting, forecasting, and failing work as for every adapter
@@ -35,7 +35,9 @@ SEASON: Final = 12
 #: How close to 0 or 1 a share may come before its logit.
 EPSILON: Final = 1e-4
 _POINT = frozenset({ProbabilisticOutput.NONE})
-_PARAMETRIC = frozenset({ProbabilisticOutput.NONE, ProbabilisticOutput.PARAMETRIC})
+_PARAMETRIC = frozenset(
+    {ProbabilisticOutput.NONE, ProbabilisticOutput.PARAMETRIC, ProbabilisticOutput.SAMPLE_PATHS}
+)
 
 
 def _arima(values: Floats) -> Any:
@@ -136,6 +138,11 @@ class _HarmonicGLM(LibraryModel):
 class PoissonGLM(_HarmonicGLM):
     NAME: ClassVar[str] = "native.PoissonGLM"
 
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Poisson draws around the forecast mean, month by month."""
+        mean = self.predict(horizon)
+        return rng.poisson(np.broadcast_to(mean, (paths, horizon))).astype(np.float64)
+
     def _model(self, counts: Floats, design: Floats) -> Any:
         sm = importlib.import_module("statsmodels.api")
         return sm.GLM(counts, design, family=sm.families.Poisson()).fit()
@@ -147,6 +154,13 @@ class NegativeBinomialGLM(_HarmonicGLM):
     def _model(self, counts: Floats, design: Floats) -> Any:
         sm = importlib.import_module("statsmodels.api")
         return sm.NegativeBinomial(counts, design).fit(disp=0)
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Negative-binomial draws around the forecast mean, at the fitted dispersion."""
+        mean = np.broadcast_to(self.predict(horizon), (paths, horizon))
+        alpha = max(self.dispersion, 1e-8)
+        size = 1.0 / alpha
+        return rng.negative_binomial(size, size / (size + mean)).astype(np.float64)
 
     @property
     def dispersion(self) -> float:

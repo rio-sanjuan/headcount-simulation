@@ -163,7 +163,7 @@ class Generate:
 
     name: str = "generate"
     needs: tuple[str, ...] = ("series", "selections", "covariates", "config")
-    gives: tuple[str, ...] = ("forecasts",)
+    gives: tuple[str, ...] = ("forecasts", "paths")
 
     def validate(self, ctx: Context) -> list[str]:
         return []
@@ -171,9 +171,12 @@ class Generate:
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
         forecasts: Forecasts = {}
+        paths: Forecasts = {}
+        point_only: list[dict[str, str]] = []
         report: dict[str, dict[str, Any]] = {}
         skipped: list[dict[str, str]] = []
-        for (group, category), selection in ctx["selections"].items():  # anchors first
+        selections = ctx["selections"]
+        for stream, ((group, category), selection) in enumerate(selections.items()):
             values = series.values(group, category).to_numpy()
             exposure = _exposure(series, group, category)
             future = None if exposure is None else forecasts.get((group, ANCHOR))
@@ -186,11 +189,18 @@ class Generate:
                     exposure,
                     future,
                     ctx["covariates"],
+                    stream,  # each series' own paths, whatever else the run forecasts
                 )
             except ForecastError as error:
                 skipped.append({"group": group, "category": category.value, "reason": str(error)})
                 continue
             forecasts[group, category] = result.values
+            if result.paths is not None:
+                paths[group, category] = result.paths
+            elif config.selection.uncertainty is not None:
+                point_only.append(
+                    {"group": group, "category": category.value, "reason": result.point_only}
+                )
             report[f"{group}/{category.value}"] = {
                 "scores": result.scores,
                 "weights": result.weights,
@@ -198,8 +208,8 @@ class Generate:
                 "folds": {m: [f.as_record() for f in fs] for m, fs in result.folds.items()},
                 "parameters": result.parameters,
             }
-        ctx.note(self.name, series_skipped=skipped, selection=report)
-        return {"forecasts": forecasts}
+        ctx.note(self.name, series_skipped=skipped, selection=report, point_only=point_only)
+        return {"forecasts": forecasts, "paths": paths}
 
 
 @dataclass(frozen=True)
@@ -244,8 +254,16 @@ class Reconcile:
 
 @dataclass(frozen=True)
 class Format:
+    """Write the artifact: the point forecasts, and with sample paths on, the paths and the
+    quantiles read from them. Negative values are clamped to zero, as writers clamp.
+
+    Quantiles go in as columns, which every row must carry, so they're written only when
+    every series has paths; otherwise the paths go in alone, and the report says why the
+    quantiles didn't. Paths and quantiles are the models' own draws, before reconciliation
+    adjusts the point forecasts."""
+
     name: str = "format"
-    needs: tuple[str, ...] = ("series", "forecasts", "config")
+    needs: tuple[str, ...] = ("series", "forecasts", "paths", "config")
     gives: tuple[str, ...] = ("artifact",)
 
     def validate(self, ctx: Context) -> list[str]:
@@ -253,28 +271,55 @@ class Format:
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
-        rows = [
-            {
-                "forecast_month": step,
-                "category": category.value,
-                "value": float(value),
-                config.grouping: group,
-            }
-            for (group, category), values in ctx["forecasts"].items()
-            for step, value in enumerate(values)
-        ]
+        forecasts: Forecasts = ctx["forecasts"]
+        drawn: Forecasts = ctx["paths"]
+        levels = config.uncertainty.quantiles
+        with_quantiles = bool(drawn) and set(drawn) == set(forecasts)
+        quantiles = {
+            key: np.quantile(np.maximum(drawn[key], 0.0), np.asarray(levels) / 100, axis=0)
+            for key in forecasts
+            if with_quantiles
+        }
+        rows = []
+        for (group, category), values in forecasts.items():
+            for step, value in enumerate(values):
+                row = {
+                    "forecast_month": step,
+                    "category": category.value,
+                    "value": float(value),
+                    config.grouping: group,
+                }
+                if with_quantiles:
+                    row |= {
+                        f"q{q}": float(v)
+                        for q, v in zip(levels, quantiles[group, category][:, step], strict=True)
+                    }
+                rows.append(row)
         columns = ["forecast_month", "category", "value", config.grouping]
+        if with_quantiles:
+            columns += [f"q{q}" for q in levels]
         frame = pd.DataFrame(rows, columns=columns)
         negative = frame["value"] < 0
         frame.loc[negative, "value"] = 0.0  # writers clamp; the loader refuses negatives
+        keys = [key for key in forecasts if key in drawn]
+        clamped_paths = int(sum(int((drawn[k] < 0).sum()) for k in keys))
+        paths = np.stack([np.maximum(drawn[k], 0.0) for k in keys]) if keys else None
         artifact = GuidanceForecast(
             frame.astype({"forecast_month": np.int64}),
             config.grouping,
             series.snapshot.end_time.date().isoformat(),
             config.horizon,
             config.population,
+            sample_paths=paths,
+            path_index=tuple((g, c.value) for g, c in keys),
         )
-        ctx.note(self.name, clamped_negative_cells=int(negative.sum()))
+        ctx.note(
+            self.name,
+            clamped_negative_cells=int(negative.sum()),
+            clamped_path_values=clamped_paths,
+            series_with_paths=len(keys),
+            quantiles=list(levels) if with_quantiles else [],
+        )
         return {"artifact": artifact}
 
 
@@ -303,6 +348,13 @@ def run(
             *sections["generate"]["series_skipped"],
         ],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
+        "uncertainty": {
+            "enabled": config.uncertainty.enabled,
+            "series_with_paths": sections["format"]["series_with_paths"],
+            "quantiles": sections["format"]["quantiles"],
+            "clamped_path_values": sections["format"]["clamped_path_values"],
+            "point_only": sections["generate"]["point_only"],
+        },
         "validation": {
             "gaps": sections["validate"]["gaps"],
             "dropped": sections["validate"]["dropped"],

@@ -49,6 +49,14 @@ class SelectionConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     #: How to tune the models that declare a search space; none leaves their defaults.
     tuning: TuningSettings | None = None
+    #: How many sample paths a forecast draws, and from what seed; none draws none.
+    uncertainty: UncertaintySettings | None = None
+
+
+@dataclass(frozen=True)
+class UncertaintySettings:
+    paths: int = 200
+    seed: int = 0
 
 
 def inverse_error_weights(scores: dict[str, float], top_k: int) -> dict[str, float]:
@@ -67,6 +75,9 @@ class SeriesForecast:
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: The combination method that weighed the forecast: the configured one, or a fallback.
     method: str = "inverse_error"
+    #: (paths, horizon) draws from the combined predictive distribution, or none, and why.
+    paths: Floats | None = None
+    point_only: str = ""
 
 
 @dataclass(frozen=True)

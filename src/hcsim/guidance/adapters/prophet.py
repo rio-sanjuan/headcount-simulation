@@ -4,8 +4,8 @@
 and yearly seasonality, with weekly and daily seasonality off, as a monthly series has
 neither. Prophet needs dates, so the series is laid on consecutive month starts; the season's
 phase is learned from the data, so which month the dates start on doesn't matter. Given the
-calendar, it reads the working-day count (`weekdays`) as an extra regressor. Its Stan backend
-is silenced.
+calendar, it reads the working-day count (`weekdays`) as an extra regressor. It samples paths
+through Prophet's own predictive samples, seeded. Its Stan backend is silenced.
 
 A configuration that names it without the extra is refused at load, with the install command.
 Fitting, forecasting, and failing work as for every adapter (see `base`).
@@ -17,6 +17,7 @@ import importlib
 import logging
 from typing import Any, ClassVar, Final
 
+import numpy as np
 import pandas as pd
 
 from hcsim.guidance.adapters.base import Floats, LibraryModel
@@ -66,7 +67,37 @@ class ProphetModel(LibraryModel):
                 )
             for k, column in enumerate(self.COVARIATES):
                 future[column] = ahead[:horizon, k]
-        return fitted.predict(future)["yhat"].to_numpy()
+        state = np.random.get_state()  # noqa: NPY002 - Prophet draws its intervals from it
+        try:
+            return fitted.predict(future)["yhat"].to_numpy()
+        finally:
+            np.random.set_state(state)  # noqa: NPY002
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """Prophet's own predictive samples. It draws them from numpy's global stream, so
+        it's seeded from `rng` for the draw, and restored after it."""
+        if self._fitted is None:
+            raise ForecastError("fit before sampling")
+        model = self._fitted
+        future = model.make_future_dataframe(periods=horizon, freq="MS", include_history=False)
+        if self.covariates_given:
+            ahead = self.future_covariates
+            if ahead is None or len(ahead) < horizon:
+                raise ForecastError(
+                    f"{self.NAME} needs its covariates for the {horizon} months ahead"
+                )
+            for k, column in enumerate(self.COVARIATES):
+                future[column] = ahead[:horizon, k]
+        model.uncertainty_samples = paths
+        state = np.random.get_state()  # noqa: NPY002 - Prophet samples from the global stream
+        np.random.seed(int(rng.integers(2**31 - 1)))  # noqa: NPY002
+        try:
+            draws = model.predictive_samples(future)["yhat"]  # (horizon, paths)
+        except Exception as error:
+            raise ForecastError(f"{self.NAME} can't sample: {error}") from error
+        finally:
+            np.random.set_state(state)  # noqa: NPY002
+        return np.asarray(draws, dtype=np.float64).T
 
 
 ENTRIES: Final = (Entry(ProphetModel.NAME, ProphetModel, extra=EXTRA, module="prophet"),)

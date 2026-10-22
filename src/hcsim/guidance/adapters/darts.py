@@ -12,7 +12,8 @@ Each model registers as `darts.<Name>`:
   `darts-deep` extra, the one place PyTorch enters. They train on CPU, seeded, without
   progress bars or loggers.
 
-A configuration that names a model whose extra isn't installed is refused at load, with the
+The models that declare sample paths draw them through darts' own sampling, seeded. A
+configuration that names a model whose extra isn't installed is refused at load, with the
 install command. Fitting, forecasting, and failing work as for every adapter (see `base`).
 """
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from inspect import signature
 from types import MappingProxyType
 from typing import Any, ClassVar, Final
 
@@ -165,6 +167,32 @@ class DartsModel(LibraryModel):
         if samples > 1:
             forecast = forecast.quantile(0.5)
         return np.asarray(forecast.values()).ravel()
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats:
+        """The model's own predictive samples, seeded from `rng`."""
+        if ProbabilisticOutput.SAMPLE_PATHS not in self.OUTPUTS:
+            raise ForecastError(f"{self.NAME} draws no samples")
+        if self._fitted is None:
+            raise ForecastError("fit before sampling")
+        model, scaler = self._fitted
+        seed = int(rng.integers(2**31 - 1))
+        seeded = (
+            {"random_state": seed} if "random_state" in signature(model.predict).parameters else {}
+        )
+        # A model that can't take a seed samples from numpy's global stream, so that's seeded
+        # too, and restored after the draw.
+        state = np.random.get_state()  # noqa: NPY002
+        np.random.seed(seed)  # noqa: NPY002
+        try:
+            draws = model.predict(horizon, num_samples=paths, **seeded)
+            if scaler is not None:
+                draws = scaler.inverse_transform(draws)
+        except Exception as error:
+            raise ForecastError(f"{self.NAME} can't sample: {error}") from error
+        finally:
+            np.random.set_state(state)  # noqa: NPY002
+        values = np.asarray(draws.all_values(), dtype=np.float64)  # (horizon, 1, paths)
+        return values[:, 0, :].T
 
 
 def _adapter(model: str, spec: Spec) -> type[DartsModel]:

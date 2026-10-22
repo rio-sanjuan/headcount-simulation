@@ -11,6 +11,9 @@ or fitting it:
   history and its horizon before it fits;
 - whether it needs an **exposure**: a model of a share, such as attrition's share of
   headcount, is an `ExposureModel`.
+
+A model that declares `sample_paths` is a `SamplingModel`: once fitted, it draws paths from
+its predictive distribution, which is how a forecast carries uncertainty.
 """
 
 from __future__ import annotations
@@ -40,6 +43,14 @@ class CovariateModel(Protocol):
     column per covariate it declares, for its history and for the months it will forecast."""
 
     def provide(self, past: Floats, future: Floats | None) -> None: ...
+
+
+@runtime_checkable
+class SamplingModel(Protocol):
+    """A fitted model that draws sample paths from its predictive distribution: `paths`
+    draws of the `horizon` months ahead, one row per path."""
+
+    def sample(self, horizon: int, paths: int, rng: np.random.Generator) -> Floats: ...
 
 
 @dataclass(frozen=True)
