@@ -9,7 +9,7 @@ from pathlib import Path
 
 import duckdb
 
-from hcsim.guidance.ingest import GROUPINGS
+from hcsim.guidance.ingest import GROUPINGS, IngestionError
 from hcsim.guidance.pipeline import PipelineConfig, run
 
 
@@ -20,13 +20,16 @@ def main(argv: Sequence[str]) -> int:
     fit.add_argument("--world", type=Path, required=True, help="the world's DuckDB file")
     fit.add_argument("--out", type=Path, required=True, help="the artifact directory to write")
     fit.add_argument("--horizon", type=int, default=12)
-    fit.add_argument("--grouping", default="cost_center", choices=GROUPINGS)
+    fit.add_argument("--grouping", default="cost_center", help=f"one of {', '.join(GROUPINGS)}")
     args = parser.parse_args(list(argv))
 
     if not args.world.is_file():
         parser.error(f"no world at {args.world}")
     with duckdb.connect(str(args.world), read_only=True) as con:
-        result = run(con, PipelineConfig(horizon=args.horizon, grouping=args.grouping))
+        try:
+            result = run(con, PipelineConfig(horizon=args.horizon, grouping=args.grouping))
+        except IngestionError as error:
+            parser.error(str(error))
     result.artifact.save(args.out)
     (args.out / "report.json").write_text(json.dumps(result.report, indent=2, default=str))
     report = result.report

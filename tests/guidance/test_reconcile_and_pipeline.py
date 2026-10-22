@@ -154,3 +154,13 @@ def test_guidance_fit_refuses_a_missing_world(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as stop:
         hcsim(["guidance", "fit", "--world", str(tmp_path / "none.duckdb"), "--out", str(tmp_path)])
     assert stop.value.code == 2
+
+
+def test_guidance_fit_refuses_a_grouping_the_series_can_t_take(
+    world_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["guidance", "fit", "--world", str(world_path), "--out", str(tmp_path / "a")]
+    with pytest.raises(SystemExit) as stop:
+        hcsim([*args, "--grouping", "job_family"])
+    assert stop.value.code == 2
+    assert "can't be grouped by 'job_family'" in capsys.readouterr().err

@@ -22,14 +22,17 @@ from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.contract import role_column
 from hcsim.model.core.measures import CATEGORY_MEASURES, Measure, MeasureError
 from hcsim.model.core.transactions import TransTypeCatalog, TransTypeError
+from hcsim.model.sql.catalog import CatalogError, Use, is_org_level, require
 
 MONTH: Final = "month"
 GROUP: Final = "group"
 CATEGORY: Final = "category"
 VALUE: Final = "value"
 
-#: Supported grouping columns. Org levels resolve through dim_org.
-GROUPINGS: Final = ("cost_center", "org_level1", TOPLINE)
+#: Groupings the series support: the leaf cost center, any org level from the column catalog
+#: (`org_level1` to the deepest), and the whole population. Series are counted per cost
+#: center, so nothing finer or unrelated to the org can group them.
+GROUPINGS: Final = ("cost_center", "org_level<k>", TOPLINE)
 
 # Each category is counted by one measure, a SQL query yielding (month, cost_center, value).
 # Workforce measures read the pre-summed fact, `workforce_agg`, as the data contract intends
@@ -73,14 +76,24 @@ class Series:
         return rows.set_index(MONTH)[VALUE].sort_index()
 
 
-def _group_expression(grouping: str) -> str:
-    if grouping == "cost_center":
-        return "m.cost_center"
-    if grouping == "org_level1":
-        return "o.org_level1"
+def _group_expression(con: duckdb.DuckDBPyConnection, grouping: str) -> str:
     if grouping == TOPLINE:
         return f"'{TOPLINE_LABEL}'"
-    raise IngestionError(f"unsupported grouping {grouping!r}; known: {', '.join(GROUPINGS)}")
+    try:
+        column = require(grouping, Use.GROUP)
+    except CatalogError as error:
+        raise IngestionError(str(error)) from None
+    if column.name == "cost_center":
+        return "m.cost_center"
+    if not is_org_level(column.name):
+        raise IngestionError(
+            f"series are counted per cost center, so they can't be grouped by {grouping!r}; "
+            f"supported: {', '.join(GROUPINGS)}"
+        )
+    levels = {c[0] for c in con.execute("DESCRIBE dim_org").fetchall()}
+    if column.name not in levels:
+        raise IngestionError(f"dim_org has no {column.name!r}")
+    return column.expression
 
 
 def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Series:
@@ -92,7 +105,7 @@ def ingest(con: duckdb.DuckDBPyConnection, grouping: str = "cost_center") -> Ser
             measure.check(catalog)
     except (TransTypeError, MeasureError) as error:
         raise IngestionError(str(error)) from None
-    group = _group_expression(grouping)
+    group = _group_expression(con, grouping)
     parts = []
     for category, measure in MEASURES.items():
         sql = measure.sql(role_column(con, measure.table))

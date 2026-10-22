@@ -88,8 +88,24 @@ def test_coarser_groupings_preserve_totals(con: duckdb.DuckDBPyConnection) -> No
 
 
 def test_unsupported_groupings_are_refused(con: duckdb.DuckDBPyConnection) -> None:
-    with pytest.raises(IngestionError, match="unsupported grouping 'job_family'"):
+    with pytest.raises(IngestionError, match="can't be grouped by 'job_family'"):
         ingest(con, "job_family")
+    with pytest.raises(IngestionError, match="'team' isn't in the column catalog"):
+        ingest(con, "team")
+    with pytest.raises(IngestionError, match="'cost_type' can't group by"):
+        ingest(con, "cost_type")
+    with pytest.raises(IngestionError, match="dim_org has no 'org_level9'"):
+        ingest(con, "org_level9")
+
+
+def test_any_org_level_groups_the_series(con: duckdb.DuckDBPyConnection) -> None:
+    deepest = max(
+        (c[0] for c in con.execute("DESCRIBE dim_org").fetchall() if c[0].startswith("org_level")),
+        key=lambda c: int(c.removeprefix("org_level")),
+    )
+    leaf = ingest(con).frame.groupby(["month", "category"])["value"].sum()
+    deep = ingest(con, deepest)
+    pd.testing.assert_series_equal(deep.frame.groupby(["month", "category"])["value"].sum(), leaf)
 
 
 def test_an_empty_warehouse_is_refused(tmp_path: Path) -> None:
