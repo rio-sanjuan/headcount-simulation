@@ -15,6 +15,12 @@ what they know: the pipeline never fabricates it.
 - **Sample paths**: an array of shape (series, paths, horizon), saved beside the frame, with
   an index giving each series' group and category.
 
+An artifact records the population it was built for, as a stamp (`name@digest`), and the
+alignment target it was aligned to, if any. Wherever it carries a fill-tree parent and all of
+the parent's parts, they must agree cell by cell: a load that finds them apart is refused,
+naming the worst cells, since domains reading the parts and the parent would realize different
+counts. `combine` joins artifacts that share their identity and cover different cells.
+
 Three refusals keep a malformed artifact from loading and then silently realizing nothing:
 a date-typed `forecast_month` (every step lookup would miss), a name that isn't a guidance
 category (the series would never be read), and a negative cell (writers clamp at write time,
@@ -38,7 +44,15 @@ from numpy.typing import NDArray
 
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.categories import GuidanceCategory, parse_category
+from hcsim.model.core.fill_tree import FILL_TREE
 from hcsim.model.core.schema import SimulationSchema
+from hcsim.model.data.population import (
+    PopulationError,
+    PopulationSpec,
+    PopulationStamp,
+    guard,
+    population,
+)
 from hcsim.model.interface import ProbabilisticOutput
 
 FORECAST_MONTH: Final = "forecast_month"
@@ -54,6 +68,10 @@ FRAME_FILE: Final = "forecast.parquet"
 PATHS_FILE: Final = "paths.npy"
 SIDECAR_FILE: Final = "metadata.json"
 FORMAT_VERSION: Final = 2
+#: How far a fill-tree parent may sit from the sum of its parts, relative to its size.
+COHERENCE_TOLERANCE: Final = 1e-6
+#: Cells a coherence failure names.
+WORST_CELLS: Final = 5
 
 
 class GuidanceArtifactError(ValueError):
@@ -68,10 +86,13 @@ class GuidanceForecast:
     grouping_column: str
     snapshot_date: str
     horizon: int
+    #: The population's stamp, `name@digest`, or a built-in population's name.
     population: str | None = None
     #: (series, paths, horizon) sample paths, and each series' (group, category).
     sample_paths: NDArray[np.float64] | None = None
     path_index: tuple[tuple[str, str], ...] = ()
+    #: The digest of the alignment target the forecast was aligned to.
+    aligned_to: str | None = None
     groups: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -107,6 +128,126 @@ class GuidanceForecast:
         object.__setattr__(self, "frame", frame[required + extras].reset_index(drop=True))
         object.__setattr__(self, "groups", tuple(sorted(frame[self.grouping_column].unique())))
         self._check_paths()
+        object.__setattr__(self, "population", _stamp_text(self.population))
+        if self.aligned_to is not None and (
+            not self.aligned_to or self.aligned_to.split() != [self.aligned_to]
+        ):
+            raise GuidanceArtifactError(f"aligned_to must be a digest, not {self.aligned_to!r}")
+        self._check_coherence()
+
+    def _check_coherence(self) -> None:
+        carried = set(self.frame[CATEGORY])
+        gaps = []
+        for parent, children in FILL_TREE.items():
+            names = [parent.value, *(c.value for c in children)]
+            if not set(names) <= carried:
+                continue
+            rows = self.frame[self.frame[CATEGORY].isin(names)]
+            table = rows.pivot_table(
+                index=[FORECAST_MONTH, self.grouping_column],
+                columns=CATEGORY,
+                values=VALUE,
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            whole = table[parent.value]
+            parts = table[names[1:]].sum(axis=1)
+            gap = (whole - parts).abs()
+            bad = gap > COHERENCE_TOLERANCE * np.maximum(1.0, whole.abs())
+            flagged = gap[bad]
+            for (step, group), size, w, part in zip(
+                flagged.index,
+                flagged.to_numpy(),
+                whole[bad].to_numpy(),
+                parts[bad].to_numpy(),
+                strict=True,
+            ):
+                gaps.append(
+                    (float(size), parent.value, int(step), str(group), float(w), float(part))
+                )
+        if gaps:
+            worst = sorted(gaps, reverse=True)[:WORST_CELLS]
+            named = "; ".join(
+                f"{p} at step {t} in {g}: {w:g} against {s:g} from its parts"
+                for _, p, t, g, w, s in worst
+            )
+            raise GuidanceArtifactError(
+                f"{len(gaps)} cells where a fill-tree parent isn't the sum of its parts. "
+                f"The worst: {named}"
+            )
+
+    @property
+    def population_stamp(self) -> PopulationStamp | None:
+        return None if self.population is None else PopulationStamp.parse(self.population)
+
+    def check_population(self, expected: PopulationSpec) -> None:
+        """Refuse the artifact for a run of another population."""
+        try:
+            guard(expected, self.population, "guidance forecast")
+        except PopulationError as error:
+            raise GuidanceArtifactError(str(error)) from None
+
+    @classmethod
+    def combine(cls, artifacts: Sequence[GuidanceForecast]) -> GuidanceForecast:
+        """One artifact from several that share grouping, snapshot, horizon, population, and
+        alignment, and cover different (group, category) series."""
+        if not artifacts:
+            raise GuidanceArtifactError("nothing to combine")
+        first = artifacts[0]
+        identity = (
+            first.grouping_column,
+            first.snapshot_date,
+            first.horizon,
+            first.population,
+            first.aligned_to,
+        )
+        problems = []
+        for k, other in enumerate(artifacts[1:], start=1):
+            theirs = (
+                other.grouping_column,
+                other.snapshot_date,
+                other.horizon,
+                other.population,
+                other.aligned_to,
+            )
+            if theirs != identity:
+                problems.append(
+                    f"artifact {k} differs in grouping, snapshot, horizon, population, or alignment"
+                )
+            if list(other.frame.columns) != list(first.frame.columns):
+                problems.append(f"artifact {k} carries other columns")
+            if (other.sample_paths is None) != (first.sample_paths is None):
+                problems.append(f"artifact {k} differs in carrying sample paths")
+        series = [
+            set(zip(a.frame[a.grouping_column], a.frame[CATEGORY], strict=True)) for a in artifacts
+        ]
+        seen: set[tuple[str, str]] = set()
+        overlap: set[tuple[str, str]] = set()
+        for found in series:
+            overlap |= seen & found
+            seen |= found
+        if overlap:
+            problems.append(f"series carried twice: {sorted(overlap)[:5]}")
+        if problems:
+            raise GuidanceArtifactError("can't combine: " + "; ".join(problems))
+        paths = None
+        if first.sample_paths is not None:
+            try:
+                paths = np.concatenate(
+                    [a.sample_paths for a in artifacts if a.sample_paths is not None]
+                )
+            except ValueError:
+                raise GuidanceArtifactError("can't combine: sample paths differ in count") from None
+        return cls(
+            pd.concat([a.frame for a in artifacts], ignore_index=True),
+            first.grouping_column,
+            first.snapshot_date,
+            first.horizon,
+            first.population,
+            paths,
+            tuple(pair for a in artifacts for pair in a.path_index),
+            first.aligned_to,
+        )
 
     def _check_quantiles(self, frame: pd.DataFrame) -> list[str]:
         columns = sorted(
@@ -284,6 +425,8 @@ class GuidanceForecast:
             data["paths_shape"] = list(self.sample_paths.shape)
         if self.population is not None:
             data["population"] = self.population
+        if self.aligned_to is not None:
+            data["aligned_to"] = self.aligned_to
         return data
 
     def fingerprint(self) -> str:
@@ -327,7 +470,20 @@ class GuidanceForecast:
             meta.get("population"),
             paths,
             tuple((str(g), str(c)) for g, c in index),
+            meta.get("aligned_to"),
         )
         if artifact.fingerprint() != meta["fingerprint"]:
             raise GuidanceArtifactError("the frame doesn't match its recorded fingerprint")
         return artifact
+
+
+def _stamp_text(value: str | None) -> str | None:
+    """A population as its stamp: `name@digest` as given, or a built-in name resolved."""
+    if value is None:
+        return None
+    try:
+        if "@" in value:
+            return str(PopulationStamp.parse(value))
+        return str(population(value).stamp)
+    except PopulationError as error:
+        raise GuidanceArtifactError(str(error)) from None
