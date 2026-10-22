@@ -30,7 +30,7 @@ covariate-aware model reads the calendar of each fold's months.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 import numpy as np
@@ -132,6 +132,13 @@ class FoldScore:
     mape: float
     #: The tuned values the fold scored the model with; empty for its defaults.
     parameters: dict[str, Any]
+    #: The fold's forecast of its test months, which combination methods learn from.
+    predicted: Floats = field(default_factory=lambda: np.zeros(0))
+
+    def squared_error(self, series: Floats) -> float:
+        """The fold's mean squared error against `series`' test months."""
+        actual = series[self.train_end : self.test_end]
+        return float(np.mean((actual - self.predicted) ** 2))
 
     def as_record(self) -> dict[str, Any]:
         return {
@@ -219,7 +226,12 @@ def backtest(
         actual = series[train_end:test_end]
         scored.append(
             FoldScore(
-                train_end, test_end, wape(actual, prediction), mape(actual, prediction), parameters
+                train_end,
+                test_end,
+                wape(actual, prediction),
+                mape(actual, prediction),
+                parameters,
+                np.asarray(prediction, dtype=np.float64),
             )
         )
     return scored

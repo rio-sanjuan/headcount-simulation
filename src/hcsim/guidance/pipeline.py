@@ -150,6 +150,7 @@ class Forecast:
             scores[f"{group}/{category.value}"] = {
                 "scores": result.scores,
                 "weights": result.weights,
+                "method": result.method,
                 "folds": {m: [f.as_record() for f in fs] for m, fs in result.folds.items()},
                 "parameters": result.parameters,
             }

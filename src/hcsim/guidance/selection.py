@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.guidance.combination import COMBINERS, CombinationInputs, combine, inverse_error
 from hcsim.guidance.evaluation import (
     EvaluationConfig,
     FoldScore,
@@ -28,12 +29,11 @@ from hcsim.guidance.evaluation import (
     wape,
 )
 from hcsim.guidance.models import ForecastError
-from hcsim.guidance.registry import Entry, Registry
 from hcsim.guidance.tuning import TuningSettings
 
 Floats = NDArray[np.float64]
 
-__all__ = ["EvaluationConfig", "folds", "mape", "prepared", "score", "wape"]
+__all__ = ["COMBINERS", "EvaluationConfig", "folds", "mape", "prepared", "score", "wape"]
 
 
 @dataclass(frozen=True)
@@ -41,38 +41,19 @@ class SelectionConfig:
     suite: tuple[str, ...] = ("native.SeasonalNaive", "native.HistoricalAverage")
     top_k: int = 2
     combination: str = "inverse_error"
+    #: The methods tried, in order, when the combination method can't weigh the candidates.
+    fallbacks: tuple[str, ...] = ("equal",)
+    #: The softmax temperature, and the ridge meta-learner's penalty.
+    temperature: float = 0.1
+    ridge_alpha: float = 1.0
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     #: How to tune the models that declare a search space; none leaves their defaults.
     tuning: TuningSettings | None = None
 
 
-class Combiner(Protocol):
-    """Weights for the models that combine into a forecast, from their scores."""
-
-    def __call__(self, scores: dict[str, float], top_k: int) -> dict[str, float]: ...
-
-
 def inverse_error_weights(scores: dict[str, float], top_k: int) -> dict[str, float]:
-    """Keep the `top_k` lowest scores, weighted by inverse error.
-
-    Perfect scores share the weight equally. With no finite score, every model shares it.
-    """
-    ranked = sorted(scores, key=lambda name: (scores[name], name))[: max(1, top_k)]
-    perfect = [name for name in ranked if scores[name] == 0.0]
-    if perfect:
-        return {name: 1.0 / len(perfect) for name in perfect}
-    finite = [name for name in ranked if np.isfinite(scores[name])]
-    if not finite:
-        return {name: 1.0 / len(ranked) for name in ranked}
-    inverse = {name: 1.0 / scores[name] for name in finite}
-    total = sum(inverse.values())
-    return {name: w / total for name, w in inverse.items()}
-
-
-#: The combination methods a configuration can name.
-COMBINERS: Registry[Combiner] = Registry(
-    "combination method", (Entry("inverse_error", lambda: inverse_error_weights),)
-)
+    """Inverse-error weights for the `top_k` best of `scores` (see `combination`)."""
+    return inverse_error(CombinationInputs(scores, {}, np.zeros(0), top_k))
 
 
 @dataclass(frozen=True)
@@ -84,6 +65,8 @@ class SeriesForecast:
     folds: dict[str, list[FoldScore]] = field(default_factory=dict)
     #: The tuned values each selected model refit with; empty for its defaults.
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The combination method that weighed the forecast: the configured one, or a fallback.
+    method: str = "inverse_error"
 
 
 def forecast(
@@ -110,7 +93,10 @@ def forecast(
         for name in config.suite
     }
     scores = {name: score_of(f, evaluation.metric) for name, f in scored.items()}
-    weights = COMBINERS.build(config.combination)(scores, config.top_k)
+    inputs = CombinationInputs(
+        scores, scored, history, config.top_k, config.temperature, config.ridge_alpha
+    )
+    weights, method = combine(inputs, config.combination, config.fallbacks)
     forecasts, parameters = {}, {}
     for name in weights:
         values = (
@@ -131,4 +117,4 @@ def forecast(
     combined = np.zeros(horizon)
     for name, weight in weights.items():
         combined += weight * forecasts[name]
-    return SeriesForecast(combined, scores, weights, scored, parameters)
+    return SeriesForecast(combined, scores, weights, scored, parameters, method)
