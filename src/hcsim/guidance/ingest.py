@@ -78,6 +78,8 @@ class Series:
     frame: pd.DataFrame
     grouping: str
     snapshot: pd.Period
+    #: The months in which any measure had any row, whatever its count.
+    observed: tuple[pd.Period, ...] = ()
 
     @property
     def groups(self) -> list[str]:
@@ -88,6 +90,12 @@ class Series:
         """The categories the series carry, in the categories' declared order."""
         carried = set(self.frame[CATEGORY])
         return [c for c in GuidanceCategory if c.value in carried]
+
+    @property
+    def keys(self) -> list[tuple[str, GuidanceCategory]]:
+        """Each series' (group, category), by group and then the categories' declared order."""
+        present = set(zip(self.frame[GROUP], self.frame[CATEGORY], strict=True))
+        return [(g, c) for g in self.groups for c in self.categories if (g, c.value) in present]
 
     def values(self, group: str, category: GuidanceCategory) -> pd.Series:
         rows = self.frame[(self.frame[GROUP] == group) & (self.frame[CATEGORY] == category.value)]
@@ -136,6 +144,15 @@ def problems(
     if missing:
         return [f"the source has no {', '.join(missing)}: ingestion reads {', '.join(TABLES)}"]
     found = []
+    (count, example) = con.execute(
+        "SELECT count(*), min(period) FROM workforce_agg "
+        "WHERE CAST(period AS DATE) <> last_day(CAST(period AS DATE))"
+    ).fetchone() or (0, None)
+    if count:
+        found.append(
+            f"{count} rows of workforce_agg have a period that isn't a month end, such as "
+            f"{example}: the aggregate fact is counted at month ends"
+        )
     try:
         catalog = TransTypeCatalog.from_warehouse(con)
         used = con.execute("SELECT DISTINCT trans_type FROM workforce_agg").fetchall()
@@ -180,8 +197,9 @@ def ingest(
     raw[CATEGORY] = raw[CATEGORY].map(names)
     raw[MONTH] = pd.to_datetime(raw[MONTH]).dt.to_period("M")
 
-    # The snapshot is the last month any measure observed. Later months are trimmed.
+    # The snapshot is the last month any measure counted anything. Later months are trimmed.
     snapshot = raw.loc[raw[VALUE] > 0, MONTH].max()
+    observed = tuple(sorted(m for m in raw[MONTH].unique() if m <= snapshot))
     months = pd.period_range(raw[MONTH].min(), snapshot, freq="M")
     groups = sorted(raw["group"].dropna().unique())
     grid = pd.MultiIndex.from_product(
@@ -195,7 +213,7 @@ def ingest(
         .reset_index()
     )
     frame = _compose(frame, categories)
-    return Series(frame, grouping, snapshot)
+    return Series(frame, grouping, snapshot, observed)
 
 
 def _compose(frame: pd.DataFrame, categories: Sequence[GuidanceCategory]) -> pd.DataFrame:

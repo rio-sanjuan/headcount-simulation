@@ -3,13 +3,14 @@
 The pipeline runs as ordered steps over a shared context (see `framework`):
 
 1. **ingest** reads the warehouse into monthly series per group and category, composing an
-   inner fill-tree node from its leaves, with the calendar covariates for the history and the
-   horizon;
-2. **forecast** gives every series long enough a combined benchmark forecast;
-3. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
+   inner fill-tree node from its leaves;
+2. **validate** settles the series: the snapshot, the feed's gaps, and the all-zero series (see
+   `validation`), and gives the calendar covariates for the history and the horizon;
+3. **forecast** gives every series long enough a combined benchmark forecast;
+4. **reconcile**, when the configuration asks for it, reconciles each group's flows to its
    headcount anchor. The lite identity carries hires and attrition only, so it's partial
    wherever people move between groups, and the report says so;
-4. **format** writes the artifact. Negative cells are clamped to zero there, and the report
+5. **format** writes the artifact. Negative cells are clamped to zero there, and the report
    counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
@@ -28,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from hcsim.guidance import ingest as ingestion
+from hcsim.guidance import validation
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
@@ -57,7 +59,7 @@ class PipelineResult:
 class Ingest:
     name: str = "ingest"
     needs: tuple[str, ...] = ("source", "config")
-    gives: tuple[str, ...] = ("series", "covariates")
+    gives: tuple[str, ...] = ("series",)
 
     def validate(self, ctx: Context) -> list[str]:
         config = ctx["config"]
@@ -81,7 +83,36 @@ class Ingest:
             categories=[c.value for c in series.categories],
             counted=[c.value for c in ingestion.counted(config.categories)],
         )
-        return {"series": series, "covariates": covariates(series, config.horizon)}
+        return {"series": series}
+
+
+@dataclass(frozen=True)
+class Validate:
+    """Settle the series: the snapshot, the gaps, and the all-zero series, with the calendar
+    covariates for the history and the horizon."""
+
+    name: str = "validate"
+    needs: tuple[str, ...] = ("series", "config")
+    gives: tuple[str, ...] = ("series", "covariates")
+
+    def validate(self, ctx: Context) -> list[str]:
+        rules = ctx["config"].validation
+        return validation.problems(ctx["series"], rules.snapshot, rules.gaps)
+
+    def execute(self, ctx: Context) -> Mapping[str, Any]:
+        config = ctx["config"]
+        rules = config.validation
+        settled = validation.validate(ctx["series"], rules.snapshot, rules.drop_all_zero)
+        ctx.note(
+            self.name,
+            snapshot=str(settled.series.snapshot),
+            gaps=[str(m) for m in settled.gaps],
+            dropped=[{"group": g, "category": c} for g, c in settled.dropped],
+        )
+        return {
+            "series": settled.series,
+            "covariates": covariates(settled.series, config.horizon),
+        }
 
 
 @dataclass(frozen=True)
@@ -99,21 +130,18 @@ class Forecast:
         forecasts: Forecasts = {}
         scores: dict[str, dict[str, Any]] = {}
         skipped: list[dict[str, str]] = []
-        for group in series.groups:
-            for category in series.categories:
-                values = series.values(group, category).to_numpy()
-                try:
-                    result = forecast(values, config.horizon, config.selection)
-                except ForecastError as error:
-                    skipped.append(
-                        {"group": group, "category": category.value, "reason": str(error)}
-                    )
-                    continue
-                forecasts[group, category] = result.values
-                scores[f"{group}/{category.value}"] = {
-                    "scores": result.scores,
-                    "weights": result.weights,
-                }
+        for group, category in series.keys:
+            values = series.values(group, category).to_numpy()
+            try:
+                result = forecast(values, config.horizon, config.selection)
+            except ForecastError as error:
+                skipped.append({"group": group, "category": category.value, "reason": str(error)})
+                continue
+            forecasts[group, category] = result.values
+            scores[f"{group}/{category.value}"] = {
+                "scores": result.scores,
+                "weights": result.weights,
+            }
         ctx.note(self.name, series_skipped=skipped, selection=scores)
         return {"forecasts": forecasts}
 
@@ -197,7 +225,7 @@ class Format:
 def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(),) if config.reconcile else ()
-    return Pipeline((Ingest(), Forecast(), *middle, Format()))
+    return Pipeline((Ingest(), Validate(), Forecast(), *middle, Format()))
 
 
 def run(
@@ -211,11 +239,15 @@ def run(
     sections = ctx.report
     report = {
         "fingerprint": artifact.fingerprint(),
-        "snapshot": sections["ingest"]["snapshot"],
+        "snapshot": sections["validate"]["snapshot"],
         "grouping": config.grouping,
         "series_forecast": len(ctx["forecasts"]),
         "series_skipped": sections["forecast"]["series_skipped"],
         "clamped_negative_cells": sections["format"]["clamped_negative_cells"],
+        "validation": {
+            "gaps": sections["validate"]["gaps"],
+            "dropped": sections["validate"]["dropped"],
+        },
         "reconciliation": {
             "identity": "partial",
             "missing_terms": list(MISSING_TERMS),
