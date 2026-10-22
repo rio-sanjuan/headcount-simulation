@@ -114,6 +114,13 @@ class Registry[T]:
                 )
         return found
 
+    def factory(self, name: str) -> Callable[[], T]:
+        """What builds `name`, which for a model is its class."""
+        problems = self.problems([name]) if name not in self._entries else []
+        if problems:
+            raise RegistryError(problems[0])
+        return self._entries[name].factory
+
     def build(self, name: str) -> T:
         problems = self.problems([name])
         if problems:

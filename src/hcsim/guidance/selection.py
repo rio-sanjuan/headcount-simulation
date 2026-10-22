@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.guidance.baselines import ExposureModel
+from hcsim.guidance.capabilities import CovariateModel, ExposureModel
 from hcsim.guidance.models import Forecaster, ForecastError, build
 from hcsim.guidance.registry import Entry, Registry
 
@@ -63,27 +64,46 @@ def wape(actual: Floats, forecast: Floats) -> float:
     return error / denominator
 
 
-def prepared(name: str, past: Floats | None, future: Floats | None) -> Forecaster:
-    """The model `name`, given the exposure when it models a share of one."""
+def prepared(
+    name: str,
+    past: Floats | None,
+    future: Floats | None,
+    calendar: pd.DataFrame | None = None,
+    months: int = 0,
+    horizon: int = 0,
+) -> Forecaster:
+    """The model `name`, given the exposure when it models a share of one, and the calendar
+    covariates it reads, when it reads any: the first `months` rows of `calendar` for its
+    history, and the `horizon` after them for its forecast."""
     model = build(name)
     if isinstance(model, ExposureModel):
         if past is None:
             raise ForecastError(f"{name} models a share of an exposure, and this series has none")
         model.expose(past, future)
+    columns = list(getattr(model, "COVARIATES", ()))
+    if columns and calendar is not None and isinstance(model, CovariateModel):
+        values = calendar[columns].to_numpy(dtype=np.float64)
+        ahead = values[months : months + horizon]
+        model.provide(values[:months], ahead if len(ahead) == horizon else None)
     return model
 
 
 def score(
-    name: str, series: Floats, config: EvaluationConfig, exposure: Floats | None = None
+    name: str,
+    series: Floats,
+    config: EvaluationConfig,
+    exposure: Floats | None = None,
+    calendar: pd.DataFrame | None = None,
 ) -> float:
     """Mean WAPE across folds. A model that fails a fold loses that fold. A model of a share
-    is scored on the exposure each fold's test months realized."""
+    is scored on the exposure each fold's test months realized, and a covariate-aware model
+    reads the calendar of each fold's months."""
     scores = []
     for train_end, test_end in folds(len(series), config):
         past = None if exposure is None else exposure[:train_end]
         future = None if exposure is None else exposure[train_end:test_end]
         try:
-            model = prepared(name, past, future)
+            model = prepared(name, past, future, calendar, train_end, test_end - train_end)
             prediction = model.fit(series[:train_end]).predict(test_end - train_end)
         except ForecastError:
             continue
@@ -133,22 +153,26 @@ def forecast(
     config: SelectionConfig,
     exposure: Floats | None = None,
     future_exposure: Floats | None = None,
+    calendar: pd.DataFrame | None = None,
 ) -> SeriesForecast:
     """Evaluate the suite, select, refit on the full history, and combine. `exposure` is the
     series' exposure, such as its group's headcount, and `future_exposure` its forecast, for
-    the models of a share. A selected model that can't refit leaves the combination, and the
-    rest share its weight."""
+    the models of a share. `calendar` holds the calendar covariates from the history's first
+    month through the horizon, for the models that read them. A selected model that can't
+    refit leaves the combination, and the rest share its weight."""
     history = np.asarray(series, dtype=np.float64)
     if len(history) < config.evaluation.min_length:
         raise ForecastError(
             f"a series needs {config.evaluation.min_length} months; this one has {len(history)}"
         )
-    scores = {name: score(name, history, config.evaluation, exposure) for name in config.suite}
+    scores = {
+        name: score(name, history, config.evaluation, exposure, calendar) for name in config.suite
+    }
     weights = COMBINERS.build(config.combination)(scores, config.top_k)
     forecasts = {}
     for name in weights:
         try:
-            model = prepared(name, exposure, future_exposure)
+            model = prepared(name, exposure, future_exposure, calendar, len(history), horizon)
             forecasts[name] = model.fit(history).predict(horizon)
         except ForecastError:
             continue

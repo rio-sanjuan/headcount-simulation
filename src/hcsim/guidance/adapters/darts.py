@@ -6,7 +6,8 @@ Each model registers as `darts.<Name>`:
 - the statistical models: `ExponentialSmoothing`, with a monthly season, `Theta`, `FFT`, and
   `KalmanForecaster`;
 - the regression models on the last year's lags: `LightGBMModel` and
-  `LinearRegressionModel`. They're the covariate-aware options;
+  `LinearRegressionModel`. They're the covariate-aware options: given the calendar, they read
+  the working-day count (`weekdays`) as a future covariate at lag 0;
 - the deep models, `NBEATSModel` and `TFTModel`, which need PyTorch and so come only with the
   `darts-deep` extra, the one place PyTorch enters. They train on CPU, seeded, without
   progress bars or loggers.
@@ -26,6 +27,7 @@ from typing import Any, ClassVar, Final
 import numpy as np
 
 from hcsim.guidance.adapters.base import Floats, LibraryModel, adapted
+from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.registry import Entry
 from hcsim.model.interface import ProbabilisticOutput
 
@@ -71,6 +73,8 @@ class Spec:
     scaled: bool = False
     #: The samples whose median is its point forecast; one for a model that forecasts a mean.
     samples: int = 1
+    #: The calendar covariates it reads as future covariates, at lag 0.
+    covariates: tuple[str, ...] = ()
 
 
 #: Each adapted model's spec, by the library's name for it.
@@ -81,9 +85,15 @@ MODELS: Final[Mapping[str, Spec]] = MappingProxyType(
         "FFT": Spec({"nr_freqs_to_keep": 10}, _POINT, SEASON),
         "KalmanForecaster": Spec({"dim_x": 4}, _PATHS, SEASON),
         "LightGBMModel": Spec(
-            {"lags": SEASON, "random_state": SEED, "verbose": -1}, _POINT, 2 * SEASON, "lightgbm"
+            {"lags": SEASON, "random_state": SEED, "verbose": -1},
+            _POINT,
+            2 * SEASON,
+            "lightgbm",
+            covariates=("weekdays",),
         ),
-        "LinearRegressionModel": Spec({"lags": SEASON}, _POINT, 2 * SEASON),
+        "LinearRegressionModel": Spec(
+            {"lags": SEASON}, _POINT, 2 * SEASON, covariates=("weekdays",)
+        ),
         "NBEATSModel": Spec(dict(_DEEP), _POINT, 36, "torch", scaled=True),
         "TFTModel": Spec(
             {**_DEEP, "add_relative_index": True}, _QUANTILES, 36, "torch", True, samples=200
@@ -99,6 +109,14 @@ class DartsModel(LibraryModel):
 
     SPEC: ClassVar[Spec]
 
+    def _covariates(self) -> Any:
+        """The covariates as one series over the history and, when given, the horizon."""
+        assert self.past_covariates is not None
+        rows = self.past_covariates
+        if self.future_covariates is not None:
+            rows = np.concatenate([rows, self.future_covariates])
+        return importlib.import_module("darts").TimeSeries.from_values(rows)
+
     def _fit(self, values: Floats) -> Any:
         series = importlib.import_module("darts").TimeSeries.from_values(values)
         scaler = None
@@ -106,12 +124,26 @@ class DartsModel(LibraryModel):
             transformers = importlib.import_module("darts.dataprocessing.transformers")
             scaler = transformers.Scaler()
             series = scaler.fit_transform(series)
-        model = getattr(importlib.import_module("darts.models"), self.MODEL)(**self.ARGUMENTS)
-        model.fit(series)
+        arguments = dict(self.ARGUMENTS)
+        if self.covariates_given:
+            arguments["lags_future_covariates"] = [0]
+        model = getattr(importlib.import_module("darts.models"), self.MODEL)(**arguments)
+        if self.covariates_given:
+            model.fit(series, future_covariates=self._covariates())
+        else:
+            model.fit(series)
         return model, scaler
 
     def _predict(self, fitted: Any, horizon: int) -> Any:
         model, scaler = fitted
+        if self.covariates_given:
+            future = self.future_covariates
+            if future is None or len(future) < horizon:
+                raise ForecastError(
+                    f"{self.NAME} needs its covariates for the {horizon} months ahead"
+                )
+            forecast = model.predict(horizon, future_covariates=self._covariates())
+            return np.asarray(forecast.values()).ravel()
         samples = self.SPEC.samples
         forecast = (
             model.predict(horizon, num_samples=samples) if samples > 1 else model.predict(horizon)
@@ -124,7 +156,15 @@ class DartsModel(LibraryModel):
 
 
 def _adapter(model: str, spec: Spec) -> type[DartsModel]:
-    cls = adapted(DartsModel, NAMESPACE, model, spec.arguments, spec.outputs, spec.min_months)
+    cls = adapted(
+        DartsModel,
+        NAMESPACE,
+        model,
+        spec.arguments,
+        spec.outputs,
+        spec.min_months,
+        spec.covariates,
+    )
     cls.SPEC = spec
     return cls
 

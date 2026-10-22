@@ -20,7 +20,7 @@ imported when a model first fits. Fitting, forecasting, and failing work as for 
 from __future__ import annotations
 
 import importlib
-from typing import Any, ClassVar, Final, Protocol, Self, runtime_checkable
+from typing import Any, ClassVar, Final, Self
 
 import numpy as np
 
@@ -33,14 +33,6 @@ SEASON: Final = 12
 EPSILON: Final = 1e-4
 _POINT = frozenset({ProbabilisticOutput.NONE})
 _PARAMETRIC = frozenset({ProbabilisticOutput.NONE, ProbabilisticOutput.PARAMETRIC})
-
-
-@runtime_checkable
-class ExposureModel(Protocol):
-    """A model of a share of an exposure. Before it fits, it's given the exposure's history,
-    as long as the series', and the exposure's values for the months it will forecast."""
-
-    def expose(self, past: Floats, future: Floats | None) -> None: ...
 
 
 def _arima(values: Floats) -> Any:

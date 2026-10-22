@@ -33,7 +33,7 @@ from hcsim.guidance import validation
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
 from hcsim.guidance.framework import Context, Pipeline
-from hcsim.guidance.models import ForecastError
+from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS
 from hcsim.guidance.selection import forecast
 from hcsim.guidance.sources import Source, SourceError, as_source
@@ -119,7 +119,7 @@ class Validate:
 @dataclass(frozen=True)
 class Forecast:
     name: str = "forecast"
-    needs: tuple[str, ...] = ("series", "config")
+    needs: tuple[str, ...] = ("series", "covariates", "config")
     gives: tuple[str, ...] = ("forecasts",)
 
     def validate(self, ctx: Context) -> list[str]:
@@ -138,8 +138,11 @@ class Forecast:
             if category is not ANCHOR and (group, ANCHOR) in keys:
                 exposure = series.values(group, ANCHOR).to_numpy()
                 future = forecasts.get((group, ANCHOR))
+            calendar = ctx["covariates"]
             try:
-                result = forecast(values, config.horizon, config.selection, exposure, future)
+                result = forecast(
+                    values, config.horizon, config.selection, exposure, future, calendar
+                )
             except ForecastError as error:
                 skipped.append({"group": group, "category": category.value, "reason": str(error)})
                 continue
@@ -148,7 +151,8 @@ class Forecast:
                 "scores": result.scores,
                 "weights": result.weights,
             }
-        ctx.note(self.name, series_skipped=skipped, selection=scores)
+        suite = {name: capabilities(name).as_record() for name in config.selection.suite}
+        ctx.note(self.name, series_skipped=skipped, selection=scores, capabilities=suite)
         return {"forecasts": forecasts}
 
 
@@ -260,6 +264,7 @@ def run(
             "max_abs_residual": sections.get("reconcile", {}).get("max_abs_residual", 0.0),
         },
         "selection": sections["forecast"]["selection"],
+        "capabilities": sections["forecast"]["capabilities"],
         "steps": [
             {"step": r.step, "gave": list(r.gave), "seconds": round(r.seconds, 6)}
             for r in ctx.records

@@ -11,12 +11,12 @@ import pytest
 
 from hcsim.guidance.baselines import (
     BASELINES,
-    ExposureModel,
     LogCountARIMA,
     LogitRateARIMA,
     NegativeBinomialGLM,
     PoissonGLM,
 )
+from hcsim.guidance.capabilities import ExposureModel
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.errors import ForecastError
 from hcsim.guidance.models import MODELS, build
