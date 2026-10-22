@@ -8,7 +8,7 @@ import pytest
 from hcsim.model.interface import GroupRateModel
 from hcsim.model.ml.entity import ModelNotFittedError
 from hcsim.model.ml.generative import ATTRIBUTES, EmpiricalAttributeGenerator
-from hcsim.model.ml.group import BackfillRateModel, PoissonGrowthModel
+from hcsim.model.ml.group import BackfillRateModel, NegativeBinomialGrowthModel, PoissonGrowthModel
 from tests.support.stat_check import mean_se, stat_check
 
 
@@ -116,3 +116,64 @@ def test_the_generator_refuses_bad_inputs() -> None:
         )
     with pytest.raises(ModelNotFittedError):
         EmpiricalAttributeGenerator().sample(0, 1, rng())
+
+
+# --- negative-binomial growth ---------------------------------------------------------------------
+
+
+def growth_history(months: int = 600) -> np.ndarray:
+    """Group 0 overdispersed (shape 2, mean 5); group 1 Poisson (mean 3); group 2 seen twice."""
+    rng = np.random.default_rng(11)
+    nb = rng.negative_binomial(2.0, 2.0 / (2.0 + 5.0), months)
+    poisson = rng.poisson(3.0, months)
+    thin = np.zeros(months)
+    return np.column_stack([nb, poisson, thin]).astype(np.float64)
+
+
+def test_shapes_come_from_the_moments_with_poisson_and_pooled_fallbacks() -> None:
+    counts = growth_history()
+    observed = np.ones_like(counts, dtype=bool)
+    observed[2:, 2] = False
+    model = NegativeBinomialGrowthModel(3, min_months=6).fit(counts, observed)
+    assert isinstance(model, GroupRateModel)
+    assert model.rate_for(0) == pytest.approx(5.0, rel=0.1)
+    assert model.shape_for(0) == pytest.approx(2.0, rel=0.25)
+    assert model.shape_for(1) == np.inf or model.shape_for(1) > 20  # Poisson-like
+    assert model.rate_for(2) == model.pooled  # too few months: pooled
+    assert model.shape_for(2) == model.shape_for(-1)  # and the pooled shape
+    assert model.shapes(np.array([0, -1, 9])).tolist()[1:] == [model.shape_for(-1)] * 2
+
+
+def test_draws_reproduce_each_group_s_mean_and_spread() -> None:
+    model = NegativeBinomialGrowthModel(3).fit(growth_history())
+    rng = np.random.default_rng(5)
+    draws = model.sample(np.repeat([0, 1], 20_000), rng).reshape(2, -1)
+    for g in (0, 1):
+        mean, shape = model.rate_for(g), model.shape_for(g)
+        variance = mean + (mean**2 / shape if np.isfinite(shape) else 0.0)
+        stat_check(
+            float(draws[g].mean()),
+            mean,
+            float(np.sqrt(variance / draws.shape[1])),
+            label=f"group {g} mean",
+        )
+    assert draws[0].var() > 2 * draws[0].mean()  # overdispersed
+
+
+def test_a_group_with_no_events_is_poisson_at_zero() -> None:
+    model = NegativeBinomialGrowthModel(1).fit(np.zeros((12, 1)))
+    assert model.rate_for(0) == 0.0
+    assert model.shape_for(0) == np.inf
+    assert model.sample(np.zeros(5, np.int64), np.random.default_rng(1)).tolist() == [0] * 5
+
+
+def test_bad_growth_histories_are_refused() -> None:
+    model = NegativeBinomialGrowthModel(2)
+    with pytest.raises(ValueError, match="must be \\(months, 2\\)"):
+        model.fit(np.zeros((3, 1)))
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        model.fit(-np.ones((3, 2)))
+    with pytest.raises(ValueError, match="zero observed months"):
+        model.fit(np.zeros((3, 2)), np.zeros((3, 2), dtype=bool))
+    with pytest.raises(ModelNotFittedError):
+        NegativeBinomialGrowthModel(2).shape_for(0)
