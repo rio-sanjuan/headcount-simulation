@@ -186,22 +186,55 @@ class AttritionTruth:
         return found
 
 
+def by_age(table: tuple[float, ...], age_months: NDArray[np.integer]) -> NDArray[np.float64]:
+    """A monthly hazard by a requisition's age in months: the table's last entry holds for
+    every older age."""
+    values = np.asarray(table, dtype=np.float64)
+    result: NDArray[np.float64] = values[np.minimum(np.asarray(age_months), len(values) - 1)]
+    return result
+
+
 @dataclass(frozen=True)
 class RequisitionTruth:
+    """Requisition channels: the monthly hazards by age in months (0, 1, 2, then 3 and older)
+    that an opening fills externally or by transfer, and that a requisition exits unfilled.
+    Internal candidates are tried early, external fills peak in the second and third months,
+    and stale requisitions are cancelled more often. Invented, round values."""
+
     growth_level_mix: dict[int, float] = field(default_factory=lambda: {1: 0.5, 2: 0.3, 3: 0.2})
-    #: Monthly external-fill hazard by age in months: 0, 1, 2, then 3 and older.
     external_fill_hazard: tuple[float, ...] = (0.15, 0.30, 0.30, 0.25)
-    transfer_fill_hazard: float = 0.06
-    unfilled_exit_hazard: float = 0.04
+    transfer_fill_hazard: tuple[float, ...] = (0.10, 0.08, 0.05, 0.03)
+    unfilled_exit_hazard: tuple[float, ...] = (0.01, 0.02, 0.04, 0.08)
     #: A transfer candidate shares the family and sits within this many levels.
     transfer_level_band: int = 1
 
     def external_hazard(self, age_months: int) -> float:
-        return self.external_fill_hazard[min(age_months, len(self.external_fill_hazard) - 1)]
+        return float(by_age(self.external_fill_hazard, np.array([age_months]))[0])
 
     def external_hazards(self, age_months: NDArray[np.integer]) -> NDArray[np.float64]:
-        table = np.asarray(self.external_fill_hazard, dtype=np.float64)
-        return table[np.minimum(np.asarray(age_months), len(table) - 1)]
+        return by_age(self.external_fill_hazard, age_months)
+
+    def problems(self, conversion: tuple[float, ...]) -> list[str]:
+        found = []
+        tables = {
+            "external_fill_hazard": self.external_fill_hazard,
+            "transfer_fill_hazard": self.transfer_fill_hazard,
+            "unfilled_exit_hazard": self.unfilled_exit_hazard,
+        }
+        for name, table in tables.items():
+            if not table or not all(0 <= h <= 1 for h in table):
+                found.append(f"requisitions.{name} needs hazards in [0, 1]")
+        if found or not conversion:
+            return found or ["movements.conversion_fill_hazard needs at least one hazard"]
+        ages = np.arange(max(len(t) for t in (*tables.values(), conversion)))
+        fills = (
+            by_age(self.external_fill_hazard, ages)
+            + by_age(self.transfer_fill_hazard, ages)
+            + by_age(conversion, ages)
+        )
+        if (fills > 1).any():
+            found.append("an opening's external, transfer, and conversion hazards exceed 1")
+        return found
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -374,8 +407,9 @@ class MovementTruth:
     contingent_start_rate: float = 0.005
     contingent_end_hazard: float = 0.06
     conversion_out_hazard: float = 0.0008
-    #: The monthly chance an open requisition fills by converting a contingent worker.
-    conversion_fill_hazard: float = 0.03
+    #: The monthly chance, by age as for the other channels, that an opening fills by
+    #: converting a contingent worker.
+    conversion_fill_hazard: tuple[float, ...] = (0.04, 0.03, 0.02, 0.02)
     #: A converting worker shares the requisition's family and sits within this many levels.
     conversion_level_band: int = 1
 
@@ -389,7 +423,6 @@ class MovementTruth:
             "contingent_start_rate",
             "contingent_end_hazard",
             "conversion_out_hazard",
-            "conversion_fill_hazard",
         ):
             if not 0 <= getattr(self, name) <= 1:
                 found.append(f"movements.{name} must lie in [0, 1]")
@@ -735,6 +768,7 @@ class WorldConfig:
         problems += self.attrition.problems(len(self.ratings.scale))
         problems += self.promotions.problems(len(self.ratings.scale), self.levels)
         problems += self.movements.problems()
+        problems += self.requisitions.problems(self.movements.conversion_fill_hazard)
         problems += self.programs.problems(len(self.ratings.scale))
         problems += self.dates.problems()
         problems += self.growth.problems()

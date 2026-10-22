@@ -30,7 +30,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.synth.campus import CAMPUS, campus_month
-from hcsim.synth.config import WorldConfig
+from hcsim.synth.config import WorldConfig, by_age
 from hcsim.synth.dates import MonthDays
 from hcsim.synth.growth import LatentPlan
 from hcsim.synth.movements import MovementProcess
@@ -314,18 +314,25 @@ def simulate(
         # or by conversion.
         open_reqs = book.open_requisitions()
         open_reqs = open_reqs[book.column("req_type")[open_reqs] != CAMPUS]
-        leaving = rng.random(len(open_reqs)) < reqs.unfilled_exit_hazard
+        age = m - book.column("opened_month")[open_reqs]
+        leaving = rng.random(len(open_reqs)) < by_age(reqs.unfilled_exit_hazard, age)
         exits, staying = open_reqs[leaving], open_reqs[~leaving]
         book.exit(
             exits, days.sample("business", len(exits), rng, book.column("interval_start")[exits])
         )
         row = np.repeat(staying, book.column("remaining")[staying])  # one entry per opening
-        h_ext = reqs.external_hazards(m - book.column("opened_month")[row])
-        h_conv = config.movements.conversion_fill_hazard if movements is not None else 0.0
+        opening_age = m - book.column("opened_month")[row]
+        h_ext = reqs.external_hazards(opening_age)
+        h_tr = by_age(reqs.transfer_fill_hazard, opening_age)
+        h_conv = (
+            by_age(config.movements.conversion_fill_hazard, opening_age)
+            if movements is not None
+            else 0.0
+        )
         u = rng.random(len(row))
         external = u < h_ext
-        transfer = ~external & (u < h_ext + reqs.transfer_fill_hazard)
-        conversion = ~external & ~transfer & (u < h_ext + reqs.transfer_fill_hazard + h_conv)
+        transfer = ~external & (u < h_ext + h_tr)
+        conversion = ~external & ~transfer & (u < h_ext + h_tr + h_conv)
         # External hires start on the start weekday; other fills fall on business days.
         earliest = book.column("interval_start")[row]
         dates = days.sample("business", len(row), rng, earliest)
@@ -388,7 +395,7 @@ def _transfers(
         index = np.array([mover])
         old = (int(workforce.column("family")[mover]), int(workforce.column("level")[mover]))
         vacated = workforce.reassign(index, role, np.array([date]))
-        pool.move(mover, old, (family, level))
+        pool.move(mover, old, None)  # one move a month per person
         employee = workforce.column("employee_id")[index]
         backfills.open(book, employee, vacated, np.array([date]), month + 1, rng)
         taken.append(j)
