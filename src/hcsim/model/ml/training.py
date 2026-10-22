@@ -61,7 +61,15 @@ from hcsim.model.core.schema import (
 from hcsim.model.data.extracts import ROLE, Extract, Grain, extracts
 from hcsim.model.data.population import PopulationSpec
 from hcsim.model.interface import EntityModel
-from hcsim.model.ml.arms import DEFAULT_MATRIX, DEFAULT_Z, Arm, ArmMatrix, Selection, select
+from hcsim.model.ml.arms import (
+    DEFAULT_MATRIX,
+    DEFAULT_Z,
+    Arm,
+    ArmMatrix,
+    Selection,
+    lift_table,
+    select,
+)
 from hcsim.model.ml.arms import contributions as contributions_of
 from hcsim.model.ml.classifiers import (
     MAX_CATEGORIES,
@@ -310,6 +318,9 @@ class _ClassifierTask(_Task):
 
     def contributions(self, model: object) -> Floats:
         return contributions_of("classifier", labels=self.test_y, probabilities=self._scores(model))
+
+    def lift(self, model: object) -> pd.DataFrame:
+        return lift_table(self.test_y, self._scores(model))
 
     def metrics(self, model: object) -> dict[str, float | None]:
         p = self._scores(model)
@@ -609,6 +620,8 @@ class DomainResult:
     selection: Selection
     description: Mapping[str, Any]
     probe: Probe
+    #: A classifier champion's lift table over the held-out rows.
+    lift: pd.DataFrame | None = None
 
     @property
     def champion(self) -> ArmResult:
@@ -621,6 +634,8 @@ class TrainingRun:
     population: str
     schema: str
     domains: Mapping[str, DomainResult] = field(default_factory=dict)
+    #: The decision margin, in standard errors.
+    z: float = DEFAULT_Z
 
     @property
     def probes(self) -> dict[str, Probe]:
@@ -641,6 +656,7 @@ class TrainingRun:
             "split": self.split.to_dict(),
             "population": self.population,
             "schema": self.schema,
+            "z": self.z,
             "domains": {
                 name: {
                     "family": result.family,
@@ -738,8 +754,11 @@ def train(
             selection,
             task.describe(),
             task.probe(),
+            task.lift(fitted[selection.champion].model)
+            if isinstance(task, _ClassifierTask)
+            else None,
         )
-    run = TrainingRun(split, run.population, run.schema, results)
+    run = TrainingRun(split, run.population, run.schema, results, z)
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
         (root / RUN_FILE).write_text(json.dumps(run.to_dict(), indent=2, sort_keys=True) + "\n")
