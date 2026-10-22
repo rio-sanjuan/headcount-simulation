@@ -7,6 +7,13 @@ group. Rows in group UNATTRIBUTED (-1), and rows with probability 0, are never s
 
 Fractional quotas become integers by largest-remainder apportionment, which preserves the total.
 Rounding each group independently would zero every quota below 0.5 and silently lose events.
+
+Capacity-constrained assignment extends successive sampling to several columns at once, such
+as fill channels that each have a quota. Each row has a weight per column and a capacity: one
+for an employee, its openings for a requisition. A row of capacity k is k units. Every unit and
+column gets a key, `log(weight) + Gumbel`, and cells are taken in descending key order while
+their column still needs rows and their unit is free. Each column so realizes exactly its quota,
+or what's left when supply runs out, and no row exceeds its capacity.
 """
 
 from __future__ import annotations
@@ -139,3 +146,59 @@ class QuotaSampling:
         if groups is None or quota is None:
             raise SamplingError("quota sampling needs groups and a quota")
         return quota_select(probabilities, groups, quota, rng).mask
+
+
+@dataclass(frozen=True)
+class Assignment:
+    """A capacity-constrained assignment and its accounting."""
+
+    #: (rows, columns): how many of each row's capacity went to each column.
+    counts: Ints
+    quota: Ints
+    realized: Ints
+
+    @property
+    def shortfall(self) -> Ints:
+        """Quota a column couldn't fill: positive only when supply binds."""
+        return self.quota - self.realized
+
+
+def assign(
+    weights: ArrayLike,
+    quota: ArrayLike,
+    rng: np.random.Generator,
+    *,
+    capacity: ArrayLike | None = None,
+) -> Assignment:
+    """Assign up to `quota[c]` units to each column `c`, in successive-sampling order over
+    every (unit, column) cell. `weights` is (rows, columns), non-negative; a zero weight never
+    assigns. `capacity` gives each row's units, 1 by default."""
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 2:
+        raise SamplingError("weights must be (rows, columns)")
+    if not np.isfinite(w).all() or (w < 0).any():
+        raise SamplingError("weights must be finite and non-negative")
+    k = np.asarray(quota)
+    if k.shape != (w.shape[1],) or not np.issubdtype(k.dtype, np.integer) or (k < 0).any():
+        raise SamplingError("quota needs one non-negative integer per column")
+    units = np.ones(len(w), dtype=np.int64) if capacity is None else np.asarray(capacity)
+    if units.shape != (len(w),) or not np.issubdtype(units.dtype, np.integer) or (units < 0).any():
+        raise SamplingError("capacity needs one non-negative integer per row")
+    row_of = np.repeat(np.arange(len(w)), units.astype(np.int64))
+    n_units, n_columns = len(row_of), w.shape[1]
+    # One key per cell, drawn for every cell so the stream doesn't depend on eligibility.
+    with np.errstate(divide="ignore"):
+        keys = np.log(w[row_of]) + rng.gumbel(size=(n_units, n_columns))
+    unit, column = np.nonzero(np.isfinite(keys))
+    order = np.argsort(-keys[unit, column], kind="stable")
+    need = k.astype(np.int64).copy()
+    free = np.ones(n_units, dtype=bool)
+    counts = np.zeros(w.shape, dtype=np.int64)
+    for u, c in zip(unit[order].tolist(), column[order].tolist(), strict=True):
+        if need[c] and free[u]:
+            free[u] = False
+            need[c] -= 1
+            counts[row_of[u], c] += 1
+            if not need.any():
+                break
+    return Assignment(counts, k.astype(np.int64), counts.sum(axis=0))
