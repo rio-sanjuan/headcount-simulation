@@ -13,6 +13,7 @@ dependencies = [
     "pandas>=2.2,<3",
     "pydantic>=2.13",
     "pyyaml>=6.0.2",
+    "scikit-learn>=1.6",
 ]
 
 [project.scripts]
@@ -89,6 +90,11 @@ warn_unreachable = true
 
 # The Model and Financial layers carry the contracts and the accounting, so they're strict.
 # The flags are listed one by one: `strict = true` in an override applies to every module.
+# scikit-learn and joblib ship no type information.
+[[tool.mypy.overrides]]
+module = ["sklearn.*", "joblib.*"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["hcsim.model.*", "hcsim.financial.*"]
 disallow_any_generics = true

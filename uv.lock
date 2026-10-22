@@ -1240,6 +1240,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "scikit-learn" },
 ]
 
 [package.optional-dependencies]
@@ -1289,6 +1290,7 @@ requires-dist = [
     { name = "prophet", marker = "extra == 'prophet'", specifier = ">=1.1.6" },
     { name = "pydantic", specifier = ">=2.13" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "scikit-learn", specifier = ">=1.6" },
     { name = "sktime", marker = "extra == 'sktime'", specifier = ">=0.38" },
 ]
 provides-extras = ["darts", "darts-deep", "sktime", "prophet", "docs"]
