@@ -532,6 +532,43 @@ class BackfillTruth:
         return found
 
 
+@dataclass(frozen=True)
+class CampusTruth:
+    """Campus hiring: a seasonal schedule at entry levels. Invented, round values.
+
+    Each `open_month`, every cost center opens campus requisitions, a Poisson count of
+    `positions_per_head` times its regular headcount, at the entry levels in `level_mix`.
+    Campus requisitions fill only through the campus channel: in each of the `start_months`,
+    an open one fills with that month's chance, as a hire starting on the start weekday.
+    Whatever is still open after the last start month exits unfilled.
+    """
+
+    open_month: int = 10
+    positions_per_head: float = 0.02
+    level_mix: dict[int, float] = field(default_factory=lambda: {1: 0.85, 2: 0.15})
+    start_months: tuple[int, ...] = (6, 7, 8)
+    fill_probability: tuple[float, ...] = (0.35, 0.5, 0.6)
+
+    def problems(self, levels: tuple[int, ...]) -> list[str]:
+        found = []
+        months = (self.open_month, *self.start_months)
+        if any(m not in range(1, 13) for m in months):
+            found.append("campus months must be calendar months 1-12")
+        if self.open_month in self.start_months:
+            found.append("campus.open_month can't also be a start month")
+        if len(self.fill_probability) != len(self.start_months) or not all(
+            0 <= p <= 1 for p in self.fill_probability
+        ):
+            found.append("campus.fill_probability needs one chance per start month")
+        if not set(self.level_mix) <= set(levels) or not np.isclose(
+            sum(self.level_mix.values()), 1
+        ):
+            found.append("campus.level_mix must be a distribution over the world's levels")
+        if self.positions_per_head < 0:
+            found.append("campus.positions_per_head must be non-negative")
+        return found
+
+
 # --- the world --------------------------------------------------------------------------------
 
 
@@ -599,6 +636,7 @@ class WorldConfig:
     dates: DateTruth = field(default_factory=DateTruth)
     growth: GrowthTruth = field(default_factory=GrowthTruth)
     backfill: BackfillTruth = field(default_factory=BackfillTruth)
+    campus: CampusTruth = field(default_factory=CampusTruth)
 
     def __post_init__(self) -> None:
         problems = []
@@ -663,6 +701,7 @@ class WorldConfig:
         problems += self.dates.problems()
         problems += self.growth.problems()
         problems += self.backfill.problems(self.levels)
+        problems += self.campus.problems(self.levels)
         if "contingent" not in [group for _, group in self.accounts]:
             problems.append("accounts need a contingent account for the contingent pool")
         if problems:

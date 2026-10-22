@@ -16,7 +16,13 @@ from hcsim.synth.columns import Index, Table
 from hcsim.synth.population import ROLE_DTYPES, Roles
 
 REQ_TYPES: Final = ("backfill", "campus", "growth")
-CLOSE_REASONS: Final = ("filled_external", "filled_transfer", "unfilled", "filled_conversion")
+CLOSE_REASONS: Final = (
+    "filled_external",
+    "filled_transfer",
+    "unfilled",
+    "filled_conversion",
+    "filled_campus",
+)
 OPEN: Final = -1
 
 

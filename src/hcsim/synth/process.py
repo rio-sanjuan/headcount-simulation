@@ -14,7 +14,8 @@ Each month, in order:
    by transfer when an internal candidate exists, fill by converting a contingent worker, exit
    unfilled, or stay open. A transfer
    vacates the mover's old role, which may open a backfill of its own from the next month.
-4. The month-end stock is recorded.
+4. Campus requisitions open on their schedule and fill in their start months (see `campus`).
+5. The month-end stock is recorded.
 
 Draws are made over whole arrays. Transfers are the one sequential step: each picks a mover
 from a pool grouped by family and level, so no requisition scans the workforce.
@@ -28,6 +29,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.synth.campus import CAMPUS, campus_month
 from hcsim.synth.config import WorldConfig
 from hcsim.synth.dates import MonthDays
 from hcsim.synth.growth import LatentPlan
@@ -278,8 +280,10 @@ def simulate(
         roles = draw_roles(config, cost_centers, levels, rng)
         book.open("growth", roles, days.sample("business", len(cost_centers), rng), m)
 
-        # 3. Fills and unfilled exits. Backfills opened by transfers wait a month.
+        # 3. Fills and unfilled exits. Backfills opened by transfers wait a month, and campus
+        # requisitions fill only through their own channel.
         open_reqs = book.open_requisitions()
+        open_reqs = open_reqs[book.column("req_type")[open_reqs] != CAMPUS]
         h_ext = reqs.external_hazards(m - book.column("opened_month")[open_reqs])
         u = rng.random(len(open_reqs))
         h_conv = config.movements.conversion_fill_hazard if movements is not None else 0.0
@@ -301,6 +305,8 @@ def simulate(
         _transfers(config, workforce, book, open_reqs[transfer], dates[transfer], m, rng, backfills)
         _conversions(config, workforce, book, open_reqs[conversion], dates[conversion], rng)
         book.close(open_reqs[unfilled], dates[unfilled], "unfilled")
+        # 4. Campus: openings on the schedule, and fills in the start months.
+        campus_month(config, workforce, book, month, m, days, rng)
         workforce.snapshot(end)
         if promotions is not None:
             promotions.accrue()

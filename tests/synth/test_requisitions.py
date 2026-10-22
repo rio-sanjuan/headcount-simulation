@@ -17,10 +17,11 @@ def world() -> World:
     return generate_world(preset("tiny", seed=11))
 
 
-def test_every_hire_fills_an_external_requisition_in_its_role(world: World) -> None:
+def test_every_hire_fills_an_external_or_campus_requisition_in_its_role(world: World) -> None:
     txn, reqs = world.tables["workforce_txn"], world.tables["req_interval"]
     hires = txn[txn["trans_type"] == "HIRE"].set_index("employee_id")
-    external = reqs[reqs["close_reason"] == "filled_external"].set_index("filled_by")
+    filled = reqs["close_reason"].isin(["filled_external", "filled_campus"])
+    external = reqs[filled].set_index("filled_by")
     assert len(hires) == len(external) > 0
     joined = hires.join(external, rsuffix="_req", how="inner")
     assert len(joined) == len(hires)
@@ -46,6 +47,7 @@ def test_intervals_are_consistent(world: World) -> None:
         "filled_external",
         "filled_transfer",
         "filled_conversion",
+        "filled_campus",
         "unfilled",
     }
     filled = closed["close_reason"].str.startswith("filled")
@@ -53,7 +55,7 @@ def test_intervals_are_consistent(world: World) -> None:
     assert closed.loc[~filled, "filled_by"].isna().all()
     assert reqs["req_id"].is_unique
     assert (reqs["openings"] == 1).all()
-    assert set(reqs["req_type"]) == {"backfill", "growth"}
+    assert set(reqs["req_type"]) == {"backfill", "campus", "growth"}
 
 
 def test_the_snapshot_view_shows_requisitions_open_at_each_month_end(
