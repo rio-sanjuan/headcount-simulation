@@ -18,12 +18,13 @@ coverage.xml
 htmlcov/
 .memray/
 
-# Generated output. Only the code and SQL that produce it are tracked (plan section 6).
-data/
-outputs/
-artifacts/
-reports/
-site/
+# Generated output at the repository root. Only the code and SQL that produce it are tracked
+# (plan section 6). Anchored, so packages named `data` or `reports` stay tracked.
+/data/
+/outputs/
+/artifacts/
+/reports/
+/site/
 
 # Editors and OS
 .DS_Store
