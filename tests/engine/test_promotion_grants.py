@@ -15,8 +15,9 @@ from hcsim.engine.promotion import PROMOTION, promotion
 from hcsim.engine.results import DomainResult, Grant, RowChange
 from hcsim.engine.seeds import SeedManager
 from hcsim.financial.prices import StaticPrice
-from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.sizing import InYearPlusForward, NewHireGapFill
 from hcsim.financial.tracker import HolderLedger
+from hcsim.financial.vesting import VestTemplate
 from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn
 from hcsim.model.core.schema import AWARD_TYPE, JOB_FAMILY, SimulationSchema
 from hcsim.model.ml.entity import ConstantModel
@@ -96,7 +97,7 @@ def test_a_promotion_grant_is_sized_when_the_run_has_a_sizer() -> None:
         }
     )
     base = awards()
-    sizer = dataclasses.replace(base.new_hire, award_type="promotion")
+    sizer = dataclasses.replace(new_hire(base), award_type="promotion")
     settings = dataclasses.replace(base, promotion=sizer)
     state = initial_state()
     state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
@@ -121,7 +122,7 @@ def test_a_promotion_sizer_must_grant_promotions_the_schema_knows() -> None:
     wrong = dataclasses.replace(base, promotion=base.new_hire)
     with pytest.raises(ConfigError, match="the promotion sizer grants 'new_hire'"):
         config(awards=wrong)
-    sizer = dataclasses.replace(base.new_hire, award_type="promotion")
+    sizer = dataclasses.replace(new_hire(base), award_type="promotion")
     unknown = AwardSettings(base.new_hire, base.price_model, promotion=sizer)
     with pytest.raises(ConfigError, match="needs 'promotion' among the award types"):
         config(awards=unknown)
@@ -136,7 +137,7 @@ def test_a_promotion_sizer_the_schema_knows_is_accepted() -> None:
         }
     )
     base = awards()
-    sizer = dataclasses.replace(base.new_hire, award_type="promotion")
+    sizer = dataclasses.replace(new_hire(base), award_type="promotion")
     built = config(schema=schema, awards=dataclasses.replace(base, promotion=sizer))
     assert built.awards is not None
     assert built.awards.sizer("promotion") is sizer
@@ -146,3 +147,30 @@ def test_a_promotion_sizer_the_schema_knows_is_accepted() -> None:
 def test_an_executive_level_above_every_level_excludes_no_one() -> None:
     built = config(attrition_executive_min_level=9)
     assert built.resolved_eligibility.for_domain("attrition") == []
+
+
+def test_the_apply_step_sizes_a_promotion_in_its_calendar_month() -> None:
+    schema = SimulationSchema.build(
+        {
+            **{n: list(v.labels) for n, v in SCHEMA.vocabularies.items()},
+            AWARD_TYPE: ["new_hire", "promotion"],
+        }
+    )
+    base = awards()
+    template = VestTemplate("two", (((12, 1.0),), ((12, 1.0),)))
+    sizer = InYearPlusForward(new_hire(base).ranges, template, cycle_month=4)
+    first_year = {}
+    for month in (4, 1):
+        state = initial_state()
+        state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
+        apply(state, _promoted(), 0, schema, dataclasses.replace(base, promotion=sizer), month)
+        tranches = state.ledger.tranches()
+        first_year[month] = int(tranches.shares[tranches.vest_month == 12].sum())
+    # In April the in-year portion is a whole year; in January, the three months to April.
+    assert first_year[1] == pytest.approx(first_year[4] * 3 / 12, abs=2)
+    assert first_year[4] > 0
+
+
+def new_hire(settings: AwardSettings) -> NewHireGapFill:
+    assert isinstance(settings.new_hire, NewHireGapFill)
+    return settings.new_hire

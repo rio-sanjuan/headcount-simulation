@@ -9,7 +9,7 @@ import pytest
 from hcsim.financial.calculator import RatingTable
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.ranges import RangeError, RangeTable
-from hcsim.financial.sizing import NewHireGapFill, SizingError
+from hcsim.financial.sizing import NewHireGapFill, SizingContext, SizingError
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.financial.vesting import NEW_HIRE_TEMPLATE, VestTemplate, VestTemplateError
 from hcsim.model.core.layouts import EMPLOYEE, EmployeeColumn
@@ -198,7 +198,11 @@ def test_a_hand_computed_new_hire_grant() -> None:
 def test_existing_vests_reduce_the_gap_and_the_gap_never_goes_negative() -> None:
     strategy = NewHireGapFill(RangeTable.from_frame(range_frame(), SCHEMA))
     prices = AnnualGrowthPrice(100.0, growth_rate=1.25)
-    batch = strategy.size(recipients(), prices, np.array([[100.0, 1_000.0, 0.0, 0.0]]))
+    ledger = HolderLedger()
+    held = np.zeros((1, 72), dtype=np.int64)
+    held[0, 5], held[0, 17] = 100, 1_000  # vesting in forward years 1 and 2
+    ledger.record(np.array([0]), 0, held, 0, np.array([1]), np.array([0]))
+    batch = strategy.size(recipients(), prices, SizingContext(0, 1, ledger))
     assert batch.shares_per_year.tolist() == [[300, 0, 256, 205]]  # 50,000 - 12,500; then clipped
 
 

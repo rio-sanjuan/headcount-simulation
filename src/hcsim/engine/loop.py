@@ -439,7 +439,7 @@ def run_trajectory(
                 continue
             result = handlers[domain](state, ctx)
             cells.capture(step, DOMAIN_INDEX[domain], result, state)
-            applied = apply(state, result, step, config.schema, awards)
+            applied = apply(state, result, step, config.schema, awards, month)
             unsized[domain] += applied.unsized_grants
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")

@@ -40,7 +40,7 @@ from hcsim.engine.replay import ReplayedAwards
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel
-from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.sizing import SizingStrategy
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
@@ -237,15 +237,15 @@ ARTIFACT_DOMAINS: Final[Mapping[str, str]] = MappingProxyType({"attributes": "jo
 class AwardSettings:
     """Everything SBC needs. Required at `hcf+sbc` scope, refused at `hcf`."""
 
-    new_hire: NewHireGapFill
+    new_hire: SizingStrategy
     price_model: StockPriceModel
     expense: ExpenseConfig = field(default_factory=ExpenseConfig)
     #: Sizes promotion grants. Without it, promotions emit grants nobody sizes.
-    promotion: NewHireGapFill | None = None
+    promotion: SizingStrategy | None = None
     #: In a replay, the awards as recorded, for the grants it covers.
     replayed: ReplayedAwards | None = None
 
-    def sizer(self, award_type: str) -> NewHireGapFill | None:
+    def sizer(self, award_type: str) -> SizingStrategy | None:
         """The sizer for an award type, if the run has one."""
         sizers = {self.new_hire.award_type: self.new_hire}
         if self.promotion is not None:
