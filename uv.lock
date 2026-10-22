@@ -1235,6 +1235,7 @@ version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
+    { name = "joblib" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "pandas" },
@@ -1284,6 +1285,7 @@ requires-dist = [
     { name = "darts", marker = "extra == 'darts'", specifier = ">=0.36" },
     { name = "darts", extras = ["torch"], marker = "extra == 'darts-deep'", specifier = ">=0.36" },
     { name = "duckdb", specifier = ">=1.2" },
+    { name = "joblib", specifier = ">=1.4" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.6" },
     { name = "numpy", specifier = ">=2.2" },
     { name = "pandas", specifier = ">=2.2,<3" },
