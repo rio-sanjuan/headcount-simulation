@@ -365,8 +365,10 @@ def from_replay(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> list[Known
     """Every realized movement of a regular employee on or after the run date, as a known
     event: terminations (net of reversals), reductions, conversions out, reorganizations,
     promotions, transfers, reclassifications, and hires. A hire or transfer carries the
-    requisition it filled, the one with that channel's close nearest its date; a hire with
-    none is a boundary fill. Movements carry their new role, in raw labels."""
+    requisition it filled, the one with that channel's close nearest its date, when that close
+    falls in the run; a hire with none is a boundary fill. So is a hire whose offer was accepted
+    before the run: its opening had closed by the snapshot the seed reads, so the run never
+    holds it (see `replay`). Movements carry their new role, in raw labels."""
     codes = ", ".join(f"'{c}'" for c in REPLAYED)
     rows = con.execute(
         f"""
@@ -387,7 +389,7 @@ def from_replay(con: duckdb.DuckDBPyConnection, run_date: dt.date) -> list[Known
             FROM req_interval WHERE filled_by IS NOT NULL
         )
         SELECT m.*, (
-            SELECT f.req_id FROM fills f
+            SELECT CASE WHEN f.closed_date >= $run THEN f.req_id END FROM fills f
             WHERE f.employee_id = m.employee_id
               AND list_contains(
                   CASE m.trans_type

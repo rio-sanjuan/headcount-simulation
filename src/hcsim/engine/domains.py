@@ -85,7 +85,7 @@ class StepContext:
     #: The run's known events, resolved, and the log of those fired.
     known: ResolvedPlan | None = None
     fired: FiringLog = field(default_factory=FiringLog)
-    #: The realized requisitions a replay opens and closes.
+    #: The realized requisitions a replay keeps on history's track.
     replay: ReplayedRequisitions | None = None
     _quotas: dict[GuidanceCategory, Ints] = field(default_factory=dict)
 

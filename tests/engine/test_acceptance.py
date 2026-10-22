@@ -1,6 +1,7 @@
 """The engine's acceptance checks, on synthetic worlds.
 
-- Replay reproduces each world's month-end headcount per cost center, exactly, every month.
+- Replay reproduces each world's month-end headcount per cost center, exactly, every month,
+  and its open openings too, once the openings it reserves for accepted offers are counted.
 - A `guided_actuals` run, on guidance made of the world's realized totals, honors every quota,
   and its flows show it.
 - An unguided run's counts land within the `stat_check` bound of what its models expect, given
@@ -27,8 +28,14 @@ from hcsim.engine.known_events import KnownEvents, Source, collect, from_replay,
 from hcsim.engine.known_plan import sanitize
 from hcsim.engine.known_resolution import ResolvedPlan, jobs_from_world, resolve_plan
 from hcsim.engine.loop import DOMAIN_INDEX, SimulationResult, TrajectoryResult, simulate
-from hcsim.engine.replay import replayed_requisitions
-from hcsim.engine.seeding import opening_price, range_table_from_world, schema_from_world, seed_for
+from hcsim.engine.replay import RESERVED_OPENINGS, replayed_requisitions
+from hcsim.engine.seeding import (
+    opening_price,
+    range_table_from_world,
+    schema_from_world,
+    seed_for,
+    seed_state,
+)
 from hcsim.engine.state import SimulationState
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.sizing import NewHireGapFill
@@ -124,14 +131,22 @@ def configure(
 # --- replay fidelity ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("name", "seed", "run", "months"),
-    [("small", 6, dt.date(2025, 1, 1), 12), ("small", 11, dt.date(2024, 7, 1), 18)],
+@dataclasses.dataclass(frozen=True)
+class Replayed:
+    result: SimulationResult
+    #: (months + 1, cost centers): the realized month-end before each step, then the last's.
+    headcount: np.ndarray
+    open_openings: np.ndarray
+
+
+@pytest.fixture(
+    scope="module",
+    params=[("small", 6, dt.date(2025, 1, 1), 12), ("small", 11, dt.date(2024, 7, 1), 18)],
+    ids=lambda p: f"{p[0]}-{p[1]}",
 )
-def test_replay_reproduces_the_month_end_headcount_per_cost_center(
-    name: str, seed: int, run: dt.date, months: int, tmp_path: Path
-) -> None:
-    with connect(tmp_path / "world.duckdb", name, seed) as con:
+def replayed(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Replayed:
+    name, seed, run, months = request.param
+    with connect(tmp_path_factory.mktemp("world") / "world.duckdb", name, seed) as con:
         schema = schema_from_world(con)
         config = SimulationConfig(
             run_date=run,
@@ -149,12 +164,39 @@ def test_replay_reproduces_the_month_end_headcount_per_cost_center(
         replay = replayed_requisitions(con, schema, run, months)
         result = simulate(config, state, known=plan, replay=replay, validate=True)
         # Row k is the month-end before step k: the seed's, then each simulated month's.
-        truth = realized(con, schema, _C.HEADCOUNT, pd.Period(run, freq="M") - 1, months + 1)
-    assert truth.sum(axis=1).min() > 1_000
-    for t in result.trajectories:
-        assert np.array_equal(t.headcount, truth.astype(np.int64))
+        start = pd.Period(run, freq="M")
+        headcount = realized(con, schema, _C.HEADCOUNT, start - 1, months + 1)
+        # The stock a run starting a month later would seed.
+        openings = [
+            seed_state(con, schema, (start + k).start_time.date())[0].open_openings
+            for k in range(months + 1)
+        ]
+    return Replayed(result, headcount.astype(np.int64), np.stack(openings))
+
+
+def test_replay_reproduces_the_month_end_headcount_per_cost_center(replayed: Replayed) -> None:
+    assert replayed.headcount.sum(axis=1).min() > 1_000
+    for t in replayed.result.trajectories:
+        assert np.array_equal(t.headcount, replayed.headcount)
         assert t.known_fired["termination"] > 0
         assert int(t.flows["F_pend"].sum() + t.flows["F_bdy"].sum()) > 0
+
+
+def test_replay_reproduces_the_month_end_open_openings_per_cost_center(
+    replayed: Replayed,
+) -> None:
+    """History closes an opening when its offer is accepted, and the run when its person
+    starts, so the run's stock is history's plus the openings it holds reserved for them."""
+    truth = replayed.open_openings
+    assert truth.sum(axis=1).min() > 100
+    for t in replayed.result.trajectories:
+        reserved = t.diagnostics[RESERVED_OPENINGS]
+        assert int(reserved.sum()) > 0
+        assert np.array_equal(t.open_openings[0], truth[0])
+        assert np.array_equal(t.open_openings[1:] - reserved, truth[1:])
+    card = {m.name: m.value for m in invariants(replayed.result)}
+    assert card["headcount_identity_max_gap"] == 0
+    assert card["opening_identity_max_gap"] == 0
 
 
 # --- guided_actuals -----------------------------------------------------------------------------
