@@ -22,7 +22,7 @@ a broken tree can't load at all:
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from types import MappingProxyType
 from typing import Final
 
@@ -78,6 +78,51 @@ def leaves(category: GuidanceCategory, tree: Tree = FILL_TREE) -> list[GuidanceC
     if not children:
         return [category]
     return [leaf for child in children for leaf in leaves(child, tree)]
+
+
+def cover(
+    node: GuidanceCategory, carried: Collection[GuidanceCategory], tree: Tree = FILL_TREE
+) -> tuple[list[GuidanceCategory], list[GuidanceCategory]]:
+    """The deepest carried nodes that cover `node`'s leaves, each leaf once, and the leaves
+    they leave uncovered. Children are preferred when they cover every leaf below them; the
+    node itself when they don't and it's carried; and otherwise as much as the children can."""
+    children = tree.get(node, ())
+    if not children:
+        return ([node], []) if node in carried else ([], [node])
+    parts = [cover(child, carried, tree) for child in children]
+    terms = [t for found, _ in parts for t in found]
+    missing = [m for _, gaps in parts for m in gaps]
+    if missing and node in carried:
+        return [node], []
+    return terms, missing
+
+
+def identity_terms(
+    carried: Collection[GuidanceCategory], tree: Tree = FILL_TREE
+) -> tuple[dict[GuidanceCategory, int], list[GuidanceCategory]]:
+    """The forecast-coherency identity's terms for a forecast carrying `carried`, with their
+    signs, and the identity's flows it can't cover. Under each fill-tree root the terms are the
+    deepest carried cover, so a fill is never counted twice; every other flow term is a term
+    when carried, and missing when not."""
+    terms: dict[GuidanceCategory, int] = {}
+    missing: list[GuidanceCategory] = []
+    filled = set()
+    for root in roots(tree):
+        found, gaps = cover(root, carried, tree)
+        filled |= set(leaves(root, tree))
+        for node in found:
+            signs = {CATEGORIES[leaf].coherency_sign for leaf in leaves(node, tree)}
+            (sign,) = signs  # the fill tree's structure check keeps a node's leaves one sign
+            assert sign is not None
+            terms[node] = sign
+        missing += gaps
+    for category, spec in CATEGORIES.items():
+        if spec.coherency_sign in (1, -1) and category not in filled:
+            if category in carried:
+                terms[category] = spec.coherency_sign
+            else:
+                missing.append(category)
+    return terms, missing
 
 
 def is_leaf(category: GuidanceCategory, tree: Tree = FILL_TREE) -> bool:
