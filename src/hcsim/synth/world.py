@@ -206,14 +206,27 @@ def _pending_starts(offers: Offers, book: RequisitionBook, labels: _Labels) -> p
 
 
 def _ratings(ratings: RatingProcess, config: WorldConfig) -> pd.DataFrame:
-    """One row per employee and calibration cycle, with the rating's label and rank."""
+    """One row per employee and calibration cycle, with the rating's label, its rank on its
+    scale, and the scale it's reported on. After a scale change, cycles report the new scale."""
     c = ratings.log.collect(RATING_DTYPES)
+    truth = config.ratings
+    code = c["rating"].astype(np.int64)
+    labels = list(truth.scale)
+    revised = np.zeros(len(code), dtype=bool)
+    if truth.scale_change is not None:
+        change = truth.scale_change
+        year = c["cycle_date"].astype("datetime64[Y]").astype(np.int64) + 1970
+        revised = year >= change.first_year
+        code = np.where(revised, np.asarray(change.mapping)[code], code)
+        labels = labels + list(change.scale)
+    position = np.where(revised, code + len(truth.scale), code)
     return pd.DataFrame(
         {
             "employee_id": c["employee_id"],
             "cycle_date": c["cycle_date"].astype("datetime64[s]"),
-            "rating": _Labels.of(c["rating"], config.ratings.scale),
-            "rating_rank": c["rating"].astype(np.int64) + 1,
+            "rating": _Labels.of(position, labels),
+            "rating_rank": code + 1,
+            "rating_scale": np.where(revised, "revised", "original"),
             "is_first": c["is_first"],
         }
     )
