@@ -61,6 +61,22 @@ def test_each_dropped_event_is_counted_under_its_first_cause() -> None:
     assert plan.dropped == {"not_in_seed": 1, "duplicate": 1, "outranked": 1, "after_exit": 2}
 
 
+def test_a_joiner_s_events_count_from_the_month_after_they_start() -> None:
+    events = KnownEvents(
+        (
+            start(2, 50, 700),
+            event(T, 5, 50, Source.REPLAY),  # a realized hire who leaves later in the run
+            event(P, 2, 50),  # in their start month: dropped
+            event(P, 1, 50),  # before it: dropped
+            event(T, 4, 51),  # someone no start brings in
+        )
+    )
+    plan = sanitize(events, employees=[1], requisitions=[700])
+    kept = [(e.kind, e.step, e.employee_id) for e in plan.events.events]
+    assert kept == [(EventKind.PENDING_START, 2, 50), (T, 5, 50)]
+    assert plan.dropped == {"before_start": 2, "not_in_seed": 1}
+
+
 def test_employees_waiting_on_a_known_event_are_excluded_until_it_fires() -> None:
     plan = sanitize(
         KnownEvents((event(P, 1, 1), event(R, 4, 1), event(T, 2, 2))),

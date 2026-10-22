@@ -203,7 +203,7 @@ def draw(
     taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
     selection = quota_select(p, groups, np.maximum(quota - taken, 0), rng)
     mask = np.where(groups >= 0, selection.mask, independent)
-    record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken)
+    record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken, taken)
     return mask, {category.value: record}
 
 
@@ -379,7 +379,12 @@ def weighted_top_k(
     size = len(quota)
     eligible = np.bincount(groups[eligible_rows], weights=weights[eligible_rows], minlength=size)
     realized = np.bincount(groups[chosen], weights=weights[chosen], minlength=size)
-    record = QuotaRecord(quota, eligible.astype(np.int64), realized.astype(np.int64))
+    untaken = eligible_rows[~chosen[eligible_rows] & (weights[eligible_rows] > 0)]
+    stuck = np.bincount(groups[untaken], minlength=size) > 0  # every row left is too heavy
+    blocked = np.where(stuck, left, 0)
+    record = QuotaRecord(
+        quota, eligible.astype(np.int64), realized.astype(np.int64), blocked=blocked
+    )
     return chosen, record
 
 

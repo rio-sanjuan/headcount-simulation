@@ -79,16 +79,42 @@ class Grant:
 @dataclass(frozen=True)
 class QuotaRecord:
     """A guided draw's accounting, per group: what guidance asked, who could leave or fill,
-    and what happened. Realized is the smaller of quota and eligible."""
+    and what happened.
+
+    A draw honors its quota when it realizes the smaller of quota and eligible, with two
+    allowances. Known events fire whatever the quota, so `known`, the part of `realized` they
+    took, can pass it. And a draw that takes whole rows weighing several units, as cancellation
+    takes requisitions by their openings, stops short of the quota by `blocked`: what was left
+    of it when every eligible row still untaken was too heavy to fit.
+    """
 
     quota: Ints
     eligible: Ints
     realized: Ints
+    known: Ints = field(default_factory=_no_index)
+    blocked: Ints = field(default_factory=_no_index)
+
+    def __post_init__(self) -> None:
+        for name in ("known", "blocked"):
+            if not len(getattr(self, name)):
+                object.__setattr__(self, name, np.zeros(len(self.quota), dtype=np.int64))
 
     @property
     def shortfall(self) -> Ints:
         """What each group's quota asked for and didn't get: eligibility ran short."""
         result: Ints = np.maximum(self.quota - self.realized, 0)
+        return result
+
+    @property
+    def expected(self) -> Ints:
+        """What each group must realize to honor its quota."""
+        result: Ints = np.maximum(self.known, np.minimum(self.quota, self.eligible) - self.blocked)
+        return result
+
+    @property
+    def honored(self) -> NDArray[np.bool_]:
+        """Whether each group realized exactly what its quota asked, as far as it could."""
+        result: NDArray[np.bool_] = self.realized == self.expected
         return result
 
 

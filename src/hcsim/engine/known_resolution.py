@@ -180,22 +180,31 @@ def resolve_plan(
 
 @dataclass
 class FiringLog:
-    """The known events a run fired, by their keys."""
+    """The known events a run fired, by their keys, and the people it left out: a replayed
+    hire with no requisition, when the run makes no boundary fills, never joins, so none of
+    their later events can fire, and none is expected to."""
 
     fired: set[tuple[int, str, int, int, str]] = field(default_factory=set)
+    left_out: set[int] = field(default_factory=set)
 
     def record(self, event: KnownEvent) -> None:
         self.fired.add(event.key)
 
+    def leave_out(self, employee_id: int) -> None:
+        self.left_out.add(employee_id)
+
     def unfired(
         self, resolved: ResolvedPlan, kinds: Iterable[EventKind] | None = None
     ) -> list[KnownEvent]:
-        """The events not fired, of `kinds` (every kind by default)."""
+        """The events not fired, of `kinds` (every kind by default), but those of people the
+        run left out."""
         wanted = None if kinds is None else set(kinds)
         return [
             e.event
             for e in resolved.events
-            if e.event.key not in self.fired and (wanted is None or e.event.kind in wanted)
+            if e.event.key not in self.fired
+            and e.event.employee_id not in self.left_out
+            and (wanted is None or e.event.kind in wanted)
         ]
 
 

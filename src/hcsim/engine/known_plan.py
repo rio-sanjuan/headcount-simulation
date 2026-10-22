@@ -8,12 +8,15 @@ the first cause that drops it:
 1. `not_in_seed`: an employee event for someone the seed doesn't hold. A pending start is for
    someone joining, so it's exempt, and so is a reorganization, which brings someone in across
    the run's boundary: it's kept, marked `boundary: in`, and must carry a whole role;
-2. `duplicate`: the same kind of event for the same person in the same month as one already kept;
-3. `outranked`: another event for the same person in the same month ranks above it. Events rank
+2. `before_start`: an event for someone a pending start brings in, in or before the month they
+   start. Their later events are theirs like a seeded employee's, as when a realized hire leaves
+   during the run;
+3. `duplicate`: the same kind of event for the same person in the same month as one already kept;
+4. `outranked`: another event for the same person in the same month ranks above it. Events rank
    by their *class*, from an exit (termination, then conversion out) through the movements
    (reorganization, transfer, other movement) to promotion, and then by source, from declared
    down to replay;
-4. `after_exit`: the person has already left by an earlier event.
+5. `after_exit`: the person has already left by an earlier event.
 
 **Exclusions.** An employee with a known event still to come is excluded from every sampled
 draw up to it, so no one is sampled to leave, move, or be promoted while a known event waits
@@ -61,7 +64,7 @@ SOURCE_ORDER: Final = (
 )
 #: The kinds that take someone out of the workforce.
 EXITS: Final = frozenset({EventKind.TERMINATION, EventKind.CONVERSION_OUT})
-CAUSES: Final = ("not_in_seed", "duplicate", "outranked", "after_exit")
+CAUSES: Final = ("not_in_seed", "before_start", "duplicate", "outranked", "after_exit")
 #: The destination key that marks a reorganization across the run's boundary: `in` brings
 #: someone into the run, and `out` takes them out of it.
 BOUNDARY: Final = "boundary"
@@ -132,9 +135,18 @@ def sanitize(
     dropped = dict.fromkeys(CAUSES, 0)
     by_person: dict[int, list[KnownEvent]] = {}
     kept: list[KnownEvent] = []
+    starts: dict[int, int] = {}  # each joiner's first start month
+    for e in events.events:
+        if e.kind is EventKind.PENDING_START and e.employee_id is not None:
+            starts[e.employee_id] = min(starts.get(e.employee_id, e.step), e.step)
     for e in events.events:
         if e.employee_id is None or e.kind is EventKind.PENDING_START:
             kept.append(e)
+        elif e.employee_id not in in_seed and e.employee_id in starts:
+            if e.step > starts[e.employee_id]:
+                by_person.setdefault(e.employee_id, []).append(e)
+            else:
+                dropped["before_start"] += 1
         elif e.employee_id not in in_seed and e.kind is EventKind.REORGANIZATION:
             kept.append(dataclasses.replace(e, destination={**e.destination, BOUNDARY: "in"}))
         elif e.employee_id not in in_seed:

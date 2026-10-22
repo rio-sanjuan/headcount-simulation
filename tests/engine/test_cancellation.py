@@ -33,8 +33,11 @@ def test_a_group_never_passes_its_openings_quota(weights: list[int], quota: int,
     left = quota - int(w[chosen].sum())
     if quota >= int(w.sum()):
         assert chosen.all()
+        assert record.blocked.tolist() == [0]
     else:
         assert left < int(w.max())
+        assert record.blocked.tolist() == [left]  # every row left out is too heavy for it
+    assert record.honored.all()
 
 
 def test_rows_with_no_chance_or_no_group_are_never_taken() -> None:
