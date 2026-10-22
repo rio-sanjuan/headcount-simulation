@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pytest
@@ -160,7 +161,7 @@ def test_point_only_artifacts_declare_none() -> None:
     ("overrides", "message"),
     [
         ({"q10": [5.0, 0.0, 1.0]}, "1 rows have quantiles that fall"),
-        ({"q10": [-1.0, 0.0, 1.0]}, "1 negative quantiles; writers clamp"),
+        ({"q10": [-1.0, 0.0, 1.0]}, "1 negative quantiles, such as attrition at step 0 in CC-01"),
         ({"q50": [np.nan, 1.0, 3.0]}, "quantiles must be finite"),
         ({"distribution": ["gamma", "poisson", "normal"]}, "unknown distributions \\['gamma'\\]"),
         ({"mean": [-1.0, 1.0, 3.0]}, "means must be finite and non-negative"),
@@ -366,3 +367,39 @@ def test_combining_refuses_artifacts_that_don_t_fit() -> None:
     )
     with pytest.raises(GuidanceArtifactError, match="sample paths differ in count"):
         GuidanceForecast.combine([pathed, fewer])
+
+
+def test_negative_cells_are_named_most_negative_first() -> None:
+    with pytest.raises(GuidanceArtifactError, match="2 negative cells, such as") as error:
+        artifact(value=[2.0, -0.5, 3.0, -4.0, 0.5])
+    message = str(error.value)
+    assert message.index("hires at step 0 in CC-01 (-4)") < message.index(
+        "attrition at step 0 in CC-01 (-0.5)"
+    )
+    assert "a negative cell means a defect upstream" in message
+
+
+def test_the_loader_refuses_a_negative_cell_written_behind_its_back(tmp_path: Path) -> None:
+    """Writers clamp, so a file with a negative cell was changed after it was written. The
+    loader refuses it before the fingerprint is even checked."""
+    artifact().save(tmp_path / "a")
+    parquet = str(tmp_path / "a" / "forecast.parquet")
+    tampered = duckdb.read_parquet(parquet).df()
+    tampered.loc[0, "value"] = -3.0
+    duckdb.from_df(tampered).write_parquet(parquet)
+    with pytest.raises(
+        GuidanceArtifactError, match="1 negative cells, such as attrition at step 0"
+    ):
+        GuidanceForecast.load(tmp_path / "a")
+    paths = GuidanceForecast(
+        frame(),
+        COST_CENTER,
+        "2025-12-31",
+        12,
+        sample_paths=np.zeros((1, 2, 12)),
+        path_index=(("CC-01", "attrition"),),
+    )
+    paths.save(tmp_path / "p")
+    np.save(tmp_path / "p" / "paths.npy", -np.ones((1, 2, 12)))
+    with pytest.raises(GuidanceArtifactError, match="24 negative path values"):
+        GuidanceForecast.load(tmp_path / "p")
