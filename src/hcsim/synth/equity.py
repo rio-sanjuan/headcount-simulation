@@ -33,28 +33,34 @@ def compensation_ranges(
     levels: tuple[int, ...],
     locations: tuple[str, ...],
     truth: CompensationTruth,
+    rng: np.random.Generator | None = None,
 ) -> pd.DataFrame:
-    """A range for every family, level, and location: full coverage, no gaps."""
+    """A range for every family, level, and location, executive levels included: full
+    coverage, no gaps. With the `missing_range_share` quirk on, a share of cells is dropped."""
     rows: list[dict[str, Any]] = []
     w = truth.range_half_width
     for family in families:
         for level in levels:
-            base = truth.base_midpoint_by_level[level] * truth.family_factor[family]
-            target = base * (1 + truth.equity_share_by_level[level])
-            rows.extend(
-                {
-                    "job_family": family,
-                    "job_level": level,
-                    "location": location,
-                    "min_base": round(base * (1 - w)),
-                    "max_base": round(base * (1 + w)),
-                    "min_target": round(target * (1 - w)),
-                    "max_target": round(target * (1 + w)),
-                    "base_adj": truth.base_adjustment,
-                }
-                for location in locations
-            )
-    return pd.DataFrame(rows)
+            for i, location in enumerate(locations):
+                factor = truth.family_factor[family] * truth.location_factor(i)
+                base = truth.base_midpoint_by_level[level] * factor
+                target = base * (1 + truth.equity_share_by_level[level])
+                rows.append(
+                    {
+                        "job_family": family,
+                        "job_level": level,
+                        "location": location,
+                        "min_base": round(base * (1 - w)),
+                        "max_base": round(base * (1 + w)),
+                        "min_target": round(target * (1 - w)),
+                        "max_target": round(target * (1 + w)),
+                        "base_adj": truth.base_adjustment,
+                    }
+                )
+    frame = pd.DataFrame(rows)
+    if truth.missing_range_share > 0 and rng is not None:
+        frame = frame[rng.random(len(frame)) >= truth.missing_range_share].reset_index(drop=True)
+    return frame
 
 
 def stock_prices(

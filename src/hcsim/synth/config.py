@@ -270,6 +270,15 @@ class CompensationTruth:
     )
     range_half_width: float = 0.20
     base_adjustment: float = 1.03
+    #: Pay differs by location: the first location pays 1.0, and the others cycle through
+    #: factors within this spread either side of it.
+    location_pay_spread: float = 0.15
+    #: A quirk, off by default: drop this share of range cells, so tests can confirm that
+    #: readers refuse incomplete ranges instead of imputing them.
+    missing_range_share: float = 0.0
+
+    def location_factor(self, index: int) -> float:
+        return 1 + self.location_pay_spread * (((index + 2) % 5) - 2) / 2
 
 
 @dataclass(frozen=True)
@@ -883,6 +892,10 @@ class WorldConfig:
         ):
             if missing := sorted(levels - set(by_level)):
                 problems.append(f"{name} has no value for levels {missing}")
+        if not 0 <= self.compensation.missing_range_share < 1:
+            problems.append("compensation.missing_range_share must lie in [0, 1)")
+        if not 0 <= self.compensation.location_pay_spread < 1:
+            problems.append("compensation.location_pay_spread must lie in [0, 1)")
         if no_factor := sorted(set(self.families) - set(self.compensation.family_factor)):
             problems.append(f"compensation.family_factor has no value for {no_factor}")
         if extra := sorted(set(self.requisitions.growth_level_mix) - levels):
