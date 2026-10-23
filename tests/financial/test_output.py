@@ -112,3 +112,18 @@ def test_only_rows_whose_holder_is_inside_that_month_are_published() -> None:
     pd.testing.assert_frame_equal(whole, sbc_parts(result, t), check_exact=False)
     with pytest.raises(OutputError, match=r"one membership flag per row: \d+, not \(1,\)"):
         publish(result, np.ones(1, dtype=bool))
+
+
+def test_a_chunked_calculations_parts_keep_each_tranches_basis() -> None:
+    from hcsim.financial.expense import calculate_chunks, prepare
+    from hcsim.financial.output import combine_parts
+
+    t = ledger().tranches()
+    values = np.where(np.isnan(t.values), 10.0, t.values)
+    chunks = calculate_chunks(prepare(t, values), FLAT, first_month=0, chunk_size=1)
+    frames = []
+    for _, chunk, result in chunks:
+        assert chunk.tranches.replayed is not None
+        frames.append(sbc_parts(result, chunk.tranches))
+    pd.testing.assert_frame_equal(combine_parts(frames), parts(), check_exact=False)
+    assert set(combine_parts(frames)["basis"]) == {"replayed", "sized"}
