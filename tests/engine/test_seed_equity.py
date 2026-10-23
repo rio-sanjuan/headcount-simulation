@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from hcsim.engine.config import AwardSettings, ForecastScope, SimulationConfig
-from hcsim.engine.loop import simulate
+from hcsim.engine.loop import simulate, trajectory_expense, values_per_share
 from hcsim.engine.seed_equity import actual_sbc, offline_equity, record_seed, seed_equity
 from hcsim.engine.seeding import (
     opening_price,
@@ -129,6 +129,34 @@ def test_a_subset_runs_holders_outside_it_wait_in_scratch(con: duckdb.DuckDBPyCo
     t = state.ledger.tranches()
     live_slots = state.live_employees[:, EmployeeColumn.VEST_INDEX].astype(int)
     assert not np.isin(t.holder[scratch], live_slots).any()  # their own slots, past the buffer's
+
+
+def test_a_subset_run_publishes_only_the_sbc_of_holders_inside_it(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    config = dataclasses.replace(configured(con), num_trajectories=1)
+    subset = SubsetSpec({"cost_center": frozenset({"CC-01", "CC-02"})})
+    state, report = seed_for(con, config, subset=subset)
+    assert report.seed_tranches["outside"] > 0
+    (trajectory,) = simulate(config, state).trajectories
+    sbc, scratch, t = trajectory.sbc, trajectory.sbc_scratch, trajectory.tranches
+    assert sbc is not None
+    assert scratch is not None
+    assert t is not None
+    assert config.awards is not None
+    # The outside holders' seed accrues in scratch, never in the published SBC, and the two
+    # make the whole the ledger's tranches recognize.
+    assert set(scratch["part"]) == {"seed"}
+    assert scratch["recognized"].sum() > 0
+    _, whole, _ = trajectory_expense(
+        t, values_per_share(t, trajectory.prices), config.awards, pd.Period(RUN, "M")
+    )
+    assert sbc["recognized"].sum() + scratch["recognized"].sum() == pytest.approx(
+        whole["recognized"].sum()
+    )
+    (unsubset,) = simulate(config, seed_for(con, config)[0]).trajectories
+    assert unsubset.sbc_scratch is not None
+    assert unsubset.sbc_scratch.empty
 
 
 def test_a_future_entrant_joins_at_their_start_and_the_departed_stay_out(
