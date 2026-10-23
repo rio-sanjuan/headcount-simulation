@@ -1,0 +1,25 @@
+# A pull request's Actions caches serve only its own runs, so they're deleted when it closes.
+# The repository's 10 GB of cache storage then holds main's caches, which every new PR starts
+# from, rather than filling up with closed PRs' and evicting them.
+name: clean up PR caches
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  caches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          gh cache list --ref "$REF" --limit 1000 --json id --jq '.[].id' |
+            while read -r id; do gh cache delete "$id"; done
