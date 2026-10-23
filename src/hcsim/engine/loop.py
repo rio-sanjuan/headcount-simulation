@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.engine.alignment import AlignmentMethod
+from hcsim.engine.alignment import AlignmentMethod, movement_refusals
 from hcsim.engine.apply import Applied, apply, per_cost_center
 from hcsim.engine.awards import (
     ANNUAL_AWARD,
@@ -45,7 +45,7 @@ from hcsim.engine.awards import (
 )
 from hcsim.engine.calibration import Calibration, calibrate
 from hcsim.engine.campus import CAMPUS, campus
-from hcsim.engine.config import AwardSettings, SimulationConfig
+from hcsim.engine.config import AwardSettings, ConfigError, SimulationConfig
 from hcsim.engine.digest import digest
 from hcsim.engine.domains import (
     ATTRITION,
@@ -628,6 +628,11 @@ def stream(
 ) -> Iterator[TrajectoryResult]:
     """Every trajectory of `config`, one at a time, each run as it's asked for. A trajectory
     draws only from its own streams, so these are the trajectories `simulate` holds."""
+    problems = movement_refusals(
+        config.alignment_method, config.guidance, config.aligner, known, initial.live_employees
+    )
+    if problems:
+        raise ConfigError([f"alignment: {p}" for p in problems])
     seeds = SeedManager(config.seed)
     registered = _register(config)
     shifts = calibrated(config, initial, known, replay)

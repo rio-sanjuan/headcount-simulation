@@ -26,6 +26,14 @@ aligned to the plan; guidance aligned to the plan under any other method, since 
 the plan's flow beside whatever the method drives; and `rate_calibration` where guidance fixes
 the counts a rate shift would move, attrition's or a fill channel's.
 
+**Declared movements.** Guidance aligned to a plan counts the change declared movements make to
+each group, `ε_H`, which no flow forecasts, and records their digest (`movements_digest`). A run
+under `demand` or `hybrid` computes its own (`declared_movements`): each guidance group's net
+heads moved per month by its declared reorganizations and conversions out, where one moved
+between cost centers of one group nets to nothing. It refuses guidance aligned under other
+movements than it declares (`movement_refusals`); guidance that records none counts as aligned
+with none declared.
+
 **Resolved metadata** (`ResolvedAlignment`) records what a run resolved: its method, the plan
 and the plan the guidance was aligned to, by digest, and the cost centers whose target each
 valve drives, with any target no valve reaches, as one under `demand` that guidance doesn't
@@ -43,9 +51,13 @@ from typing import Any, Final
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.engine.known_events import DECLARABLE, Source
+from hcsim.engine.known_resolution import ResolvedPlan
+from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import GuidanceCategory
-from hcsim.model.core.guidance import GuidanceForecast
+from hcsim.model.core.guidance import GuidanceForecast, movements_digest
+from hcsim.model.core.layouts import Buffer, EmployeeColumn
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 
 Mask = NDArray[np.bool_]
@@ -136,6 +148,74 @@ def refusals(
                 f"the counts of {fixed}, which no shift moves"
             )
     return problems
+
+
+def declared_movements(
+    known: ResolvedPlan | None,
+    employees: Buffer,
+    guidance: GuidanceForecast,
+    aligner: GroupAligner,
+) -> dict[str, list[float]]:
+    """Each guidance group's net change in heads from the run's declared movements, per
+    forecast month: `ε_H`, as guidance alignment counts it. A person moves from the cost center
+    the seed holds them in."""
+    found: dict[str, list[float]] = {}
+    if known is None:
+        return found
+    where = dict(
+        zip(
+            employees[:, EmployeeColumn.EMPLOYEE_ID].astype(np.int64).tolist(),
+            employees[:, EmployeeColumn.COST_CENTER].astype(np.int64).tolist(),
+            strict=True,
+        )
+    )
+
+    def group_of(code: int | None) -> str | None:
+        if code is None:
+            return None
+        index = int(aligner.groups_of_codes(np.array([code], dtype=np.int64))[0])
+        return guidance.groups[index] if index >= 0 else None
+
+    for resolved in known.events:
+        event = resolved.event
+        if event.source is not Source.DECLARED or event.kind not in DECLARABLE:
+            continue
+        if not 0 <= event.step < guidance.horizon:
+            continue
+        source = None if resolved.boundary == "in" else where.get(event.employee_id)
+        destination = (
+            None if resolved.boundary == "out" else resolved.codes.get(EmployeeColumn.COST_CENTER)
+        )
+        left, joined = group_of(source), group_of(destination)
+        if left == joined:
+            continue
+        for group, change in ((left, -1.0), (joined, 1.0)):
+            if group is not None:
+                found.setdefault(group, [0.0] * guidance.horizon)[event.step] += change
+    return found
+
+
+def movement_refusals(
+    method: AlignmentMethod,
+    guidance: GuidanceForecast | None,
+    aligner: GroupAligner | None,
+    known: ResolvedPlan | None,
+    employees: Buffer,
+) -> list[str]:
+    """Why a run can't consume its aligned guidance: under `demand` or `hybrid`, guidance
+    aligned under other declared movements than the run declares."""
+    if method not in NEEDS_ALIGNED_GUIDANCE or guidance is None or aligner is None:
+        return []
+    if guidance.aligned_to is None:
+        return []
+    ours = movements_digest(declared_movements(known, employees, guidance, aligner))
+    theirs = guidance.movements or movements_digest(None)
+    if ours == theirs:
+        return []
+    return [
+        f"the guidance was aligned under declared movements {theirs}, but the run declares "
+        f"{ours}: realign the guidance with the run's declared movements"
+    ]
 
 
 @dataclass(frozen=True)

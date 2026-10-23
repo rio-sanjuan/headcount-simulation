@@ -20,9 +20,9 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
    values are final, and a coherence pass follows it;
 8. **disaggregate**, when the configuration names a strategy, splits each group's forecasts
    onto the leaf grain inside it (see `disaggregation`);
-9. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`)
-   when the run aligned to one. Negative cells are clamped to zero there, and the report
-   counts them.
+9. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`) and
+   the declared movements' (`movements`) when the run aligned to one. Negative cells are
+   clamped to zero there, and the report counts them.
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
 `sources`), and `config`.
@@ -57,7 +57,7 @@ from hcsim.guidance.sources import Source, SourceError, as_source
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 from hcsim.model.core.fill_tree import identity_terms
-from hcsim.model.core.guidance import GuidanceForecast
+from hcsim.model.core.guidance import GuidanceForecast, movements_digest
 
 #: The identity's one flow no category forecasts: moves out of a group to another, the
 #: counterpart of internal starts, which leaves every group's identity partial.
@@ -384,6 +384,7 @@ class Align:
             self.name,
             method=rules.method,
             target=target.digest(),
+            movements=movements_digest(movements),
             # Alignment runs after reconciliation, so its values are the artifact's.
             precedence="aligned after reconciliation" if config.reconcile else "aligned",
             aligned_months=aligned_months,
@@ -535,6 +536,7 @@ class Format:
             sample_paths=paths,
             path_index=tuple((g, c.value) for g, c in keys),
             aligned_to=ctx.report.get("align", {}).get("target"),
+            movements=ctx.report.get("align", {}).get("movements"),
         )
         ctx.note(
             self.name,
