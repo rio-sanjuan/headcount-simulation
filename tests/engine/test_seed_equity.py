@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 from collections.abc import Iterator
+from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -14,7 +15,7 @@ import pytest
 
 from hcsim.engine.config import AwardSettings, ForecastScope, SimulationConfig
 from hcsim.engine.loop import simulate
-from hcsim.engine.seed_equity import record_seed, seed_equity
+from hcsim.engine.seed_equity import offline_equity, record_seed, seed_equity
 from hcsim.engine.seeding import (
     opening_price,
     range_table_from_world,
@@ -167,3 +168,50 @@ def test_attrition_forfeits_seed_equity(con: duckdb.DuckDBPyConnection) -> None:
     t = simulate(config, state).trajectories[0].tranches
     assert t is not None
     assert ((t.forfeit_month >= 0) & (t.award_month < 0)).any()
+
+
+# --- the offline stream --------------------------------------------------------------------------
+
+
+def test_a_world_without_offline_subsidiaries_has_an_empty_offline_stream(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    equity = offline_equity(con, schema_from_world(con), RUN)
+    assert len(equity.stream) == 0
+    assert equity.stream.sbc().empty
+
+
+@pytest.mark.slow
+def test_the_offline_stream_is_every_outstanding_offline_tranche_at_its_appraisal(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "small.duckdb"
+    write_world(generate_world(preset("small", seed=6)), path)
+    with duckdb.connect(str(path), read_only=True) as small:
+        equity = offline_equity(small, schema_from_world(small), RUN)
+        frame = equity.stream.frame
+        (expected,) = small.execute(
+            "SELECT count(*) FROM equity_award a JOIN equity_vest v USING (award_id) "
+            "WHERE a.plan = 'offline' AND a.award_date < ? AND v.vest_date >= ? "
+            "AND v.shares > 0 AND (v.forfeit_date IS NULL OR v.forfeit_date >= ?)",
+            [RUN, RUN, RUN],
+        ).fetchone() or (0,)
+        assert len(frame) == expected > 0
+        award = int(frame["award_id"].iloc[0])
+        (appraisal,) = small.execute(
+            "SELECT arg_max(value_per_share, valuation_date) FROM equity_valuation "
+            "WHERE award_id = ? AND basis = 'appraisal' AND valuation_date < ?",
+            [award, RUN],
+        ).fetchone() or (None,)
+        assert float(frame["value_per_share"].iloc[0]) == pytest.approx(appraisal)
+        # No attrition: tranches whose holder history says leaves during the run stay in.
+        (leaving,) = small.execute(
+            "SELECT count(*) FROM equity_award a JOIN equity_vest v USING (award_id) "
+            "WHERE a.plan = 'offline' AND a.award_date < ? AND v.vest_date >= ? "
+            "AND v.forfeit_date >= ? AND v.shares > 0",
+            [RUN, RUN, RUN],
+        ).fetchone() or (0,)
+        assert leaving > 0
+        result = equity.stream.expense()
+        assert result.max_identity_residual < 0.01
+        assert (result.rows["month"] >= 0).all()
