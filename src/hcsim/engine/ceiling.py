@@ -11,6 +11,13 @@ Two inputs can bound a cost center's committed strength, `S = H + O`:
 `Cap_eff(c, t)` is the smaller of the two where either exists, and infinite where neither does.
 It's the capacity veto, one of the three valves: no requisition opens in a cost center whose
 committed strength has reached its ceiling, and `room` says how many more can.
+
+**The plan clamp.** The plan's part of the ceiling bounds what the run's supply rule aims at
+(see `supply`), so the clamp never undoes the rule: committed strength `S = H + O` at today's
+target under `strength`, expected heads `H + y O` at today's target under `expected_fill`, and
+committed strength at the next target date's target under `soft_bridge`. The capacity cap
+always bounds committed strength. Every requisition the ceiling refuses, a growth one or a
+backfill, is withheld, and backfill counts the ones it withholds.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.engine.supply import SupplyRule
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 
@@ -45,6 +53,9 @@ class Ceiling:
     plan: AlignmentTarget | None = None
     #: Each cost-center code's group in the plan's cost-center marginal, or -1.
     _plan_group: Ints = field(default_factory=lambda: np.zeros(0, dtype=np.int64), repr=False)
+    #: The supply rule the plan clamp bounds, and the fill yield `expected_fill` counts at.
+    rule: SupplyRule = SupplyRule.STRENGTH
+    fill_yield: float = 1.0
 
     @classmethod
     def build(
@@ -53,9 +64,11 @@ class Ceiling:
         caps: Mapping[str, int] | None = None,
         plan: AlignmentTarget | None = None,
         supplied: NDArray[np.bool_] | None = None,
+        rule: SupplyRule = SupplyRule.STRENGTH,
+        fill_yield: float = 1.0,
     ) -> Ceiling:
         """`supplied` says, per cost-center code, where the plan drives supply: everywhere by
-        default."""
+        default. The plan clamp bounds what `rule` aims at."""
         vocab = schema.vocabulary(COST_CENTER)
         problems = []
         values = np.full(len(vocab), np.inf)
@@ -83,7 +96,7 @@ class Ceiling:
                     group[~np.asarray(supplied, dtype=bool)] = -1
         if problems:
             raise CeilingError(problems)
-        return cls(values, plan, group)
+        return cls(values, plan, group, SupplyRule(rule), fill_yield)
 
     @property
     def binds(self) -> bool:
@@ -132,8 +145,19 @@ class Ceiling:
         result: Floats = np.minimum(self.caps, np.where(np.isnan(planned), np.inf, planned))
         return result
 
-    def room(self, run_date: dt.date, step: int, strength: Ints) -> Floats:
-        """How many more openings each cost center can take before its committed strength
-        reaches its ceiling: never negative, and infinite where nothing binds."""
-        result: Floats = np.maximum(0.0, np.floor(self.at(run_date, step) - strength))
+    def room(self, run_date: dt.date, step: int, headcount: Ints, openings: Ints) -> Floats:
+        """How many more openings each cost center can take before it reaches its ceiling: its
+        cap on committed strength, or the plan clamp on what the supply rule aims at. Never
+        negative, and infinite where nothing binds."""
+        strength = headcount + openings
+        if self.rule is SupplyRule.SOFT_BRIDGE:
+            bound, _ = self.next_targets(run_date, step)
+            planned = bound - strength
+        elif self.rule is SupplyRule.EXPECTED_FILL:
+            bound = self.targets(run_date, step)
+            planned = (bound - headcount - self.fill_yield * openings) / self.fill_yield
+        else:
+            planned = self.targets(run_date, step) - strength
+        free = np.minimum(self.caps - strength, np.where(np.isnan(planned), np.inf, planned))
+        result: Floats = np.maximum(0.0, np.floor(free))
         return result

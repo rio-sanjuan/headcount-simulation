@@ -41,7 +41,7 @@ def test_the_ceiling_is_the_tighter_of_cap_and_plan() -> None:
     assert ceiling.at(RUN_DATE, 3).tolist() == [30.0, 25.0, np.inf]
     # Past the plan's window only the cap is left.
     assert ceiling.at(RUN_DATE, 9).tolist() == [40.0, np.inf, np.inf]
-    room = ceiling.room(RUN_DATE, 0, np.array([35, 25, 5]))
+    room = ceiling.room(RUN_DATE, 0, np.array([35, 25, 5]), np.zeros(3, dtype=np.int64))
     assert room.tolist() == [5.0, 0.0, np.inf]
     assert not Ceiling.build(SCHEMA).binds
 
