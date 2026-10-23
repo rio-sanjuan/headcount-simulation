@@ -245,6 +245,9 @@ class AwardSettings:
     expense: ExpenseConfig = field(default_factory=ExpenseConfig)
     #: Sizes promotion grants. Without it, promotions emit grants nobody sizes.
     promotion: SizingStrategy | None = None
+    #: Sizes each other award type's grants, keyed by the type: the annual award, a transfer's,
+    #: a retention or off-cycle grant. A type without a sizer is emitted and counted unsized.
+    sizers: Mapping[str, SizingStrategy] = field(default_factory=dict)
     #: The awards as recorded, for the grants they cover: a recipient holding one takes it,
     #: and the rest are sized.
     replayed: RecordedAwards | None = None
@@ -273,11 +276,15 @@ class AwardSettings:
         manual = None if self.manual is None else self.manual.sbc()
         return offline, manual
 
+    @property
+    def keyed(self) -> tuple[tuple[str, SizingStrategy], ...]:
+        """Every sizer beside the new hires', keyed by the award type it's given for."""
+        promotion = () if self.promotion is None else (("promotion", self.promotion),)
+        return (*promotion, *self.sizers.items())
+
     def sizer(self, award_type: str) -> SizingStrategy | None:
         """The sizer for an award type, if the run has one."""
-        sizers = {self.new_hire.award_type: self.new_hire}
-        if self.promotion is not None:
-            sizers[self.promotion.award_type] = self.promotion
+        sizers = {self.new_hire.award_type: self.new_hire, **dict(self.keyed)}
         return sizers.get(award_type)
 
 
@@ -549,7 +556,7 @@ class SimulationConfig:
             ),
             (
                 ("forecast_scope",),
-                lambda: self._check_promotion_sizer(),
+                lambda: self._check_sizers(),
             ),
             (
                 ("forecast_scope", "simulation_months"),
@@ -607,18 +614,26 @@ class SimulationConfig:
             return ["a promotion that changes family needs a family_similarity model"]
         return []
 
-    def _check_promotion_sizer(self) -> list[str]:
-        sizer = None if self.awards is None else self.awards.promotion
-        if sizer is None:
+    def _check_sizers(self) -> list[str]:
+        """Each sizer grants the award type it's given for, one the schema knows, and no type
+        has two."""
+        if self.awards is None:
             return []
+        known = self.schema.vocabulary(AWARD_TYPE) if AWARD_TYPE in self.schema.vocabularies else ()
         problems = []
-        if sizer.award_type != "promotion":
-            problems.append(f"the promotion sizer grants {sizer.award_type!r}, not 'promotion'")
-        elif (
-            AWARD_TYPE not in self.schema.vocabularies
-            or "promotion" not in self.schema.vocabulary(AWARD_TYPE)
-        ):
-            problems.append("sizing promotion grants needs 'promotion' among the award types")
+        if self.awards.new_hire.award_type in self.awards.sizers:
+            problems.append(f"{self.awards.new_hire.award_type} grants have two sizers")
+        if self.awards.promotion is not None and "promotion" in self.awards.sizers:
+            problems.append("promotion grants have two sizers")
+        for award_type, sizer in self.awards.keyed:
+            if sizer.award_type != award_type:
+                problems.append(
+                    f"the {award_type} sizer grants {sizer.award_type!r}, not {award_type!r}"
+                )
+            elif award_type not in known:
+                problems.append(
+                    f"sizing {award_type} grants needs {award_type!r} among the award types"
+                )
         return problems
 
     def _check_backfill_models(self) -> list[str]:

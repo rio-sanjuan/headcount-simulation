@@ -8,6 +8,11 @@ they leave, and then performance, so the month's draws read its new ratings. Aft
 month, every recorded tranche is valued at the price in its award month and amortized, and every
 known event of a registered kind must have fired.
 
+The forecast scope decides whether a run computes SBC. At `hcf+sbc`, the apply step sizes each
+grant a domain emits by its award type's sizer, and the run keeps a price path and a holder
+ledger. At `hcf`, handlers emit the same grants and nothing sizes them. Sizing, award timing,
+and prices draw on their own streams, so a run's headcount is the same either way.
+
 Histories are per cost center: stocks at the start of every month plus the end of the last
 (`months + 1` rows), and each flow per month, named as in the notation. They obey the runtime
 accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
