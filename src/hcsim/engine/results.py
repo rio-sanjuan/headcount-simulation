@@ -150,6 +150,8 @@ class DomainResult:
     transfers: Mapping[int, int] = field(default_factory=dict)
     #: Diagnostic counts per cost center, by name, such as degenerate generated rows.
     diagnostics: Mapping[str, Ints] = field(default_factory=dict)
+    #: Growth's regime per cost center this step, its route; empty for every other domain.
+    regimes: Ints = field(default_factory=_no_index)
 
     def __post_init__(self) -> None:
         if self.employees.layout is not EMPLOYEE or self.openings.layout is not OPENING:

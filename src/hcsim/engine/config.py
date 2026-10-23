@@ -39,6 +39,7 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
+from hcsim.engine.supply import SupplyRule
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel, covers
@@ -390,6 +391,16 @@ class SimulationConfig:
         1.0,
         "the share of the gap to the plan target that target-seeking growth closes each month",
     )
+    requisitions_supply_rule: SupplyRule = setting(
+        "requisitions",
+        SupplyRule.STRENGTH,
+        "how target-seeking growth sizes its gap: strength, expected_fill, or soft_bridge",
+    )
+    requisitions_fill_yield: float = setting(
+        "requisitions",
+        1.0,
+        "the share of an open opening expected_fill counts as a head to come, y, in (0, 1]",
+    )
     # alignment
     alignment_method: AlignmentMethod = setting(
         "alignment",
@@ -616,6 +627,13 @@ class SimulationConfig:
                 ("transfers_level_band",),
                 lambda: _when(
                     self.transfers_level_band < 0, "transfers_level_band must be non-negative"
+                ),
+            ),
+            (
+                ("requisitions_fill_yield",),
+                lambda: _when(
+                    not 0.0 < self.requisitions_fill_yield <= 1.0,
+                    "requisitions_fill_yield must lie in (0, 1]",
                 ),
             ),
             (
