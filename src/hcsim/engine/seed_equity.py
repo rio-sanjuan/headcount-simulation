@@ -37,6 +37,8 @@ import numpy as np
 import pandas as pd
 
 from hcsim.engine.state import SimulationState
+from hcsim.financial.expense import SBC_KEYS, SBC_VALUES, TRUEUPS
+from hcsim.financial.output import PART_KEYS
 from hcsim.financial.seed import HolderStatus, SeedTranches, classify
 from hcsim.financial.streams import OFFLINE_COLUMNS, OfflineStream
 from hcsim.model.core.contract import role_column
@@ -231,3 +233,37 @@ def _encoded(frame: pd.DataFrame, schema: SimulationSchema) -> tuple[pd.DataFram
         frame = frame[keep].copy()
         frame[column] = codes[keep]
     return frame.reset_index(drop=True), pruned
+
+
+_ACTUAL = """
+SELECT CASE WHEN a.plan = 'offline' THEN 'offline'
+            WHEN a.award_date < $run THEN 'seed' ELSE 'sim' END AS part,
+       datediff('month', date_trunc('month', $run::DATE), date_trunc('month', e.period))
+           AS month,
+       coalesce(h.cost_center, a.{award_cc}) AS cost_center, a.award_type,
+       a.job_level AS level, e.gross, e.net, e.trueup_attrition, e.trueup_rate,
+       e.trueup_vesting, e.recognized
+FROM equity_expense e
+JOIN equity_award a USING (award_id)
+LEFT JOIN equity_holder h
+    ON h.award_id = e.award_id AND h.valid_from <= e.period AND h.valid_to > e.period
+WHERE e.period >= $run AND e.period < $end
+"""
+
+
+def actual_sbc(
+    con: duckdb.DuckDBPyConnection, schema: SimulationSchema, run_date: dt.date, months: int
+) -> pd.DataFrame:
+    """The SBC history records for the run's `months` months, from the reference ledger
+    (`equity_expense`), by part and the SBC keys, each award's expense in its holder's cost
+    center that month: `offline` for an offline plan's, `seed` for one granted before the run,
+    `sim` for the rest, all replayed. Rows the schema can't encode are left out."""
+    end = (pd.Period(run_date, "M") + months).start_time.date()
+    sql = _ACTUAL.format(award_cc=role_column(con, "equity_award"))
+    frame = con.execute(sql, {"run": run_date, "end": end}).df()
+    frame, _ = _encoded(frame, schema)
+    keys = ["part", *SBC_KEYS]
+    out = frame.groupby(keys, as_index=False)[["gross", "net", *TRUEUPS, "recognized"]].sum()
+    out["trueup"] = out[list(TRUEUPS)].sum(axis=1)
+    out["basis"] = "replayed"
+    return out[[*PART_KEYS, *SBC_VALUES]].sort_values(PART_KEYS, ignore_index=True)

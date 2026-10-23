@@ -15,7 +15,7 @@ import pytest
 
 from hcsim.engine.config import AwardSettings, ForecastScope, SimulationConfig
 from hcsim.engine.loop import simulate
-from hcsim.engine.seed_equity import offline_equity, record_seed, seed_equity
+from hcsim.engine.seed_equity import actual_sbc, offline_equity, record_seed, seed_equity
 from hcsim.engine.seeding import (
     opening_price,
     range_table_from_world,
@@ -23,9 +23,11 @@ from hcsim.engine.seeding import (
     seed_for,
     seed_state,
 )
+from hcsim.financial.output import align
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.seed import HolderStatus, SeedTranches
 from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.streams import ManualAdjustments, OfflineStream
 from hcsim.model.core.layouts import EmployeeColumn
 from hcsim.model.data.subset import SubsetSpec
 from hcsim.synth.config import preset
@@ -215,3 +217,77 @@ def test_the_offline_stream_is_every_outstanding_offline_tranche_at_its_appraisa
         result = equity.stream.expense()
         assert result.max_identity_residual < 0.01
         assert (result.rows["month"] >= 0).all()
+
+
+# --- SBC output by part, and actuals -------------------------------------------------------------
+
+
+def test_a_runs_sbc_carries_its_seed_and_sim_parts_and_the_streams(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    config = configured(con)
+    offline = OfflineStream(
+        pd.DataFrame(
+            {
+                "award_id": [1],
+                "holder": [5],
+                "award_type": [1],
+                "award_month": [-2],
+                "vest_month": [3],
+                "shares": [12],
+                "value_per_share": [5.0],
+                "level": [0],
+                "cost_center": [0],
+            }
+        )
+    )
+    manual = ManualAdjustments.from_labels(
+        pd.DataFrame(
+            {
+                "month": [1],
+                "cost_center": ["CC-01"],
+                "award_type": ["annual"],
+                "level": [3],
+                "amount": [250.0],
+                "note": ["a known grant"],
+            }
+        ),
+        config.schema,
+        config.simulation_months,
+    )
+    assert config.awards is not None
+    config = dataclasses.replace(
+        config, awards=dataclasses.replace(config.awards, offline=offline, manual=manual)
+    )
+    state, _ = seed_for(con, config)
+    result = simulate(config, state)
+    frames = [t.sbc for t in result.trajectories if t.sbc is not None]
+    assert len(frames) == 2
+    for frame in frames:
+        totals = frame.groupby(["part", "basis"])["recognized"].sum()
+        assert {"seed", "sim", "offline", "manual"} <= set(frame["part"])
+        assert totals[("manual", "sized")] == pytest.approx(250.0)
+        assert ("seed", "sized") not in totals
+    streams = [f[f["part"].isin(["offline", "manual"])].reset_index(drop=True) for f in frames]
+    pd.testing.assert_frame_equal(streams[0], streams[1])
+
+
+def test_the_actual_sbc_is_the_reference_ledgers_for_the_window(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    config = configured(con)
+    actual = actual_sbc(con, config.schema, RUN, 6)
+    (total,) = con.execute(
+        "SELECT sum(recognized) FROM equity_expense WHERE period >= ? AND period < ?",
+        [RUN, dt.date(2026, 1, 1)],
+    ).fetchone() or (0.0,)
+    assert actual["recognized"].sum() == pytest.approx(total)
+    assert set(actual["month"]) == set(range(6))
+    assert set(actual["part"]) <= {"seed", "sim"}  # the tiny world has no offline plan
+    assert (actual["basis"] == "replayed").all()
+    state, _ = seed_for(con, config)
+    forecast = simulate(config, state).trajectories[0].sbc
+    assert forecast is not None
+    joined = align(forecast, actual)
+    assert joined["actual"].sum() == pytest.approx(total)
+    assert set(joined["part"]) >= {"seed", "sim"}

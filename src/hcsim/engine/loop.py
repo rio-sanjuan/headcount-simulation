@@ -70,13 +70,11 @@ from hcsim.engine.state import SimulationState
 from hcsim.engine.transfers import TRANSFERS_DOMAIN as TRANSFERS
 from hcsim.engine.transfers import transfers
 from hcsim.financial.expense import (
-    SBC_KEYS,
-    SBC_VALUES,
     ExpenseResult,
     calculate_chunks,
     prepare,
-    sbc_frame,
 )
+from hcsim.financial.output import combine_parts, sbc_parts, streams
 from hcsim.financial.tracker import HolderLedger, Intervals, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
@@ -388,20 +386,21 @@ def trajectory_expense(
     origin: pd.Period,
     intervals: Intervals | None = None,
 ) -> tuple[ExpenseResult, pd.DataFrame]:
-    """A trajectory's expense from the run's first month, and its SBC frame, each piece in its
-    holder's cost center. The calculator works a chunk of tranches at a time (the expense
-    settings' `chunk_size`), and each chunk's rows are summed into SBC and released, so a seeded
-    workforce's many rows are never all held. The result keeps every tranche's residual and
+    """A trajectory's expense from the run's first month, and its SBC frame by part and basis
+    (see `financial.output`), each piece in its holder's cost center, with the offline stream's
+    and the manual adjustments' beside it. The calculator works a chunk of tranches at a time
+    (the expense settings' `chunk_size`), and each chunk's rows are summed into SBC and
+    released, so a seeded workforce's many rows are never all held. The result keeps every
+    tranche's residual and
     opening balance, and no rows."""
     prepared = prepare(tranches, values, origin, intervals=intervals)
     frames, residuals, openings = [], [], []
     for _, chunk, result in calculate_chunks(prepared, awards.expense, first_month=0):
-        frames.append(sbc_frame(result, chunk.tranches))
+        frames.append(sbc_parts(result, chunk.tranches))
         residuals.append(result.residual)
         openings.append(result.opening if result.opening is not None else np.zeros(len(chunk)))
-    sbc = pd.concat(frames, ignore_index=True)
-    sbc = sbc.groupby(SBC_KEYS, as_index=False)[SBC_VALUES].sum()
-    empty = frames[0].iloc[0:0].copy()
+    sbc = combine_parts([*frames, *streams(*awards.streams)])
+    empty = result.rows.iloc[0:0].copy()
     result = ExpenseResult(
         empty, np.concatenate(residuals), np.concatenate(openings), awards.expense.enforces_identity
     )

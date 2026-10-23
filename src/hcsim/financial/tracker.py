@@ -162,9 +162,17 @@ class Tranches:
     #: Each tranche's value per share where it was recorded with one, as a seed tranche is at
     #: its grant's fair value; NaN where it's valued at the run's price in its award month.
     value: NDArray[np.float64] | None = None
+    #: Whether each tranche came from a recorded award, as replayed and seed ones do, rather
+    #: than a sized one.
+    replayed: NDArray[np.bool_] | None = None
 
     def __len__(self) -> int:
         return len(self.holder)
+
+    @property
+    def recorded(self) -> NDArray[np.bool_]:
+        """`replayed`, False throughout when the tranches carry none."""
+        return np.zeros(len(self), dtype=bool) if self.replayed is None else self.replayed
 
     @property
     def values(self) -> NDArray[np.float64]:
@@ -201,6 +209,8 @@ class HolderLedger:
     _chunks: list[Ints] = field(default_factory=list)
     _value_chunks: list[NDArray[np.float64]] = field(default_factory=list)
     _values: NDArray[np.float64] = field(default_factory=lambda: np.zeros(0))
+    _replayed_chunks: list[NDArray[np.bool_]] = field(default_factory=list)
+    _replayed: NDArray[np.bool_] = field(default_factory=lambda: np.zeros(0, dtype=bool))
     _rows: Ints = field(default_factory=lambda: np.zeros((0, 8), dtype=np.int64))
     buffer: VestBuffer = field(default_factory=VestBuffer)
     _moves: list[Ints] = field(default_factory=list)
@@ -213,8 +223,10 @@ class HolderLedger:
         if self._chunks:
             self._rows = np.concatenate([self._rows, *self._chunks])
             self._values = np.concatenate([self._values, *self._value_chunks])
+            self._replayed = np.concatenate([self._replayed, *self._replayed_chunks])
             self._chunks.clear()
             self._value_chunks.clear()
+            self._replayed_chunks.clear()
         return self._rows
 
     def record(
@@ -226,9 +238,11 @@ class HolderLedger:
         levels: Ints,
         cost_centers: Ints,
         anchor_month: int | None = None,
+        replayed: NDArray[np.bool_] | bool = False,
     ) -> int:
         """Record one grant per holder. Vests are laid out from `anchor_month`, which defaults to
-        the award month. Returns the number of tranches recorded."""
+        the award month; `replayed` marks the holders whose grant is a recorded award. Returns the
+        number of tranches recorded."""
         anchor = award_month if anchor_month is None else anchor_month
         holder_idx, column = np.nonzero(schedule)
         if len(holder_idx) == 0:
@@ -245,6 +259,8 @@ class HolderLedger:
         self.buffer.add(rows[:, self.HOLDER], rows[:, self.VEST], rows[:, self.SHARES])
         self._chunks.append(rows)
         self._value_chunks.append(np.full(len(rows), np.nan))
+        marked = np.broadcast_to(np.asarray(replayed, dtype=bool), (len(holders),))
+        self._replayed_chunks.append(marked[holder_idx].copy())
         return len(rows)
 
     def record_tranches(
@@ -276,6 +292,7 @@ class HolderLedger:
         self.buffer.add(rows[:, self.HOLDER], rows[:, self.VEST], rows[:, self.SHARES])
         self._chunks.append(rows)
         self._value_chunks.append(np.asarray(values, dtype=np.float64))
+        self._replayed_chunks.append(np.ones(n, dtype=bool))
         return n
 
     def forfeit(self, holders: Ints, month: int) -> int:
@@ -397,6 +414,7 @@ class HolderLedger:
             level=rows[:, self.LEVEL].copy(),
             cost_center=rows[:, self.CC].copy(),
             value=self._values.copy(),
+            replayed=self._replayed.copy(),
         )
 
     def __len__(self) -> int:

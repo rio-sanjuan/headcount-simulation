@@ -241,6 +241,7 @@ def apply(
                     schema.vocabulary(AWARD_TYPE).code(grant.award_type),
                     rows[at, EmployeeColumn.LEVEL].astype(np.int64),
                     rows[at, ecc].astype(np.int64),
+                    replayed=routed.replayed[at],
                 )
         appended = state.employees[first : state.n_employees].copy()
 

@@ -67,7 +67,9 @@ def results_digest(result: SimulationResult) -> str:
             digest.update(f"{q.step}|{q.domain}|{q.category}".encode())
             arrays += [q.record.quota, q.record.eligible, q.record.realized]
         if t.sbc is not None:
-            arrays.append(t.sbc.to_numpy(dtype=np.float64))
+            arrays.append(t.sbc.select_dtypes("number").to_numpy(dtype=np.float64))
+            for label in t.sbc.select_dtypes(exclude="number").columns:
+                digest.update("|".join(t.sbc[label].astype(str)).encode())
         for array in arrays:
             digest.update(np.ascontiguousarray(array).tobytes())
     return "rd1-" + digest.hexdigest()[:16]
