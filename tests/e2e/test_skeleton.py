@@ -121,8 +121,9 @@ def test_another_seed_moves_the_results(world: tuple[Path, Path], tmp_path: Path
 
 
 # 60 MiB on the Linux runner, where the memory job runs, at M1, and 99 MiB by M5 (16 and 32 MiB
-# on macOS). The growth is the run's SBC: most of the peak is each trajectory's long-form
-# expense rows, which M6's chunked expense keeps from piling up.
+# on macOS). The growth is the run's SBC. Since M6 seeds the workforce's unvested equity, each
+# trajectory's long-form expense rows start at the run's first month, with what came before as
+# an opening balance, and are released once summed into its SBC frame: 48 MiB on macOS.
 @pytest.mark.limit_memory("128 MB")
 def test_the_skeleton_run_stays_within_its_memory(world: tuple[Path, Path]) -> None:
     profile = StudyProfile.from_mapping(

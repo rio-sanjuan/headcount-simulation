@@ -253,3 +253,16 @@ def test_the_9d_view_cuts_each_tranche_at_its_holders_moves() -> None:
     # Each piece keeps its tranche's other dimensions.
     assert view["shares"].tolist() == [10, 10, 20]
     assert granted().view9()["cost_center"].tolist() == [3, 4]  # no moves: one piece each
+
+
+def test_tranches_recorded_one_by_one_are_checked() -> None:
+    ledger = HolderLedger()
+    one = np.ones(1, np.int64)
+    none = np.zeros(0, np.int64)
+    assert ledger.record_tranches(none, none, none, none, none, none, none, np.zeros(0)) == 0
+    with pytest.raises(TrackerError, match="one value of each column per tranche"):
+        ledger.record_tranches(one, one, one, one, one, one, one, np.zeros(2))
+    with pytest.raises(TrackerError, match="can't vest before its award month"):
+        ledger.record_tranches(one, one * 5, one * 2, one, one, one, one, np.ones(1))
+    assert ledger.record_tranches(one, one * -2, one * 3, one * 4, one, one, one, np.ones(1)) == 1
+    assert ledger.tranches().values.tolist() == [1.0]
