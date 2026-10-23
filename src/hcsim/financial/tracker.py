@@ -166,14 +166,6 @@ class Tranches:
     def __len__(self) -> int:
         return len(self.holder)
 
-    def take(self, lo: int, hi: int) -> Tranches:
-        """Tranches `lo` to `hi`, in order."""
-        names = ("holder", "award_month", "vest_month", "shares", "forfeit_month", "award_type")
-        return Tranches(
-            **{n: getattr(self, n)[lo:hi] for n in (*names, "level", "cost_center")},
-            value=None if self.value is None else self.value[lo:hi],
-        )
-
     @property
     def values(self) -> NDArray[np.float64]:
         """`value`, NaN throughout when the tranches carry none."""
@@ -360,18 +352,7 @@ class HolderLedger:
     def cost_center_at(self, holders: Ints, months: Ints, granted: Ints) -> Ints:
         """Each (holder, month)'s cost center: their latest interval's at or before the month,
         else `granted`, the cost center they were granted in."""
-        holders, months = np.asarray(holders, np.int64), np.asarray(months, np.int64)
-        out = np.asarray(granted, dtype=np.int64).copy()
-        moves = self.intervals()
-        if not len(moves):
-            return out
-        # Sort the intervals by (holder, month); find each query's last interval at or before it.
-        key = moves.holder * (1 << 32) + moves.valid_from
-        query = holders * (1 << 32) + months
-        at = np.searchsorted(key, query, side="right") - 1
-        found = (at >= 0) & (moves.holder[np.maximum(at, 0)] == holders)
-        out[found] = moves.cost_center[at[found]]
-        return out
+        return cost_centers_at(self.intervals(), holders, months, granted)
 
     def view8(self) -> pd.DataFrame:
         """One row per tranche, with its eight dimensions (`EIGHT_D`)."""
@@ -420,6 +401,21 @@ class HolderLedger:
 
     def __len__(self) -> int:
         return len(self._consolidate())
+
+
+def cost_centers_at(intervals: Intervals, holders: Ints, months: Ints, granted: Ints) -> Ints:
+    """Each (holder, month)'s cost center under `intervals`: the latest interval's at or before
+    the month, else `granted`."""
+    holders, months = np.asarray(holders, np.int64), np.asarray(months, np.int64)
+    out = np.asarray(granted, dtype=np.int64).copy()
+    if not len(intervals):
+        return out
+    # Intervals sort by (holder, month); find each query's last interval at or before it.
+    key = intervals.holder * (1 << 32) + intervals.valid_from
+    at = np.searchsorted(key, holders * (1 << 32) + months, side="right") - 1
+    found = (at >= 0) & (intervals.holder[np.maximum(at, 0)] == holders)
+    out[found] = intervals.cost_center[at[found]]
+    return out
 
 
 def _latest(log: list[Ints], holders: Ints, months: Ints) -> Ints:

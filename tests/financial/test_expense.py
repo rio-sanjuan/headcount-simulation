@@ -271,8 +271,9 @@ def test_cohorts_are_the_calendar_years_awards_fall_in() -> None:
         prepare(tranches((0, 3, 100.0, 1), (1, 3, 100.0, -1)), np.ones(2), origin), cohort
     )
     alone = calculate(prepare(tranches((1, 3, 100.0, -1)), np.ones(1), origin), cohort)
-    later = both.rows[both.rows["tranche"] == 1].drop(columns="tranche").reset_index(drop=True)
-    pd.testing.assert_frame_equal(later, alone.rows.drop(columns="tranche"))
+    ignore = ["tranche", "cost_center"]
+    later = both.rows[both.rows["tranche"] == 1].drop(columns=ignore).reset_index(drop=True)
+    pd.testing.assert_frame_equal(later, alone.rows.drop(columns=ignore))
     same_year = calculate(
         prepare(
             tranches((0, 3, 100.0, 1), (1, 3, 100.0, -1)), np.ones(2), pd.Period("2026-01", "M")
@@ -280,11 +281,9 @@ def test_cohorts_are_the_calendar_years_awards_fall_in() -> None:
         cohort,
     )
     moved = (
-        same_year.rows[same_year.rows["tranche"] == 1]
-        .drop(columns="tranche")
-        .reset_index(drop=True)
+        same_year.rows[same_year.rows["tranche"] == 1].drop(columns=ignore).reset_index(drop=True)
     )
-    assert not moved.equals(alone.rows.drop(columns="tranche"))
+    assert not moved.equals(alone.rows.drop(columns=ignore))
 
 
 def test_the_identity_holds_in_expectation_for_any_mix() -> None:
@@ -315,3 +314,82 @@ def test_the_identity_holds_in_expectation_for_any_mix() -> None:
 def test_the_forfeiture_setting_is_checked() -> None:
     with pytest.raises(ValueError, match="'flat' or 'cohort'"):
         ExpenseConfig(forfeiture="annual")  # type: ignore[arg-type]
+
+
+# --- the forfeited-piece path, chunks, toggles, and the identity ---------------------------------
+
+
+def test_a_forfeit_reverses_each_piece_in_its_own_cost_center() -> None:
+    from hcsim.financial.expense import calculate, prepare
+    from hcsim.financial.tracker import Intervals
+
+    # 100 over months 0-4, 20 a month. The holder moves from cost center 0 to 1 in month 2 and
+    # leaves in month 3, so each cost center recognized 40, and each reverses its own 40.
+    t = tranches((0, 4, 100.0, 3))
+    t = Tranches(**{**t.__dict__, "cost_center": np.array([0])})
+    moves = Intervals(np.array([0]), np.array([2]), np.array([1]))
+    flat = ExpenseConfig(forfeiture_rate=0.0)
+    result = calculate(prepare(t, np.ones(1), intervals=moves), flat)
+    frame = sbc_frame(result, t)
+    by_center = frame.groupby("cost_center")[["net", "trueup_attrition", "recognized"]].sum()
+    assert by_center.loc[0].to_numpy().tolist() == pytest.approx([40.0, -40.0, 0.0])
+    assert by_center.loc[1].to_numpy().tolist() == pytest.approx([40.0, -40.0, 0.0])
+    reversals = result.rows[result.rows["trueup_attrition"] != 0]
+    assert reversals[["month", "cost_center"]].values.tolist() == [[3, 1], [3, 0]]
+
+
+def test_chunks_give_bit_identical_results() -> None:
+    from hcsim.financial.expense import calculate, prepare
+    from hcsim.financial.tracker import Intervals
+
+    rng = np.random.default_rng(4)
+    n = 300
+    award = rng.integers(-24, 12, n)
+    vest = award + rng.integers(0, 48, n)
+    forfeit = np.where(rng.random(n) < 0.3, award + rng.integers(0, 50, n), -1)
+    t = tranches(*zip(award, vest, rng.integers(1, 500, n).astype(float), forfeit, strict=True))
+    survival = np.minimum.accumulate(rng.uniform(0.7, 1.0, (n, 24)), axis=1)
+    moves = Intervals(np.arange(0, n, 5), rng.integers(-5, 20, n // 5), rng.integers(0, 4, n // 5))
+    order = np.lexsort((moves.valid_from, moves.holder))
+    moves = Intervals(moves.holder[order], moves.valid_from[order], moves.cost_center[order])
+    prepared = prepare(t, rng.uniform(5, 50, n), pd.Period("2025-07", "M"), survival, moves)
+    config = ExpenseConfig(forfeiture="cohort")
+    whole = calculate(prepared, config, first_month=0)
+    for size in (1, 7, 128):
+        chunked = calculate(prepared, config, first_month=0, chunk_size=size)
+        pd.testing.assert_frame_equal(chunked.rows, whole.rows, check_exact=True)
+        assert np.array_equal(chunked.residual, whole.residual)
+        assert chunked.opening is not None
+        assert whole.opening is not None
+        assert np.array_equal(chunked.opening, whole.opening)
+    with pytest.raises(ValueError, match="a chunk holds at least one tranche"):
+        calculate(prepared, config, chunk_size=0)
+    with pytest.raises(ValueError, match="a chunk holds at least one tranche"):
+        ExpenseConfig(chunk_size=0)
+
+
+def test_a_true_up_left_out_leaves_the_identity_unenforced() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    t = tranches((0, 9, 100.0, -1), (0, 9, 100.0, 4))
+    prepared = prepare(t, np.ones(2))
+    full = calculate(prepared, RATE)
+    assert full.identity_enforced
+    assert full.max_identity_residual < 1e-9
+    without = calculate(
+        prepared, ExpenseConfig(forfeiture_rate=0.2, trueups=frozenset({"trueup_rate"}))
+    )
+    assert not without.identity_enforced
+    assert (without.rows[["trueup_vesting", "trueup_attrition"]] == 0).all().all()
+    # The vesting tranche falls 20% short, and the forfeited one keeps what it accrued.
+    assert without.residual.tolist() == pytest.approx([-20.0, 40.0])
+    assert without.worst_tranche == 1
+    with pytest.raises(ValueError, match="true-ups are"):
+        ExpenseConfig(trueups=frozenset({"trueup_bonus"}))
+
+
+def test_a_defect_in_the_identity_raises() -> None:
+    from hcsim.financial.expense import AccountingIdentityError, check_identity
+
+    with pytest.raises(AccountingIdentityError, match="tranche 1 recognizes"):
+        check_identity(np.array([10.0, 12.0]), np.array([10.0, 10.0]), 0.01)

@@ -73,11 +73,11 @@ from hcsim.financial.expense import (
     SBC_KEYS,
     SBC_VALUES,
     ExpenseResult,
-    calculate,
+    calculate_chunks,
     prepare,
     sbc_frame,
 )
-from hcsim.financial.tracker import HolderLedger, Tranches
+from hcsim.financial.tracker import HolderLedger, Intervals, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
 
@@ -381,34 +381,31 @@ class SimulationResult:
         return frame
 
 
-#: Tranches a trajectory calculates at a time, so its long-form expense rows never pile up.
-EXPENSE_CHUNK: Final = 2_000
-
-
 def trajectory_expense(
     tranches: Tranches,
     values: NDArray[np.float64],
     awards: AwardSettings,
     origin: pd.Period,
+    intervals: Intervals | None = None,
 ) -> tuple[ExpenseResult, pd.DataFrame]:
-    """A trajectory's expense from the run's first month, and its SBC frame. The tranches are
-    calculated `EXPENSE_CHUNK` at a time, each chunk's rows summed into SBC and released, so a
-    seeded workforce's many rows are never all held: at the flat rate every tranche's expense is
-    its own. Cohort rates read the whole set, so they're calculated in one chunk. The result
-    keeps every tranche's residual and opening balance, and no rows."""
-    n = len(tranches)
-    size = n if awards.expense.forfeiture == "cohort" else EXPENSE_CHUNK
+    """A trajectory's expense from the run's first month, and its SBC frame, each piece in its
+    holder's cost center. The calculator works a chunk of tranches at a time (the expense
+    settings' `chunk_size`), and each chunk's rows are summed into SBC and released, so a seeded
+    workforce's many rows are never all held. The result keeps every tranche's residual and
+    opening balance, and no rows."""
+    prepared = prepare(tranches, values, origin, intervals=intervals)
     frames, residuals, openings = [], [], []
-    for lo in range(0, max(n, 1), max(size, 1)):
-        part = tranches.take(lo, min(lo + size, n))
-        result = calculate(prepare(part, values[lo : lo + size], origin), awards.expense, 0)
-        frames.append(sbc_frame(result, part))
+    for _, chunk, result in calculate_chunks(prepared, awards.expense, first_month=0):
+        frames.append(sbc_frame(result, chunk.tranches))
         residuals.append(result.residual)
-        openings.append(result.opening if result.opening is not None else np.zeros(len(part)))
+        openings.append(result.opening if result.opening is not None else np.zeros(len(chunk)))
     sbc = pd.concat(frames, ignore_index=True)
     sbc = sbc.groupby(SBC_KEYS, as_index=False)[SBC_VALUES].sum()
     empty = frames[0].iloc[0:0].copy()
-    return ExpenseResult(empty, np.concatenate(residuals), np.concatenate(openings)), sbc
+    result = ExpenseResult(
+        empty, np.concatenate(residuals), np.concatenate(openings), awards.expense.enforces_identity
+    )
+    return result, sbc
 
 
 def values_per_share(tranches: Tranches, prices: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -534,7 +531,11 @@ def run_trajectory(
         )
     tranches = state.ledger.tranches()
     expense, sbc = trajectory_expense(
-        tranches, values_per_share(tranches, prices), awards, pd.Period(config.run_date, "M")
+        tranches,
+        values_per_share(tranches, prices),
+        awards,
+        pd.Period(config.run_date, "M"),
+        state.ledger.intervals(),
     )
     return TrajectoryResult(
         trajectory,
