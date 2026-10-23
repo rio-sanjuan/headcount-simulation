@@ -118,6 +118,18 @@ class Ceiling:
         planned[has] = targets[self._plan_group[has]]
         return planned
 
+    def bands(self, run_date: dt.date, step: int) -> Floats:
+        """Each cost center's band in heads at `step`'s month: 0 where it has no target date
+        that month, or its target is exact."""
+        out = np.zeros(len(self.caps))
+        if self.plan is None:
+            return out
+        month = pd.Period(run_date, freq="M") + step
+        has = self._plan_group >= 0
+        bands = self.plan.marginal(COST_CENTER).band_at(month)
+        out[has] = np.nan_to_num(bands[self._plan_group[has]], nan=0.0)
+        return out
+
     def next_targets(self, run_date: dt.date, step: int) -> tuple[Floats, Floats]:
         """For every cost center the plan drives supply in and targets at `step`, its target at
         its next target date, the step's month or later, and the months until it: past its last
@@ -145,19 +157,28 @@ class Ceiling:
         result: Floats = np.minimum(self.caps, np.where(np.isnan(planned), np.inf, planned))
         return result
 
-    def room(self, run_date: dt.date, step: int, headcount: Ints, openings: Ints) -> Floats:
+    def room(
+        self,
+        run_date: dt.date,
+        step: int,
+        headcount: Ints,
+        openings: Ints,
+        credit: Floats | None = None,
+    ) -> Floats:
         """How many more openings each cost center can take before it reaches its ceiling: its
-        cap on committed strength, or the plan clamp on what the supply rule aims at. Never
+        cap on committed strength, or the plan clamp on what the supply rule aims at, with the
+        known-event `credit` (see `attainability`) counted in the plan's headcount. Never
         negative, and infinite where nothing binds."""
         strength = headcount + openings
+        heads = headcount if credit is None else headcount + credit
         if self.rule is SupplyRule.SOFT_BRIDGE:
             bound, _ = self.next_targets(run_date, step)
-            planned = bound - strength
+            planned = bound - heads - openings
         elif self.rule is SupplyRule.EXPECTED_FILL:
             bound = self.targets(run_date, step)
-            planned = (bound - headcount - self.fill_yield * openings) / self.fill_yield
+            planned = (bound - heads - self.fill_yield * openings) / self.fill_yield
         else:
-            planned = self.targets(run_date, step) - strength
+            planned = self.targets(run_date, step) - heads - openings
         free = np.minimum(self.caps - strength, np.where(np.isnan(planned), np.inf, planned))
         result: Floats = np.maximum(0.0, np.floor(free))
         return result

@@ -32,6 +32,8 @@ from numpy.typing import NDArray
 
 Floats = NDArray[np.float64]
 Ints = NDArray[np.int64]
+#: Heads or openings: whole, or credited with known events' expected changes.
+Counts = Ints | Floats
 
 
 class Route(StrEnum):
@@ -53,20 +55,22 @@ def _opened(wanted: Floats) -> Ints:
     return out
 
 
-def strength(target: Floats, headcount: Ints, openings: Ints, gain: float) -> Ints:
+def strength(target: Floats, headcount: Counts, openings: Counts, gain: float) -> Ints:
     """`ceil(β (H* - S))`, never negative, and nothing where there's no target."""
     return _opened(gain * (target - (headcount + openings)))
 
 
 def expected_fill(
-    target: Floats, headcount: Ints, openings: Ints, gain: float, fill_yield: float
+    target: Floats, headcount: Counts, openings: Counts, gain: float, fill_yield: float
 ) -> Ints:
     """`ceil(β (H* - H - y O) / y)`, never negative, and nothing where there's no target."""
     expected = headcount + fill_yield * openings
     return _opened(gain * (target - expected) / fill_yield)
 
 
-def soft_bridge(next_target: Floats, months_ahead: Floats, headcount: Ints, openings: Ints) -> Ints:
+def soft_bridge(
+    next_target: Floats, months_ahead: Floats, headcount: Counts, openings: Counts
+) -> Ints:
     """`ceil(k (H*(next) - S))` with `k = 1 / (d + 1)`, never negative, and nothing where
     there's no target ahead."""
     return _opened((next_target - (headcount + openings)) / (months_ahead + 1.0))
