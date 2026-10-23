@@ -31,6 +31,7 @@ from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
 from hcsim.engine.roles import DEGENERATE_ROWS, fill_roles
 from hcsim.engine.seeds import SeedManager
 from hcsim.engine.state import SimulationState
+from hcsim.engine.supply import Route, SupplyRule, expected_fill, soft_bridge, strength
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
@@ -414,16 +415,18 @@ def regimes(state: SimulationState, ctx: StepContext) -> NDArray[np.int64]:
 
 
 def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
-    """New growth requisitions, sized per cost center by its regime:
+    """New growth requisitions, sized per cost center by its regime, the route it takes (see
+    `supply`):
 
-    - **guided**: the residual of the requisitions-opened quota, after backfill's use of it;
-    - **target-seeking**: the supply rule, `ceil(gain * (H* - S))` and never negative, so the
-      plan target's gap to committed strength closes by the supply gain each month;
-    - **rate**: a count from the growth model's own draw at its historical rate, negative
+    - **target-seeking** (G-A): the run's supply rule, `strength`, `expected_fill`, or
+      `soft_bridge`, never negative;
+    - **guided** (G-B): the residual of the requisitions-opened quota, after backfill's use of it;
+    - **rate** (G-C): a count from the growth model's own draw at its historical rate, negative
       binomial for the negative-binomial model, from the seeded growth stream.
 
     Every count is then clamped at the room the effective ceiling leaves, since the capacity
-    veto always wins. Roles come from the required attribute generator.
+    veto always wins. The result carries each cost center's regime, which the run records.
+    Roles come from the required attribute generator.
     """
     n = state.n_cost_centers
     rng = ctx.rng(GROWTH)
@@ -432,12 +435,9 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
         counts[:] = 0
     regime = regimes(state, ctx)
     strength = state.headcount + state.open_openings
-    target = ctx.config.ceiling.targets(ctx.config.run_date, ctx.step)
     seeking = regime == Regime.TARGET
-    gap = np.nan_to_num(target - strength, nan=0.0)
-    supply = np.maximum(0, np.ceil(ctx.config.requisitions_supply_gain * gap)).astype(np.int64)
-    if not ctx.pinned:
-        counts[seeking] = supply[seeking]
+    if not ctx.pinned and seeking.any():
+        counts[seeking] = _supply(state, ctx)[seeking]
     ledger: dict[str, Ints] = {}
     quotas: dict[str, QuotaRecord] = {}
     guided = regime == Regime.GUIDED
@@ -467,7 +467,26 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
         ledger=ledger,
         quotas=quotas,
         diagnostics={DEGENERATE_ROWS: degenerate},
+        regimes=regime,
     )
+
+
+#: Each regime's route, as the supply module names them.
+ROUTES: Final = {Regime.TARGET: Route.SUPPLY, Regime.GUIDED: Route.GUIDED, Regime.RATE: Route.RATE}
+
+
+def _supply(state: SimulationState, ctx: StepContext) -> Ints:
+    """What the run's supply rule opens in each cost center this month."""
+    config = ctx.config
+    h, o = state.headcount, state.open_openings
+    rule, gain = config.requisitions_supply_rule, config.requisitions_supply_gain
+    if rule is SupplyRule.SOFT_BRIDGE:
+        upcoming, ahead = config.ceiling.next_targets(config.run_date, ctx.step)
+        return soft_bridge(upcoming, ahead, h, o)
+    target = config.ceiling.targets(config.run_date, ctx.step)
+    if rule is SupplyRule.EXPECTED_FILL:
+        return expected_fill(target, h, o, gain, config.requisitions_fill_yield)
+    return strength(target, h, o, gain)
 
 
 def rate_counts(model: GroupRateModel, n: int, rng: np.random.Generator) -> Ints:

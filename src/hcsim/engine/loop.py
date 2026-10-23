@@ -243,6 +243,9 @@ class TrajectoryResult:
     #: SBC for tranches whose holder was outside the run's subset that month: the run's
     #: scratch, never published in `sbc`, which with it makes the whole.
     sbc_scratch: pd.DataFrame | None = None
+    #: (months, cost centers): growth's regime each month (`domains.Regime`), the route its
+    #: requisitions took, or -1 where growth didn't run.
+    growth_regimes: Ints | None = None
 
 
 @dataclass(frozen=True)
@@ -504,6 +507,7 @@ def run_trajectory(
     ungranted = dict.fromkeys(registered.domains, 0)
     keep = set(config.results_snapshot_steps)
     snapshots: dict[int, Snapshot] = {}
+    growth_regimes = np.full((months, n), -1, dtype=np.int64)
 
     for step in range(months):
         if step in keep:
@@ -533,6 +537,8 @@ def run_trajectory(
                 ctx.transfers[req] = ctx.transfers.get(req, 0) + count
             if len(result.departures):
                 ctx.departures.append(Departures(domain, result.departures, result.anticipated))
+            if len(result.regimes):
+                growth_regimes[step] = result.regimes
             if result.flows:
                 for symbol, counts in result.flows.items():
                     flows[symbol][step] += counts
@@ -565,6 +571,7 @@ def run_trajectory(
             unsized_grants=unsized,
             ungranted_grants=ungranted,
             snapshots=snapshots,
+            growth_regimes=growth_regimes,
         )
     tranches = state.ledger.tranches()
     expense, sbc, scratch = trajectory_expense(
@@ -592,6 +599,7 @@ def run_trajectory(
         ungranted,
         snapshots,
         scratch,
+        growth_regimes,
     )
 
 

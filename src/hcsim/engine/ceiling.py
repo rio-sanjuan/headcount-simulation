@@ -105,6 +105,27 @@ class Ceiling:
         planned[has] = targets[self._plan_group[has]]
         return planned
 
+    def next_targets(self, run_date: dt.date, step: int) -> tuple[Floats, Floats]:
+        """For every cost center the plan drives supply in and targets at `step`, its target at
+        its next target date, the step's month or later, and the months until it: past its last
+        date, the last target, 0 months ahead. NaN where it has none."""
+        values, ahead = np.full(len(self.caps), np.nan), np.full(len(self.caps), np.nan)
+        current = self.targets(run_date, step)
+        if self.plan is None or np.isnan(current).all():
+            return values, ahead
+        month = (pd.Period(run_date, freq="M") + step).ordinal
+        marginal = self.plan.marginal(COST_CENTER)
+        dates = np.array([d.ordinal for d in marginal.dates], dtype=np.int64)
+        for code in np.flatnonzero(~np.isnan(current)):
+            row = marginal.values[self._plan_group[code]]
+            known = ~np.isnan(row)
+            later = np.flatnonzero(known & (dates >= month))
+            if later.size:
+                values[code], ahead[code] = row[later[0]], float(dates[later[0]] - month)
+            else:
+                values[code], ahead[code] = row[known][-1], 0.0
+        return values, ahead
+
     def at(self, run_date: dt.date, step: int) -> Floats:
         """`Cap_eff(c, t)` for every cost center at `step`."""
         planned = self.targets(run_date, step)
