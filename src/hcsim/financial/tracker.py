@@ -166,6 +166,14 @@ class Tranches:
     def __len__(self) -> int:
         return len(self.holder)
 
+    def take(self, lo: int, hi: int) -> Tranches:
+        """Tranches `lo` to `hi`, in order."""
+        names = ("holder", "award_month", "vest_month", "shares", "forfeit_month", "award_type")
+        return Tranches(
+            **{n: getattr(self, n)[lo:hi] for n in (*names, "level", "cost_center")},
+            value=None if self.value is None else self.value[lo:hi],
+        )
+
     @property
     def values(self) -> NDArray[np.float64]:
         """`value`, NaN throughout when the tranches carry none."""

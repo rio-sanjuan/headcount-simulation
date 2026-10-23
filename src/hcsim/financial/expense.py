@@ -15,12 +15,22 @@ calendar, into one table, in four steps, every problem with the inputs refused a
 settings, so the same table always gives the same expense, and it can be checked on hand-built
 schedules. Vectorized over tranches, for each tranche:
 
-1. Gross expense accrues in equal monthly shares from the award month through the vest month.
-2. Net expense is gross times `1 - e`, for a flat effective forfeiture rate `e`.
-3. A forfeited tranche (the holder left before it vested) accrues through its forfeiture month,
-   where the attrition true-up reverses every net dollar recognized.
-4. A tranche that vests gets the vesting true-up at its vest month: the residual between its
-   value and the net recognized. That's what makes the accounting identity hold by construction:
+1. **Gross expense** accrues from the award month through the vest month, each month's share of
+   the value in proportion to its calendar days, given an origin, or in equal shares without.
+2. **Survival.** A month accrues only if the holder still holds the tranche when it starts. For a
+   simulated holder that's certain until the month they leave, the forfeit month the ledger
+   records; for the rest, it's their survival path's chance, so their expense is its
+   expectation.
+3. **Net expense** is gross times `1 - e`, for the effective forfeiture rate `e`: flat, or with
+   `forfeiture="cohort"`, each cohort's own, from a pre-pass that recomputes it every month as the
+   share of the cohort's decided shares, forfeited or vested so far, that forfeited, the flat
+   rate standing in until any are decided.
+4. **The three true-ups.** When a cohort's rate changes, the **rate** true-up adjusts what each
+   still-accruing tranche accrued before, by the fall in the rate. A holder leaving before the
+   vest reverses everything the tranche recognized: the **attrition** true-up, weighted by the
+   chance of leaving that month. At the vest, the **vesting** true-up is the residual between the
+   value and what was recognized, weighted by the chance of getting there. That's what makes the
+   accounting identity hold by construction, in expectation where survival is uncertain:
 
        cumulative net + true-ups = vested shares * value per share
 
@@ -32,7 +42,7 @@ A residual above the tolerance therefore means a defect in this code, and it rai
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 import numpy as np
 import pandas as pd
@@ -41,15 +51,20 @@ from numpy.typing import NDArray
 from hcsim.financial.tracker import Tranches
 
 IDENTITY_TOLERANCE: Final = 0.01
+Floats = NDArray[np.float64]
+Ints = NDArray[np.int64]
 SBC_KEYS: Final = ["month", "cost_center", "award_type", "level"]
 SBC_VALUES: Final = [
     "gross",
     "net",
     "trueup_attrition",
+    "trueup_rate",
     "trueup_vesting",
     "trueup",
     "recognized",
 ]
+#: The true-ups, in the order the rows carry them.
+TRUEUPS: Final = ("trueup_attrition", "trueup_rate", "trueup_vesting")
 
 
 class AccountingIdentityError(AssertionError):
@@ -58,13 +73,18 @@ class AccountingIdentityError(AssertionError):
 
 @dataclass(frozen=True)
 class ExpenseConfig:
-    #: Flat effective forfeiture rate. Invented default.
+    #: Flat effective forfeiture rate, and the prior a cohort's rate starts from. Invented
+    #: default.
     forfeiture_rate: float = 0.10
+    #: `flat`, one rate throughout, or `cohort`, each cohort's own, recomputed every month.
+    forfeiture: Literal["flat", "cohort"] = "flat"
     identity_tolerance: float = IDENTITY_TOLERANCE
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.forfeiture_rate < 1.0:
             raise ValueError("forfeiture_rate must lie in [0, 1)")
+        if self.forfeiture not in ("flat", "cohort"):
+            raise ValueError(f"forfeiture is 'flat' or 'cohort', not {self.forfeiture!r}")
 
 
 @dataclass(frozen=True)
@@ -146,49 +166,138 @@ def prepare(
     return Prepared(tranches, value, forfeited, last, origin, cohort, kept)
 
 
+def _within(values: Floats, groups: Ints, starts: Ints) -> Floats:
+    """Cumulative sums of `values` within contiguous groups beginning at `starts`."""
+    total = np.cumsum(values)
+    offset = np.zeros(len(starts))
+    offset[1:] = total[starts[1:] - 1]
+    out: Floats = total - offset[groups]
+    return out
+
+
+def _survival(prepared: Prepared, tranche: Ints, month: Ints) -> Floats:
+    """Each (tranche, month)'s chance its holder still holds it at the month's end: their
+    survival path's, 1 before the run, its last value after it; and nothing from the month a
+    simulated holder leaves."""
+    out = np.ones(len(tranche))
+    if prepared.survival is not None and prepared.survival.shape[1]:
+        path = prepared.survival
+        column = np.clip(month, 0, path.shape[1] - 1)
+        out = np.where(month >= 0, path[tranche, column], 1.0)
+    t = prepared.tranches
+    left = prepared.forfeited[tranche] & (month >= t.forfeit_month[tranche])
+    out = np.where(left, 0.0, out)
+    return out
+
+
+def _cohort_rates(
+    prepared: Prepared,
+    tranche: Ints,
+    month: Ints,
+    alive: Floats,
+    prior_alive: Floats,
+    prior: float,
+) -> tuple[Floats, Ints, Floats]:
+    """The cohort pre-pass: each cohort's effective forfeiture rate in every month, from the
+    shares decided by then, forfeited or vested, and `prior` until any are. Returns the
+    (cohorts, months) table, its cohorts' codes, and its first month."""
+    t = prepared.tranches
+    cohorts, code = np.unique(prepared.cohort, return_inverse=True)
+    first, last = int(month.min()), int(month.max())
+    width = last - first + 1
+    shares = t.shares[tranche]
+    vesting = month == t.vest_month[tranche]
+    forfeited = np.where(vesting, 0.0, (prior_alive - alive) * shares)
+    vested = np.where(vesting, prior_alive * shares, 0.0)
+    grid = np.zeros((2, len(cohorts), width))
+    np.add.at(grid[0], (code[tranche], month - first), forfeited)
+    np.add.at(grid[1], (code[tranche], month - first), vested)
+    gone, kept = np.cumsum(grid[0], axis=1), np.cumsum(grid[1], axis=1)
+    decided = gone + kept
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rates = np.where(decided > 0, gone / decided, prior)
+    return np.minimum(rates, 1.0 - 1e-12), code, np.array([first])
+
+
 def calculate(
     prepared: Prepared, config: ExpenseConfig | None = None, first_month: int | None = None
 ) -> ExpenseResult:
     """Every tranche's monthly expense and true-ups, from the prepared table alone. With
     `first_month`, as a run's first, the rows start there: what a tranche recognized before it,
-    net accrual and any true-up, is its opening balance instead, and the identity still holds
-    over the tranche's whole life."""
+    accrual and any true-up, is its opening balance instead, and the identity still holds over
+    the tranche's whole life."""
     config = config or ExpenseConfig()
     t = prepared.tranches
     n = len(t)
-    a, v, f = t.award_month, t.vest_month, t.forfeit_month
-    e = config.forfeiture_rate
-    value, forfeited, last = prepared.value, prepared.forfeited, prepared.last
-    per_month = value / (v - a + 1)
-    months_accrued = np.maximum(0, last - a + 1)
-    start = a if first_month is None else np.maximum(a, first_month)
-    before = months_accrued - np.maximum(0, last - start + 1)
-    emitted = months_accrued - before
-
-    index = np.repeat(np.arange(n), emitted)
-    starts = np.repeat(np.cumsum(emitted) - emitted, emitted)
-    month = start[index] + (np.arange(len(index)) - starts)
-    gross = per_month[index]
-    net_recognized = per_month * months_accrued * (1 - e)
-    attrition = np.where(forfeited, -net_recognized, 0.0)
-    vesting = np.where(forfeited, 0.0, value - net_recognized)
-    trueup_month = np.where(forfeited, np.maximum(f, a), v)
-    late = np.ones(n, dtype=bool) if first_month is None else trueup_month >= first_month
-    opening = per_month * before * (1 - e) + np.where(late, 0.0, attrition + vesting)
+    a, v = t.award_month, t.vest_month
+    value = prepared.value
+    # Rows run through the vest, or through the forfeit for a simulated holder who leaves; a
+    # tranche whose holder left before its award has none.
+    count = np.maximum(0, prepared.last - a + 1)
+    tranche = np.repeat(np.arange(n), count)
+    starts = np.cumsum(count) - count
+    month = a[tranche] + (np.arange(len(tranche)) - starts[tranche])
+    # 1. Gross, by calendar days.
+    if prepared.origin is None:
+        days = np.ones(len(month))
+        window = (v - a + 1).astype(np.float64)
+    else:
+        base = prepared.origin.start_time
+        offsets = (
+            np.arange(int(a.min(initial=0)), int(v.max(initial=0)) + 2) if n else np.zeros(1, int)
+        )
+        calendar = np.array(
+            [(base + pd.DateOffset(months=int(m))).days_in_month for m in offsets[:-1]],
+            dtype=np.float64,
+        )
+        cumulative = np.concatenate([[0.0], np.cumsum(calendar)])
+        lo = int(offsets[0])
+        days = calendar[month - lo] if len(month) else np.zeros(0)
+        window = cumulative[v - lo + 1] - cumulative[a - lo]
+    gross = value[tranche] * days / window[tranche]
+    # 2. Survival: the chance the holder holds the tranche at each month's start, and end.
+    alive = _survival(prepared, tranche, month)
+    prior_alive = _survival(prepared, tranche, month - 1)
+    # 3. Net, at the flat rate or each cohort's.
+    if config.forfeiture == "cohort" and len(month):
+        rates, code, first = _cohort_rates(
+            prepared, tranche, month, alive, prior_alive, config.forfeiture_rate
+        )
+        rate = rates[code[tranche], month - first[0]]
+        before = rates[code[tranche], np.maximum(month - 1 - first[0], 0)]
+        before = np.where(month == a[tranche], rate, before)
+    else:
+        rate = before = np.full(len(month), config.forfeiture_rate)
+    accrued_before = _within(gross, tranche, starts) - gross
+    net = gross * (1 - rate)
+    # 4. The true-ups: rate on what accrued before, then attrition and vesting.
+    rate_up = accrued_before * (before - rate)
+    recognized = _within(net + rate_up, tranche, starts)
+    vests = month == v[tranche]
+    attrition = np.where(vests, 0.0, -(prior_alive - alive) * recognized)
+    vesting = np.where(vests, prior_alive * (value[tranche] - recognized), 0.0)
+    columns = {
+        "gross": gross * prior_alive,
+        "net": net * prior_alive,
+        "trueup_attrition": attrition,
+        "trueup_rate": rate_up * prior_alive,
+        "trueup_vesting": vesting,
+    }
+    amount = columns["net"] + columns["trueup_attrition"] + columns["trueup_rate"]
+    amount = amount + columns["trueup_vesting"]
+    total = np.zeros(n)
+    np.add.at(total, tranche, amount)
+    expected = value * _survival(prepared, np.arange(n), v - 1)
+    residual = check_identity(total, expected, config.identity_tolerance)
+    opening = np.zeros(n)
+    keep = np.ones(len(month), dtype=bool)
+    if first_month is not None:
+        keep = month >= first_month
+        np.add.at(opening, tranche[~keep], amount[~keep])
     rows = pd.DataFrame(
-        {
-            "tranche": np.concatenate([index, np.flatnonzero(late)]),
-            "month": np.concatenate([month, trueup_month[late]]),
-            "gross": np.concatenate([gross, np.zeros(int(late.sum()))]),
-            "net": np.concatenate([gross * (1 - e), np.zeros(int(late.sum()))]),
-            "trueup_attrition": np.concatenate([np.zeros(len(index)), attrition[late]]),
-            "trueup_vesting": np.concatenate([np.zeros(len(index)), vesting[late]]),
-        }
+        {"tranche": tranche[keep], "month": month[keep]}
+        | {name: values[keep] for name, values in columns.items()}
     )
-    total = opening.copy()
-    for column in ("net", "trueup_attrition", "trueup_vesting"):
-        np.add.at(total, rows["tranche"].to_numpy(), rows[column].to_numpy())
-    residual = check_identity(total, np.where(forfeited, 0.0, value), config.identity_tolerance)
     return ExpenseResult(rows, residual, opening if first_month is not None else None)
 
 
@@ -231,9 +340,7 @@ def sbc_frame(result: ExpenseResult, tranches: Tranches) -> pd.DataFrame:
         award_type=tranches.award_type[t],
         level=tranches.level[t],
     )
-    frame = keyed.groupby(SBC_KEYS, as_index=False)[
-        ["gross", "net", "trueup_attrition", "trueup_vesting"]
-    ].sum()
-    frame["trueup"] = frame["trueup_attrition"] + frame["trueup_vesting"]
+    frame = keyed.groupby(SBC_KEYS, as_index=False)[["gross", "net", *TRUEUPS]].sum()
+    frame["trueup"] = frame["trueup_attrition"] + frame["trueup_rate"] + frame["trueup_vesting"]
     frame["recognized"] = frame["net"] + frame["trueup"]
     return frame[SBC_KEYS + SBC_VALUES].sort_values(SBC_KEYS, ignore_index=True)
