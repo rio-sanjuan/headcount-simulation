@@ -6,6 +6,12 @@ same calculator as the simulation's, with no attrition: none forfeits, whatever 
 do, and each is valued at its latest appraisal before the run. Its expense is attributed to the
 holder's cost center at the origin.
 
+In a replay, the stream is history's. It also holds the awards the offline plans granted during
+the run, each at its grant's appraisal, and a tranche forfeits in the month history records
+(`forfeit_month`). Those awards, as recorded (`recorded`), route a grant as the primary plan's
+recorded awards do (see `financial.routing`): a recipient who holds one takes it from the
+stream, so the run neither replays nor sizes their grant.
+
 **Manual adjustments** (`ManualAdjustments`) are expense a planner adds by hand, as for a known
 grant the run can't make: a month, a cost center, an award type, a level, an amount, and a note.
 Each adds its amount to the month's recognized expense, and nothing else.
@@ -30,10 +36,11 @@ from hcsim.financial.expense import (
     compute_expense,
     sbc_frame,
 )
+from hcsim.financial.routing import RecordedAwards
 from hcsim.financial.tracker import NOT_FORFEITED, Tranches
 from hcsim.model.core.schema import AWARD_TYPE, COST_CENTER, JOB_LEVEL, SimulationSchema
 
-#: The columns an offline frame holds, one row per tranche.
+#: The columns an offline frame holds, one row per tranche. A replay's adds `forfeit_month`.
 OFFLINE_COLUMNS: Final = (
     "award_id",
     "holder",
@@ -55,10 +62,12 @@ class StreamError(ValueError):
 
 @dataclass(frozen=True)
 class OfflineStream:
-    """Offline subsidiaries' tranches outstanding at the run's start (`OFFLINE_COLUMNS`), each
-    at its latest appraisal before the run."""
+    """Offline subsidiaries' tranches (`OFFLINE_COLUMNS`): those outstanding at the run's start,
+    each at its latest appraisal before it, and in a replay, those granted during it, each at its
+    grant's appraisal, with the month each tranche forfeits and the awards as `recorded`."""
 
     frame: pd.DataFrame
+    recorded: RecordedAwards | None = None
 
     def __post_init__(self) -> None:
         absent = [c for c in OFFLINE_COLUMNS if c not in self.frame.columns]
@@ -73,6 +82,21 @@ class OfflineStream:
         values = f["value_per_share"].to_numpy(dtype=np.float64)
         if not (np.isfinite(values) & (values >= 0)).all():
             problems.append("an offline tranche's appraisal is finite and non-negative")
+        forfeits = f["forfeit_month"] if "forfeit_month" in f else pd.Series(dtype=np.int64)
+        if ((forfeits < 0) & (forfeits != NOT_FORFEITED)).any():
+            problems.append("an offline tranche forfeits during the run, or never (-1)")
+        if self.recorded is not None:
+            held = set(zip(f["award_month"].tolist(), f["holder"].tolist(), strict=True))
+            missing = sum(
+                (step, employee) not in held
+                for (_, step), by_id in self.recorded.schedules.items()
+                for employee in by_id
+            )
+            if missing:
+                problems.append(
+                    f"{missing} recorded awards have no tranche awarded to their holder in their "
+                    "month"
+                )
         if problems:
             raise StreamError("; ".join(problems))
 
@@ -80,18 +104,24 @@ class OfflineStream:
         return len(self.frame)
 
     def tranches(self) -> Tranches:
-        """The tranches as the calculator reads them: none ever forfeits."""
+        """The tranches as the calculator reads them: none forfeits, unless a replay's
+        `forfeit_month` gives the month it does."""
         f = self.frame
 
         def column(name: str) -> np.ndarray:
             return f[name].to_numpy(dtype=np.int64)
 
+        forfeits = (
+            column("forfeit_month")
+            if "forfeit_month" in f
+            else np.full(len(f), NOT_FORFEITED, dtype=np.int64)
+        )
         return Tranches(
             holder=column("holder"),
             award_month=column("award_month"),
             vest_month=column("vest_month"),
             shares=f["shares"].to_numpy(dtype=np.float64),
-            forfeit_month=np.full(len(f), NOT_FORFEITED, dtype=np.int64),
+            forfeit_month=forfeits,
             award_type=column("award_type"),
             level=column("level"),
             cost_center=column("cost_center"),
@@ -99,7 +129,7 @@ class OfflineStream:
         )
 
     def expense(self, config: ExpenseConfig | None = None) -> ExpenseResult:
-        """The stream through the calculator, from the run's first month, with no attrition."""
+        """The stream through the calculator, from the run's first month."""
         t = self.tranches()
         return compute_expense(t, t.values, config, first_month=0)
 

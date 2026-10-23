@@ -134,6 +134,35 @@ def test_a_lagged_award_routes_with_its_own_step_and_the_rest_are_sized() -> Non
     assert exact.sized.tolist() == [True]  # without a lag, the award a month on is out of reach
 
 
+#: Awards an offline stream holds: 8's a month after the dispatch, and 7's beside a primary one.
+OFFLINE = RecordedAwards.from_frame(tranches((8, "new_hire", 3, 12, 60), (7, "new_hire", 2, 12, 9)))
+
+
+def test_an_award_the_offline_stream_holds_routes_its_recipient_there_with_no_shares() -> None:
+    window = HybridWindow(lag={"new_hire": 2})
+    context = SizingContext(2)
+    routed = route(
+        HIRES, "new_hire", rows(7, 8, 10), PRICE, context, LAGGED, window, set(), OFFLINE
+    )
+    assert routed is not None
+    # 7 takes the primary plan's award, 8 the stream's, and 10 holds neither, so is sized.
+    assert routed.replayed.tolist() == [True, False, False]
+    assert routed.offline.tolist() == [False, True, False]
+    assert routed.sized.tolist() == [False, False, True]
+    assert routed.award_steps.tolist() == [3, 3, -1]
+    assert routed.batch.shares_per_year[:, 0].tolist() == [40, 0, 500]
+    # Once granted, the stream's award routes no one again, and without a strategy, a
+    # recipient the stream covers is still granted.
+    granted = {("new_hire", 3, 8)}
+    again = route(HIRES, "new_hire", rows(8), PRICE, context, None, window, granted, OFFLINE)
+    assert again is not None
+    assert again.sized.tolist() == [True]
+    alone = route(None, "new_hire", rows(8), PRICE, context, None, window, set(), OFFLINE)
+    assert alone is not None
+    assert alone.offline.tolist() == [True]
+    assert not alone.batch.vest_schedule.any()
+
+
 def test_without_a_strategy_only_recorded_recipients_are_granted() -> None:
     routed = route(None, "annual", rows(7, 9), PRICE, SizingContext(2), RECORDED)
     assert routed is not None

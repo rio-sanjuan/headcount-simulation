@@ -50,6 +50,8 @@ class Applied:
     replayed_grants: int = 0
     #: Grant recipients an eligibility cutoff left out.
     ineligible_grants: int = 0
+    #: Grant recipients who took a recorded award the offline stream holds.
+    offline_grants: int = 0
 
 
 def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
@@ -190,8 +192,9 @@ def apply(
 
     # 7. Route, size, and record grants, for the appended employees, the written ones, or the
     # listed ones: a recorded award where the recipient holds one in the grant's window, sizing
-    # otherwise.
-    recorded = unsized = replayed = ineligible = 0
+    # otherwise. One the offline stream holds records nothing, since the stream carries it.
+    recorded = unsized = replayed = ineligible = offline = 0
+    streamed = None if awards is None or awards.offline is None else awards.offline.recorded
     if result.grants and awards is not None and state.ledger is not None:
         first = state.n_employees - len(appended)
         for grant in result.grants:
@@ -222,13 +225,15 @@ def apply(
                 awards.replayed,
                 awards.window,
                 state.replayed_awards,
+                streamed,
             )
             if routed is None:
                 unsized += len(positions)
                 continue
-            granted = routed.replayed | routed.sized
+            granted = routed.replayed | routed.sized | routed.offline
             unsized += int((~granted).sum())
             replayed += int(routed.replayed.sum())
+            offline += int(routed.offline.sum())
             batch = routed.batch
             state.employees[positions[granted], EmployeeColumn.BASE_SALARY] = batch.base_salary[
                 granted
@@ -241,9 +246,10 @@ def apply(
             else:
                 award_steps = timing.award_steps(step, calendar_month, len(rows), rng)
             # A recorded award is awarded in the month it was recorded, and only once.
-            award_steps = np.where(routed.replayed, routed.award_steps, award_steps)
-            ids = rows[routed.replayed, EmployeeColumn.EMPLOYEE_ID].astype(np.int64).tolist()
-            awarded = routed.award_steps[routed.replayed].tolist()
+            claimed = routed.replayed | routed.offline
+            award_steps = np.where(claimed, routed.award_steps, award_steps)
+            ids = rows[claimed, EmployeeColumn.EMPLOYEE_ID].astype(np.int64).tolist()
+            awarded = routed.award_steps[claimed].tolist()
             state.replayed_awards.update(
                 (grant.award_type, s, i) for s, i in zip(awarded, ids, strict=True)
             )
@@ -275,4 +281,5 @@ def apply(
         unsized,
         replayed,
         ineligible,
+        offline,
     )

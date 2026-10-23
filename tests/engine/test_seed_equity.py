@@ -211,6 +211,47 @@ def test_a_world_without_offline_subsidiaries_has_an_empty_offline_stream(
     assert equity.stream.sbc().empty
 
 
+def test_a_replays_offline_stream_adds_the_windows_awards_and_historys_forfeits(
+    tmp_path: Path,
+) -> None:
+    # A tiny world whose second company is an offline subsidiary, replayed for six months.
+    world = dataclasses.replace(
+        preset("tiny", seed=4), companies=("CO-1", "CO-2"), offline_subsidiaries=1
+    )
+    path = tmp_path / "offline.duckdb"
+    write_world(generate_world(world), path)
+    run = dt.date(2025, 1, 1)
+    with duckdb.connect(str(path), read_only=True) as offline:
+        schema = schema_from_world(offline)
+        forecast = offline_equity(offline, schema, run).stream
+        replay = offline_equity(offline, schema, run, replayed_months=6).stream
+        granted = offline.execute(
+            "SELECT a.award_id, any_value(a.fair_value) AS fair_value, count(*) AS tranches "
+            "FROM equity_award a JOIN equity_vest v USING (award_id) "
+            "WHERE a.plan = 'offline' AND a.award_date >= ? AND a.award_date < ? "
+            "AND v.shares > 0 GROUP BY ALL ORDER BY ALL",
+            [run, dt.date(2025, 7, 1)],
+        ).df()
+    # A forecast's stream is unchanged: no awards during the run, and no attrition.
+    assert forecast.recorded is None
+    assert "forfeit_month" not in forecast.frame
+    frame = replay.frame
+    window = frame[frame["award_month"] >= 0]
+    assert len(frame) - len(window) == len(forecast)
+    assert window.groupby("award_id").size().tolist() == granted["tranches"].tolist()
+    assert window["award_month"].between(0, 5).all()
+    # Each award during the run at its grant's appraisal, and recorded for routing.
+    first = window.groupby("award_id")["value_per_share"].first()
+    assert first.tolist() == pytest.approx(granted["fair_value"].tolist())
+    assert replay.recorded is not None
+    assert len(replay.recorded) == len(window.groupby(["award_type", "award_month", "holder"]))
+    # History's forfeits, among the tranches outstanding at the start and those granted after.
+    forfeits = frame["forfeit_month"] >= 0
+    assert (forfeits & (frame["award_month"] < 0)).any()
+    assert (forfeits & (frame["award_month"] >= 0)).any()
+    assert (frame.loc[forfeits, "forfeit_month"] >= frame.loc[forfeits, "award_month"]).all()
+
+
 @pytest.mark.slow
 def test_the_offline_stream_is_every_outstanding_offline_tranche_at_its_appraisal(
     tmp_path: Path,

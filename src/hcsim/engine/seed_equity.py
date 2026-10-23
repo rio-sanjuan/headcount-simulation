@@ -23,7 +23,9 @@ joining at their start. A departed holder's tranches stay out.
 `offline_equity` reads the offline subsidiaries' plan the same way, for the offline stream (see
 `financial.streams`): its tranches outstanding at the run's start, each at its latest appraisal
 before the run, its grant's value when it has none, with no attrition, so a tranche whose holder
-history says leaves during the run stays in.
+history says leaves during the run stays in. A replay's stream is history's: it adds the awards
+granted during the replayed months, each at its grant's appraisal and recorded for routing, and
+each tranche forfeits in the month history records.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import pandas as pd
 from hcsim.engine.state import SimulationState
 from hcsim.financial.expense import SBC_KEYS, SBC_VALUES, TRUEUPS
 from hcsim.financial.output import PART_KEYS
+from hcsim.financial.routing import RecordedAwards
 from hcsim.financial.seed import HolderStatus, SeedTranches, classify
 from hcsim.financial.streams import OFFLINE_COLUMNS, OfflineStream
 from hcsim.model.core.contract import role_column
@@ -168,9 +171,9 @@ def record_seed(state: SimulationState, seed: SeedTranches) -> dict[str, int]:
 _OFFLINE = """
 WITH tranches AS (
     SELECT a.award_id, a.employee_id, a.award_type, a.award_date, a.fair_value, a.job_level,
-           a.{award_cc} AS granted_in, v.vest_date, v.shares
+           a.{award_cc} AS granted_in, v.vest_date, v.shares, v.forfeit_date
     FROM equity_award a JOIN equity_vest v USING (award_id)
-    WHERE a.plan = 'offline' AND a.award_date < $run AND v.vest_date >= $run AND v.shares > 0
+    WHERE a.plan = 'offline' AND a.award_date < $end AND v.vest_date >= $run AND v.shares > 0
       AND (v.forfeit_date IS NULL OR v.forfeit_date >= $run)
 ),
 appraised AS (
@@ -191,7 +194,10 @@ SELECT t.award_id, coalesce(h.holder, t.employee_id) AS holder, t.award_type,
        datediff('month', date_trunc('month', $run::DATE), date_trunc('month', t.vest_date))
            AS vest_month,
        t.shares, coalesce(p.appraisal, t.fair_value) AS value_per_share, t.job_level AS level,
-       coalesce(h.cost_center, t.granted_in) AS cost_center
+       coalesce(h.cost_center, t.granted_in) AS cost_center,
+       CASE WHEN t.forfeit_date IS NULL THEN -1
+            ELSE datediff('month', date_trunc('month', $run::DATE),
+                          date_trunc('month', t.forfeit_date)) END AS forfeit_month
 FROM tranches t LEFT JOIN appraised p USING (award_id) LEFT JOIN holders h USING (award_id)
 ORDER BY t.award_id, t.vest_date
 """
@@ -207,14 +213,35 @@ class OfflineEquity:
 
 
 def offline_equity(
-    con: duckdb.DuckDBPyConnection, schema: SimulationSchema, run_date: dt.date
+    con: duckdb.DuckDBPyConnection,
+    schema: SimulationSchema,
+    run_date: dt.date,
+    replayed_months: int = 0,
 ) -> OfflineEquity:
-    """The offline subsidiaries' equity outstanding at `run_date`, at its latest appraisals."""
+    """The offline subsidiaries' equity outstanding at `run_date`, at its latest appraisals. A
+    replay of `replayed_months` months adds the awards granted during them, and its tranches
+    forfeit as history records."""
     sql = _OFFLINE.format(
         award_cc=role_column(con, "equity_award"), holder_cc=role_column(con, "equity_holder")
     )
-    frame, pruned = _encoded(con.execute(sql, {"run": run_date}).df(), schema)
-    return OfflineEquity(OfflineStream(frame[list(OFFLINE_COLUMNS)]), pruned)
+    end = (pd.Period(run_date, "M") + replayed_months).start_time.date()
+    frame, pruned = _encoded(con.execute(sql, {"run": run_date, "end": end}).df(), schema)
+    if not replayed_months:
+        return OfflineEquity(OfflineStream(frame[list(OFFLINE_COLUMNS)]), pruned)
+    window = frame[frame["award_month"] >= 0]
+    recorded = RecordedAwards.from_frame(
+        pd.DataFrame(
+            {
+                "employee_id": window["holder"],
+                "award_type": schema.decode(AWARD_TYPE, window["award_type"]),
+                "step": window["award_month"],
+                "after": window["vest_month"] - window["award_month"],
+                "shares": window["shares"],
+            }
+        )
+    )
+    stream = OfflineStream(frame[[*OFFLINE_COLUMNS, "forfeit_month"]], recorded)
+    return OfflineEquity(stream, pruned)
 
 
 def _encoded(frame: pd.DataFrame, schema: SimulationSchema) -> tuple[pd.DataFrame, dict[str, int]]:

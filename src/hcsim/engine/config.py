@@ -270,7 +270,8 @@ class AwardSettings:
     #: its domain dispatches.
     eligibility: Mapping[str, AnnualCutoff] = field(default_factory=dict)
     #: The offline subsidiaries' stream, and expense added by hand: SBC every trajectory
-    #: carries beside its own.
+    #: carries beside its own. A grant's recipient who holds an award a replay's offline stream
+    #: records takes it from the stream, and the run neither replays nor sizes their grant.
     offline: OfflineStream | None = None
     manual: ManualAdjustments | None = None
 

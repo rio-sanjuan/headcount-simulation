@@ -4,7 +4,9 @@
   its month, or within its type's lag after it, take that award as recorded, in the award's own
   month; the rest are sized by the strategy. Each takes their earliest recorded award not yet
   granted, so none is granted twice. Every recipient's base is the strategy's imputation, since
-  a recorded award carries no salary.
+  a recorded award carries no salary. A replay's offline stream holds the offline plans' awards
+  as recorded (see `financial.streams`): a recipient with none of the primary plan's who holds
+  one there takes it from the stream, and the grant gives them no shares.
 - **Hybrid windows** (`HybridWindow`): recorded awards route only through a last step, and
   every grant after it is sized, as when a run starts before its data ends: its first months
   replay what was granted, and the rest forecast it. The window also holds each award type's
@@ -223,13 +225,15 @@ class HybridWindow:
 
 @dataclass(frozen=True)
 class Routed:
-    """A routed grant: its batch, which rows took a recorded award, and which were sized. Each
-    recorded award's step is the one it was recorded at, and -1 for rows that took none."""
+    """A routed grant: its batch, which rows took a recorded award, which were sized, and which
+    took an award the offline stream holds, with no shares in the batch. Each recorded award's
+    step is the one it was recorded at, and -1 for rows that took none."""
 
     batch: AwardBatch
     replayed: NDArray[np.bool_]
     sized: NDArray[np.bool_]
     award_steps: Ints
+    offline: NDArray[np.bool_]
 
 
 def route(
@@ -241,33 +245,36 @@ def route(
     recorded: RecordedAwards | None = None,
     window: HybridWindow | None = None,
     granted: Container[Claim] = frozenset(),
+    offline: RecordedAwards | None = None,
 ) -> Routed | None:
     """Route one grant's recipients: the earliest recorded award they hold among the window's
-    steps for this one and haven't been `granted`, sizing by `strategy` otherwise. None when no
-    recipient is covered either way. Without a strategy, recorded recipients keep the base they
-    have."""
+    steps for this one and haven't been `granted`, then the earliest of the `offline` stream's,
+    sizing by `strategy` otherwise. None when no recipient is covered any way. Without a
+    strategy, recorded recipients keep the base they have."""
     ids = np.asarray(rows[:, EmployeeColumn.EMPLOYEE_ID], dtype=np.int64)
     n = len(rows)
+    steps = (window or HybridWindow()).steps(context.step, award_type)
     covered = np.zeros(n, dtype=bool)
     schedule = np.zeros((n, CANONICAL_VEST_MONTHS), dtype=np.int64)
     award_steps = np.full(n, -1, dtype=np.int64)
     if recorded is not None:
-        steps = (window or HybridWindow()).steps(context.step, award_type)
         covered, schedule, award_steps = recorded.lookup(ids, steps, award_type, granted)
-    if strategy is None and not covered.any():
+    streamed = np.zeros(n, dtype=bool)
+    if offline is not None:
+        held, _, offline_steps = offline.lookup(ids, steps, award_type, granted)
+        streamed = held & ~covered
+        award_steps = np.where(streamed, offline_steps, award_steps)
+    if strategy is None and not (covered | streamed).any():
         return None
     base = rows[:, EmployeeColumn.BASE_SALARY].astype(np.float64)
     sized = np.zeros(n, dtype=bool)
     if strategy is not None:
         batch = strategy.size(rows, prices, context)
         base = batch.base_salary
-        sized = ~covered
-        schedule = np.where(covered[:, None], schedule, batch.vest_schedule)
-    else:
-        schedule = np.where(covered[:, None], schedule, 0)
-    return Routed(
-        AwardBatch(award_type, base, per_year(schedule), schedule), covered, sized, award_steps
-    )
+        sized = ~covered & ~streamed
+        schedule = np.where(sized[:, None], batch.vest_schedule, schedule)
+    batch = AwardBatch(award_type, base, per_year(schedule), schedule)
+    return Routed(batch, covered, sized, award_steps, streamed)
 
 
 @dataclass(frozen=True)
