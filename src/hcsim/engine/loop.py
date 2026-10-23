@@ -20,6 +20,7 @@ accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime as dt
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -374,6 +375,17 @@ class SimulationResult:
         return frame
 
 
+def values_per_share(tranches: Tranches, prices: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Each tranche's value per share: its own where it carries one, as a seed tranche does;
+    else the run's price in its award month, the last month's for an award after the run."""
+    own = tranches.values
+    unvalued = np.isnan(own)
+    if (unvalued & (tranches.award_month < 0)).any():
+        raise ValueError("a tranche awarded before the run must carry its own value per share")
+    month = np.minimum(tranches.award_month, len(prices) - 1)
+    return np.where(unvalued, prices[np.maximum(month, 0)], own)
+
+
 def calendar_month(run_date: dt.date, step: int) -> int:
     """The calendar month, 1-12, of simulation step `step`."""
     return (run_date.month - 1 + step) % 12 + 1
@@ -485,9 +497,13 @@ def run_trajectory(
             snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
-    if len(tranches) and (tranches.award_month.min() < 0 or tranches.award_month.max() >= months):
-        raise ValueError("every tranche must be awarded during the run to be valued at its price")
-    expense = compute_expense(tranches, prices[tranches.award_month], awards.expense)
+    expense = compute_expense(
+        tranches, values_per_share(tranches, prices), awards.expense, first_month=0
+    )
+    sbc = sbc_frame(expense, tranches)
+    # The long-form rows are summed into the SBC frame, then released: a seeded workforce's
+    # tranches make far more of them than any trajectory needs to keep.
+    expense = dataclasses.replace(expense, rows=expense.rows.iloc[0:0].copy())
     return TrajectoryResult(
         trajectory,
         headcount,
@@ -497,7 +513,7 @@ def run_trajectory(
         prices,
         tranches,
         expense,
-        sbc_frame(expense, tranches),
+        sbc,
         bypasses,
         known_fired,
         diagnostics,

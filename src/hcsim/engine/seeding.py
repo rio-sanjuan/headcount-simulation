@@ -32,6 +32,7 @@ requisitions get ids from a high base, so they never collide with the world's id
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import math
 from collections.abc import Callable, Mapping
@@ -44,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from hcsim.engine.config import SimulationConfig
+from hcsim.engine.seed_equity import record_seed, seed_equity
 from hcsim.engine.state import SimulationState
 from hcsim.financial.prices import CustomPrice, StockPriceModel
 from hcsim.financial.ranges import RangeTable
@@ -77,7 +79,7 @@ from hcsim.model.sql.extract import seed_employees, seed_openings
 REQ_TYPES: Final = ("backfill", "campus", "growth")
 #: The warehouse's requisition types, as the engine's.
 REQ_TYPE_MAP: Final[Mapping[str, str]] = MappingProxyType({t: t for t in REQ_TYPES})
-AWARD_TYPES: Final = ("new_hire",)
+AWARD_TYPES: Final = ("new_hire", "annual", "promotion", "transfer", "retention", "off_cycle")
 SIMULATED_ID_BASE: Final = 1_000_000_000
 #: Headcount is regular employees: contingent and temporary workers sit outside it.
 REGULAR: Final = "SELECT account FROM dim_account WHERE account_group = 'regular'"
@@ -144,6 +146,9 @@ class SeedReport:
     #: Rows dropped per cause, in the order they were checked.
     employee_causes: Mapping[str, int] = field(default_factory=dict)
     opening_causes: Mapping[str, int] = field(default_factory=dict)
+    #: Seed tranches recorded per holder status, and those left out per cause.
+    seed_tranches: Mapping[str, int] = field(default_factory=dict)
+    seed_pruned: Mapping[str, int] = field(default_factory=dict)
 
 
 def schema_from_world(con: duckdb.DuckDBPyConnection) -> SimulationSchema:
@@ -353,8 +358,9 @@ def seed_for(
     subset: SubsetSpec | None = None,
     req_types: Mapping[str, str] = REQ_TYPE_MAP,
 ) -> tuple[SimulationState, SeedReport]:
-    """Seed the run `config` describes, with its seeding settings."""
-    return seed_state(
+    """Seed the run `config` describes, with its seeding settings, and, when it computes SBC,
+    its seed equity (see `seed_equity`)."""
+    state, report = seed_state(
         con,
         config.schema,
         config.run_date,
@@ -371,6 +377,11 @@ def seed_for(
         months=config.simulation_months,
         with_ledger=config.computes_sbc,
     )
+    if not config.computes_sbc:
+        return state, report
+    equity = seed_equity(con, config.schema, config.run_date, report.snapshot_date, state)
+    recorded = record_seed(state, equity.seed)
+    return state, dataclasses.replace(report, seed_tranches=recorded, seed_pruned=equity.pruned)
 
 
 def executive_min_level(con: duckdb.DuckDBPyConnection) -> int | None:

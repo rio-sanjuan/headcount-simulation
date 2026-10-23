@@ -57,10 +57,12 @@ class ExpenseConfig:
 
 @dataclass(frozen=True)
 class ExpenseResult:
-    """Monthly expense per tranche, in long form, and each tranche's identity residual."""
+    """Monthly expense per tranche, in long form, each tranche's identity residual, and what each
+    recognized before the first month the rows cover, its opening balance."""
 
     rows: pd.DataFrame
     residual: NDArray[np.float64]
+    opening: NDArray[np.float64] | None = None
 
     @property
     def max_identity_residual(self) -> float:
@@ -68,8 +70,14 @@ class ExpenseResult:
 
 
 def compute_expense(
-    tranches: Tranches, value_per_share: NDArray[np.float64], config: ExpenseConfig | None = None
+    tranches: Tranches,
+    value_per_share: NDArray[np.float64],
+    config: ExpenseConfig | None = None,
+    first_month: int | None = None,
 ) -> ExpenseResult:
+    """Every tranche's monthly expense and true-ups. With `first_month`, as a run's first, the
+    rows start there: what a tranche recognized before it, net accrual and any true-up, is its
+    opening balance instead, and the identity still holds over the tranche's whole life."""
     config = config or ExpenseConfig()
     n = len(tranches)
     vps = np.asarray(value_per_share, dtype=np.float64)
@@ -86,37 +94,35 @@ def compute_expense(
     forfeited = (f >= 0) & (f < v)
     last = np.where(forfeited, f, v)
     months_accrued = np.maximum(0, last - a + 1)
+    start = a if first_month is None else np.maximum(a, first_month)
+    before = months_accrued - np.maximum(0, last - start + 1)
+    emitted = months_accrued - before
 
-    index = np.repeat(np.arange(n), months_accrued)
-    starts = np.repeat(np.cumsum(months_accrued) - months_accrued, months_accrued)
-    month = a[index] + (np.arange(len(index)) - starts)
+    index = np.repeat(np.arange(n), emitted)
+    starts = np.repeat(np.cumsum(emitted) - emitted, emitted)
+    month = start[index] + (np.arange(len(index)) - starts)
     gross = per_month[index]
-    accrual = pd.DataFrame(
-        {
-            "tranche": index,
-            "month": month,
-            "gross": gross,
-            "net": gross * (1 - e),
-            "trueup_attrition": 0.0,
-            "trueup_vesting": 0.0,
-        }
-    )
     net_recognized = per_month * months_accrued * (1 - e)
-    trueups = pd.DataFrame(
+    attrition = np.where(forfeited, -net_recognized, 0.0)
+    vesting = np.where(forfeited, 0.0, value - net_recognized)
+    trueup_month = np.where(forfeited, np.maximum(f, a), v)
+    late = np.ones(n, dtype=bool) if first_month is None else trueup_month >= first_month
+    opening = per_month * before * (1 - e) + np.where(late, 0.0, attrition + vesting)
+    rows = pd.DataFrame(
         {
-            "tranche": np.arange(n),
-            "month": np.where(forfeited, np.maximum(f, a), v),
-            "gross": 0.0,
-            "net": 0.0,
-            "trueup_attrition": np.where(forfeited, -net_recognized, 0.0),
-            "trueup_vesting": np.where(forfeited, 0.0, value - net_recognized),
+            "tranche": np.concatenate([index, np.flatnonzero(late)]),
+            "month": np.concatenate([month, trueup_month[late]]),
+            "gross": np.concatenate([gross, np.zeros(int(late.sum()))]),
+            "net": np.concatenate([gross * (1 - e), np.zeros(int(late.sum()))]),
+            "trueup_attrition": np.concatenate([np.zeros(len(index)), attrition[late]]),
+            "trueup_vesting": np.concatenate([np.zeros(len(index)), vesting[late]]),
         }
     )
-    rows = pd.concat([accrual, trueups], ignore_index=True)
-    recognized = rows.groupby("tranche")[["net", "trueup_attrition", "trueup_vesting"]].sum()
-    total = recognized.sum(axis=1).reindex(range(n), fill_value=0.0).to_numpy()
+    total = opening.copy()
+    for column in ("net", "trueup_attrition", "trueup_vesting"):
+        np.add.at(total, rows["tranche"].to_numpy(), rows[column].to_numpy())
     residual = check_identity(total, np.where(forfeited, 0.0, value), config.identity_tolerance)
-    return ExpenseResult(rows, residual)
+    return ExpenseResult(rows, residual, opening if first_month is not None else None)
 
 
 def check_identity(

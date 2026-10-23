@@ -388,7 +388,7 @@ def test_validation_catches_a_handler_that_writes_state(monkeypatch: pytest.Monk
         simulate(config(), initial_state(), validate=True)
 
 
-def test_tranches_awarded_before_the_run_are_refused() -> None:
+def test_a_tranche_awarded_before_the_run_needs_its_own_value() -> None:
     state = initial_state()
     state.ledger = HolderLedger()
     schedule = np.zeros((1, 72), dtype=np.int64)
@@ -396,5 +396,33 @@ def test_tranches_awarded_before_the_run_are_refused() -> None:
     state.ledger.record(
         np.array([0]), -1, schedule, 0, np.zeros(1, np.int64), np.zeros(1, np.int64)
     )
-    with pytest.raises(ValueError, match="awarded during the run"):
+    with pytest.raises(ValueError, match="must carry its own value per share"):
         simulate(config(), state)
+    valued = initial_state()
+    valued.ledger = HolderLedger()
+    one = np.ones(1, np.int64)
+    valued.ledger.record_tranches(
+        one * 0, one * -3, one * 2, one * 10, one * 0, one * 0, one * 0, np.array([40.0])
+    )
+    assert simulate(config(), valued).trajectories[0].expense is not None
+
+
+def test_values_per_share_are_own_or_the_award_months_price() -> None:
+    from hcsim.engine.loop import values_per_share
+    from hcsim.financial.tracker import Tranches
+
+    n = np.array
+    tranches = Tranches(
+        holder=n([0, 1, 2]),
+        award_month=n([-2, 1, 9]),
+        vest_month=n([5, 12, 20]),
+        shares=n([1.0, 1.0, 1.0]),
+        forfeit_month=n([-1, -1, -1]),
+        award_type=n([0, 0, 0]),
+        level=n([0, 0, 0]),
+        cost_center=n([0, 0, 0]),
+        value=n([40.0, np.nan, np.nan]),
+    )
+    # The third was awarded after a four-month run: at its last month's price.
+    prices = n([10.0, 11.0, 12.0, 13.0])
+    assert values_per_share(tranches, prices).tolist() == [40.0, 11.0, 13.0]

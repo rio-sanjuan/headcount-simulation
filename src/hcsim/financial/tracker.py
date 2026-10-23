@@ -159,9 +159,17 @@ class Tranches:
     award_type: Ints
     level: Ints
     cost_center: Ints
+    #: Each tranche's value per share where it was recorded with one, as a seed tranche is at
+    #: its grant's fair value; NaN where it's valued at the run's price in its award month.
+    value: NDArray[np.float64] | None = None
 
     def __len__(self) -> int:
         return len(self.holder)
+
+    @property
+    def values(self) -> NDArray[np.float64]:
+        """`value`, NaN throughout when the tranches carry none."""
+        return np.full(len(self), np.nan) if self.value is None else self.value
 
     @property
     def cancelled(self) -> NDArray[np.bool_]:
@@ -191,6 +199,8 @@ class Intervals:
 @dataclass
 class HolderLedger:
     _chunks: list[Ints] = field(default_factory=list)
+    _value_chunks: list[NDArray[np.float64]] = field(default_factory=list)
+    _values: NDArray[np.float64] = field(default_factory=lambda: np.zeros(0))
     _rows: Ints = field(default_factory=lambda: np.zeros((0, 8), dtype=np.int64))
     buffer: VestBuffer = field(default_factory=VestBuffer)
     _moves: list[Ints] = field(default_factory=list)
@@ -202,7 +212,9 @@ class HolderLedger:
     def _consolidate(self) -> Ints:
         if self._chunks:
             self._rows = np.concatenate([self._rows, *self._chunks])
+            self._values = np.concatenate([self._values, *self._value_chunks])
             self._chunks.clear()
+            self._value_chunks.clear()
         return self._rows
 
     def record(
@@ -232,7 +244,39 @@ class HolderLedger:
         rows[:, self.CC] = np.asarray(cost_centers)[holder_idx]
         self.buffer.add(rows[:, self.HOLDER], rows[:, self.VEST], rows[:, self.SHARES])
         self._chunks.append(rows)
+        self._value_chunks.append(np.full(len(rows), np.nan))
         return len(rows)
+
+    def record_tranches(
+        self,
+        holders: Ints,
+        award_months: Ints,
+        vest_months: Ints,
+        shares: Ints,
+        award_types: Ints,
+        levels: Ints,
+        cost_centers: Ints,
+        values: NDArray[np.float64],
+    ) -> int:
+        """Record tranches one by one, each with its own award and vest month and value per
+        share, as the seed's tranches, granted before the run, are. Returns the number recorded."""
+        columns = [holders, award_months, vest_months, shares, award_types, levels, cost_centers]
+        arrays = [np.asarray(c, dtype=np.int64) for c in columns]
+        n = len(arrays[0])
+        if any(len(a) != n for a in arrays) or len(values) != n:
+            raise TrackerError("recorded tranches need one value of each column per tranche")
+        if n == 0:
+            return 0
+        if (arrays[2] < arrays[1]).any():
+            raise TrackerError("a tranche can't vest before its award month")
+        rows = np.empty((n, 8), dtype=np.int64)
+        rows[:, self.HOLDER], rows[:, self.AWARD], rows[:, self.VEST] = arrays[:3]
+        rows[:, self.SHARES], rows[:, self.FORFEIT] = arrays[3], NOT_FORFEITED
+        rows[:, self.TYPE], rows[:, self.LEVEL], rows[:, self.CC] = arrays[4:]
+        self.buffer.add(rows[:, self.HOLDER], rows[:, self.VEST], rows[:, self.SHARES])
+        self._chunks.append(rows)
+        self._value_chunks.append(np.asarray(values, dtype=np.float64))
+        return n
 
     def forfeit(self, holders: Ints, month: int) -> int:
         """Forfeit each holder's live tranches that vest after `month`. Returns rows forfeited."""
@@ -363,6 +407,7 @@ class HolderLedger:
             award_type=rows[:, self.TYPE].copy(),
             level=rows[:, self.LEVEL].copy(),
             cost_center=rows[:, self.CC].copy(),
+            value=self._values.copy(),
         )
 
     def __len__(self) -> int:

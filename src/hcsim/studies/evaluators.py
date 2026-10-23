@@ -115,7 +115,7 @@ def summary(result: SimulationResult) -> list[Metric]:
     ]
     if result.config.computes_sbc:
         recognized = [
-            float(t.sbc.loc[t.sbc["month"] < months, "recognized"].sum())
+            float(t.sbc.loc[t.sbc["month"].between(0, months - 1), "recognized"].sum())
             for t in result.trajectories
             if t.sbc is not None
         ]
