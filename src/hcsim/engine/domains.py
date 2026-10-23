@@ -400,15 +400,16 @@ class Regime(IntEnum):
 
 
 def regimes(state: SimulationState, ctx: StepContext) -> NDArray[np.int64]:
-    """Each cost center's regime this month: guided where guidance covers it, target-seeking
-    where the plan has a target for it and guidance doesn't, and the rate elsewhere."""
+    """Each cost center's regime this month: target-seeking where the plan drives its supply
+    and has a target for it (see `alignment`), guided where guidance covers it otherwise, and
+    the rate elsewhere."""
     n = state.n_cost_centers
     regime = np.full(n, Regime.RATE, dtype=np.int64)
-    planned = ~np.isnan(ctx.config.ceiling.targets(ctx.config.run_date, ctx.step))
-    regime[planned] = Regime.TARGET
     if ctx.guided(_OPENED):
         covered = ctx.guided_groups_of_codes(np.arange(n, dtype=np.int64), _OPENED) >= 0
         regime[covered] = Regime.GUIDED
+    planned = ~np.isnan(ctx.config.ceiling.targets(ctx.config.run_date, ctx.step))
+    regime[planned] = Regime.TARGET
     return regime
 
 

@@ -4,8 +4,9 @@ Two inputs can bound a cost center's committed strength, `S = H + O`:
 
 - the **capacity cap** `Cap(c)`, a fixed ceiling per cost center;
 - the **plan target** `H*(c, t)`, read from an alignment target's cost-center marginal at the
-  step's month, interpolated as the target says. Outside its window, or for a cost center it
-  has no target for, there's none.
+  step's month, interpolated as the target says, in the cost centers the alignment method lets
+  the plan drive supply in (see `alignment`). Outside its window, for a cost center it has no
+  target for, or one whose plan drives another valve, there's none.
 
 `Cap_eff(c, t)` is the smaller of the two where either exists, and infinite where neither does.
 It's the capacity veto, one of the three valves: no requisition opens in a cost center whose
@@ -51,7 +52,10 @@ class Ceiling:
         schema: SimulationSchema,
         caps: Mapping[str, int] | None = None,
         plan: AlignmentTarget | None = None,
+        supplied: NDArray[np.bool_] | None = None,
     ) -> Ceiling:
+        """`supplied` says, per cost-center code, where the plan drives supply: everywhere by
+        default."""
         vocab = schema.vocabulary(COST_CENTER)
         problems = []
         values = np.full(len(vocab), np.inf)
@@ -75,6 +79,8 @@ class Ceiling:
                 for k, label in enumerate(marginal.groups):
                     if label in vocab:
                         group[vocab.code(label)] = k
+                if supplied is not None:
+                    group[~np.asarray(supplied, dtype=bool)] = -1
         if problems:
             raise CeilingError(problems)
         return cls(values, plan, group)
@@ -85,7 +91,8 @@ class Ceiling:
         return self.plan is not None or bool(np.isfinite(self.caps).any())
 
     def targets(self, run_date: dt.date, step: int) -> Floats:
-        """`H*(c, t)` for every cost center at `step`: NaN where the plan has none."""
+        """`H*(c, t)` for every cost center at `step`: NaN where the plan has none, or drives
+        no supply."""
         planned = np.full(len(self.caps), np.nan)
         if self.plan is None:
             return planned
