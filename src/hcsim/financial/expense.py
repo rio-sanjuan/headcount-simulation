@@ -54,9 +54,10 @@ any left out it can't hold, so each tranche's residual is reported and nothing r
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import numpy as np
 import pandas as pd
@@ -258,13 +259,14 @@ def _rows(prepared: Prepared) -> _Rows:
     )
 
 
+def _sliced(column: Any, lo: int, hi: int) -> Any:
+    return None if column is None else column[lo:hi]
+
+
 def _chunk(prepared: Prepared, lo: int, hi: int) -> Prepared:
     t = prepared.tranches
-    names = ("holder", "award_month", "vest_month", "shares", "forfeit_month", "award_type")
-    part = Tranches(
-        **{n: getattr(t, n)[lo:hi] for n in (*names, "level", "cost_center")},
-        value=None if t.value is None else t.value[lo:hi],
-    )
+    # Every column, so a chunk's tranches carry what the whole's do, as their replayed flags.
+    part = Tranches(**{f.name: _sliced(getattr(t, f.name), lo, hi) for f in dataclasses.fields(t)})
     survival = None if prepared.survival is None else prepared.survival[lo:hi]
     return Prepared(
         part,
