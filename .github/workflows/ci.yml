@@ -188,7 +188,6 @@ jobs:
           name: perf-tiny
           path: ${{ runner.temp }}/perf
           denylist: ${{ secrets.SANITIZE_DENYLIST }}
-          retention-days: "30"
 
   extras:
     name: extras
