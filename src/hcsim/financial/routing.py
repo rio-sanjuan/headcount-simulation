@@ -9,6 +9,9 @@
 - **Overrides** (`Overridden`): an aggregate override scales every grant a strategy sizes by
   one factor, as for a budget change. Individual overrides set named employees' shares per
   forward year outright, and aren't scaled.
+- **Anticipated awards** (`AnticipatedAwards`): awards a planner knows of in advance, each a
+  named employee, a step, and an award type. The engine's anticipated award domain dispatches
+  them, and they're routed and sized like any grant of their type.
 
 A routed batch's shares per year are its schedule's, in twelve-month buckets over the whole
 72-month buffer, so recorded and sized rows line up.
@@ -32,6 +35,8 @@ from hcsim.financial.vesting import CANONICAL_VEST_MONTHS, Template
 from hcsim.model.core.layouts import Buffer, EmployeeColumn
 
 Ints = NDArray[np.int64]
+#: The columns an anticipated award needs: who, at which step, and which award type.
+ANTICIPATED_COLUMNS: Final = ("employee_id", "step", "award_type")
 #: The columns a recorded tranche needs: who, which award type, the award month as a step, how
 #: many months after it the tranche vests, and its shares.
 RECORDED_COLUMNS: Final = ("employee_id", "award_type", "step", "after", "shares")
@@ -107,6 +112,63 @@ class RecordedAwards:
 
     def __len__(self) -> int:
         return sum(len(v) for v in self.schedules.values())
+
+
+@dataclass(frozen=True)
+class AnticipatedAwards:
+    """Awards a planner knows of in advance: per step, each award type's named recipients."""
+
+    recipients: Mapping[int, Mapping[str, Ints]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "recipients",
+            MappingProxyType({k: MappingProxyType(dict(v)) for k, v in self.recipients.items()}),
+        )
+
+    @classmethod
+    def from_frame(cls, frame: pd.DataFrame) -> AnticipatedAwards:
+        """From one row per award (`ANTICIPATED_COLUMNS`), refused with every problem named: a
+        step before the run's first, or an employee named twice for one type at one step."""
+        absent = [c for c in ANTICIPATED_COLUMNS if c not in frame.columns]
+        if absent:
+            raise SizingError(f"anticipated awards need the columns {absent}")
+        problems = []
+        early = int((frame["step"].to_numpy(dtype=np.int64) < 0).sum())
+        if early:
+            problems.append(f"{early} anticipated awards fall before the run's first step")
+        twice = int(frame.duplicated(list(ANTICIPATED_COLUMNS)).sum())
+        if twice:
+            problems.append(
+                f"{twice} anticipated awards name an employee again for one type at one step"
+            )
+        if problems:
+            raise SizingError("; ".join(problems))
+        recipients: dict[int, dict[str, Ints]] = {}
+        steps = frame["step"].to_numpy(dtype=np.int64)
+        types = frame["award_type"].astype(str).to_numpy()
+        ids = frame["employee_id"].to_numpy(dtype=np.int64)
+        for step, award_type in sorted(set(zip(steps.tolist(), types.tolist(), strict=True))):
+            named = np.sort(ids[(steps == step) & (types == award_type)])
+            recipients.setdefault(step, {})[award_type] = named
+        return cls(recipients)
+
+    def at(self, step: int) -> Mapping[str, Ints]:
+        """Each award type's recipients at `step`."""
+        return self.recipients.get(step, MappingProxyType({}))
+
+    @property
+    def award_types(self) -> frozenset[str]:
+        return frozenset(t for by_type in self.recipients.values() for t in by_type)
+
+    @property
+    def last_step(self) -> int:
+        """The last step with an anticipated award, or -1 with none."""
+        return max(self.recipients, default=-1)
+
+    def __len__(self) -> int:
+        return sum(len(ids) for v in self.recipients.values() for ids in v.values())
 
 
 @dataclass(frozen=True)

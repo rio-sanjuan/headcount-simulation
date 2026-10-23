@@ -40,7 +40,7 @@ from hcsim.engine.modes import RunMode
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel, covers
-from hcsim.financial.routing import HybridWindow, RecordedAwards
+from hcsim.financial.routing import AnticipatedAwards, HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
 from hcsim.financial.streams import ManualAdjustments, OfflineStream
 from hcsim.financial.timing import AnnualCutoff, AwardTiming
@@ -248,6 +248,11 @@ class AwardSettings:
     #: Sizes each other award type's grants, keyed by the type: the annual award, a transfer's,
     #: a retention or off-cycle grant. A type without a sizer is emitted and counted unsized.
     sizers: Mapping[str, SizingStrategy] = field(default_factory=dict)
+    #: The calendar month, 1 to 12, of the annual award, which grants the workforce. None grants
+    #: no annual award.
+    annual_month: int | None = None
+    #: Awards a planner knows of in advance, each granted to its named employee at its step.
+    anticipated: AnticipatedAwards | None = None
     #: The awards as recorded, for the grants they cover: a recipient holding one takes it,
     #: and the rest are sized.
     replayed: RecordedAwards | None = None
@@ -555,7 +560,7 @@ class SimulationConfig:
                 lambda: self._check_family_change(),
             ),
             (
-                ("forecast_scope",),
+                ("forecast_scope", "simulation_months"),
                 lambda: self._check_sizers(),
             ),
             (
@@ -616,7 +621,8 @@ class SimulationConfig:
 
     def _check_sizers(self) -> list[str]:
         """Each sizer grants the award type it's given for, one the schema knows, and no type
-        has two."""
+        has two; the annual award falls in a calendar month; and the anticipated awards are of
+        types the schema knows, inside the run."""
         if self.awards is None:
             return []
         known = self.schema.vocabulary(AWARD_TYPE) if AWARD_TYPE in self.schema.vocabularies else ()
@@ -633,6 +639,19 @@ class SimulationConfig:
             elif award_type not in known:
                 problems.append(
                     f"sizing {award_type} grants needs {award_type!r} among the award types"
+                )
+        month = self.awards.annual_month
+        if month is not None and not 1 <= month <= 12:
+            problems.append(f"the annual award's month is a calendar month, 1 to 12, not {month}")
+        anticipated = self.awards.anticipated
+        if anticipated is not None:
+            unknown = sorted(t for t in anticipated.award_types if t not in known)
+            if unknown:
+                problems.append(f"anticipated awards of types the schema doesn't know: {unknown}")
+            if anticipated.last_step >= self.simulation_months:
+                problems.append(
+                    f"an anticipated award at step {anticipated.last_step} lies past the run's "
+                    f"last, {self.simulation_months - 1}"
                 )
         return problems
 
