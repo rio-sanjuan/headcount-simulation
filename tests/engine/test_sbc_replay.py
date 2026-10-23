@@ -8,10 +8,12 @@ recorded award may fall up to two months after the grant's month, as a new hire'
 start, and it's awarded in its own month. The annual award runs in the world's annual month,
 and the retention and off-cycle awards history records are the run's anticipated awards.
 
-Grants with no recorded award in their window are sized, and a sized new hire's award falls one
-or two months after their start, as the world's do. So a December hire's falls after the world
-ends, and a hire who leaves first is never awarded. What's left sized is chiefly contingent
-workers converted in, whom the world grants no new-hire award.
+History's record of awards is complete through the year, so a grant whose window lies within
+it and finds no recorded award is granted nothing, as history granted none. Those are chiefly
+contingent workers converted in, whom the world grants no new-hire award. Only a grant whose
+window reaches past the year's end is sized, and a sized new hire's award falls one or two
+months after their start, as the world's do. So a December hire's falls after the world ends,
+and a hire who leaves first is never awarded.
 
 Each score is held to a tolerance set from this run, with room to spare: the recognized SBC per
 month against `equity_expense`, and each part's total. The run's tranches also hold the identity
@@ -127,25 +129,28 @@ def test_the_replay_scores_against_the_reference_ledger(replayed: dict[str, Any]
     joined = align(t.sbc, replayed["actual"])
     monthly = joined.groupby("month")[["forecast", "actual"]].sum()
     assert monthly.index.tolist() == list(range(MONTHS))
-    # 2.2% on the run that set it.
+    # 2.1% on the run that set it.
     wape = (monthly["forecast"] - monthly["actual"]).abs().sum() / monthly["actual"].sum()
-    assert wape < 0.035
+    assert wape < 0.03
     parts = joined.groupby("part")[["forecast", "actual"]].sum()
     gap = parts["forecast"] / parts["actual"] - 1
     # The seed is history's own tranches and forfeits: 0.8% short on the run that set it.
     assert abs(gap["seed"]) < 0.02
-    # The run's own grants: 1.1% high on the run that set it. Their replayed SBC alone is 0.6%
-    # short, and the sized grants make up the rest.
-    assert abs(gap["sim"]) < 0.03
+    # The run's own grants: 0.4% short on the run that set it. Their replayed SBC alone is 0.6%
+    # short, and the few sized grants, whose windows reach past the year's end, make up the rest.
+    assert abs(gap["sim"]) < 0.015
     # The offline stream: 5.9% high on the run that set it, since a tranche outstanding at the
     # start is valued at its latest appraisal, above its grant's.
     assert abs(gap["offline"]) < 0.09
-    # Nearly all of the run's grants replay history's awards: 80.0M replayed, and 1.4M sized.
+    # Nearly all of the run's grants replay history's awards: 80.0M replayed, and 0.14M sized.
     window = t.sbc[t.sbc["month"].between(0, MONTHS - 1) & (t.sbc["part"] == "sim")]
     by_basis = window.groupby("basis")["recognized"].sum()
-    assert by_basis["replayed"] > 40 * by_basis["sized"]
+    assert by_basis["replayed"] > 300 * by_basis["sized"]
     # Every promotion takes a recorded award, the offline stream's among them.
-    assert t.unsized_grants["promotion"] == 0
+    assert t.unsized_grants["promotion"] == t.ungranted_grants["promotion"] == 0
+    # The starts through October with no new-hire award in history are granted none: 140 on
+    # the run that set it, chiefly contingent workers converted in.
+    assert t.ungranted_grants["pending_starts"] > 100
 
 
 def test_every_tranche_holds_the_identity_and_chunks_change_nothing(

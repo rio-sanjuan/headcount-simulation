@@ -188,6 +188,7 @@ def test_the_diagnostics_and_run_counts_views(guided: SimulationResult) -> None:
         bypasses={"promotion": 3, "growth": 0},
         known_fired={"termination": 2},
         unsized_grants={"fills": 5, "growth": 0},
+        ungranted_grants={"pending_starts": 2},
     )
     result = dataclasses.replace(guided, trajectories=(first, *guided.trajectories[1:]))
     frame = result.diagnostics(decoded=True)
@@ -198,6 +199,7 @@ def test_the_diagnostics_and_run_counts_views(guided: SimulationResult) -> None:
         [0, "bypassed", "promotion", 3],
         [0, "known_fired", "termination", 2],
         [0, "unsized_grants", "fills", 5],
+        [0, "ungranted_grants", "pending_starts", 2],
     ]
 
 

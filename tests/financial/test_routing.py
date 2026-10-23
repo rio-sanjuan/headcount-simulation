@@ -163,6 +163,37 @@ def test_an_award_the_offline_stream_holds_routes_its_recipient_there_with_no_sh
     assert not alone.batch.vest_schedule.any()
 
 
+def test_a_window_settles_when_it_lies_wholly_within_the_complete_record() -> None:
+    window = HybridWindow(lag={"new_hire": 2}, complete_through=5)
+    assert window.settled(3, "new_hire")
+    assert not window.settled(4, "new_hire")  # it reaches step 6, past the record's end
+    assert window.settled(5, "annual")  # no lag: the dispatch step alone
+    assert not HybridWindow(4, {"new_hire": 2}, complete_through=5).settled(3, "new_hire")
+    assert not HybridWindow(lag={"new_hire": 2}).settled(0, "new_hire")  # no complete record
+
+
+def test_a_settled_window_with_no_award_grants_nothing_and_one_past_the_record_is_sized() -> None:
+    window = HybridWindow(lag={"new_hire": 2}, complete_through=4)
+    # 7's award falls a month on and 8's three months on, beyond the lag, so the record says 8
+    # was granted none in the window.
+    routed = route(HIRES, "new_hire", rows(7, 8), PRICE, SizingContext(2), LAGGED, window)
+    assert routed is not None
+    assert routed.replayed.tolist() == [True, False]
+    assert routed.ungranted.tolist() == [False, True]
+    assert not routed.sized.any()
+    assert routed.batch.shares_per_year[:, 0].tolist() == [40, 0]
+    assert routed.batch.base_salary.tolist() == [100_000.0, 100_000.0]  # both imputed
+    # At step 3, the window reaches past the record's end, so a grant that finds none is sized.
+    later = route(HIRES, "new_hire", rows(10), PRICE, SizingContext(3), LAGGED, window)
+    assert later is not None
+    assert (later.sized.tolist(), later.ungranted.tolist()) == ([True], [False])
+    # Without a strategy, a recipient the record grants nothing is routed all the same.
+    alone = route(None, "annual", rows(9), PRICE, SizingContext(2), RECORDED, window)
+    assert alone is not None
+    assert alone.ungranted.tolist() == [True]
+    assert not alone.batch.vest_schedule.any()
+
+
 def test_without_a_strategy_only_recorded_recipients_are_granted() -> None:
     routed = route(None, "annual", rows(7, 9), PRICE, SizingContext(2), RECORDED)
     assert routed is not None
