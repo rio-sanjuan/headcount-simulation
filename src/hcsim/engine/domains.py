@@ -270,7 +270,8 @@ def _backfill(
     probability, as a binomial draw over the departures. A known termination opens none unless
     the configuration says so. Where guidance covers the cost center, the count is capped at the
     requisitions-opened quota's headroom; and no cost center opens more than the room its
-    effective ceiling leaves."""
+    effective ceiling leaves (see `ceiling`). The backfills the ceiling refuses are withheld, and
+    counted per cost center as the diagnostic `backfill_withheld`."""
     departed, anticipated = ctx.departed(source)
     if not len(departed):
         return DomainResult(domain)
@@ -292,11 +293,15 @@ def _backfill(
         opened = np.where(groups >= 0, capped.mask, opened)
         ledger[_OPENED.value] = capped.realized
     ceiling = ctx.config.ceiling
+    diagnostics: dict[str, Ints] = {}
     if ceiling.binds:
-        strength = state.headcount + state.open_openings
-        room = ceiling.room(ctx.config.run_date, ctx.step, strength)
+        room = ceiling.room(ctx.config.run_date, ctx.step, state.headcount, state.open_openings)
         quota = np.minimum(room, len(departed)).astype(np.int64)
         vetoed = quota_select(opened.astype(np.float64), cost_centers, quota, rng)
+        withheld = opened & ~vetoed.mask
+        diagnostics[BACKFILL_WITHHELD] = np.bincount(
+            cost_centers[withheld], minlength=state.n_cost_centers
+        ).astype(np.int64)
         if _OPENED.value in ledger:
             groups = ctx.guided_groups(departed, EMPLOYEE, _OPENED)
             kept = vetoed.mask & (groups >= 0)
@@ -309,7 +314,9 @@ def _backfill(
     rows = _requisitions(len(roles), cost_centers[opened], code, ctx.step)
     for source_column, target in FILL_COLUMN_MAP.items():
         rows[:, source_column] = roles[:, target]
-    return DomainResult(domain, openings=RowChange(OPENING, append=rows), ledger=ledger)
+    return DomainResult(
+        domain, openings=RowChange(OPENING, append=rows), ledger=ledger, diagnostics=diagnostics
+    )
 
 
 def backfill(state: SimulationState, ctx: StepContext) -> DomainResult:
@@ -392,6 +399,10 @@ def weighted_top_k(
 # --- growth -----------------------------------------------------------------------------------
 
 
+#: Backfills the effective ceiling withheld, per cost center: the diagnostic's name.
+BACKFILL_WITHHELD: Final = "backfill_withheld"
+
+
 class Regime(IntEnum):
     """How growth sizes a cost center's new requisitions in a month."""
 
@@ -434,7 +445,6 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
     if ctx.pinned:  # replay opens its realized requisitions itself
         counts[:] = 0
     regime = regimes(state, ctx)
-    strength = state.headcount + state.open_openings
     seeking = regime == Regime.TARGET
     if not ctx.pinned and seeking.any():
         counts[seeking] = _supply(state, ctx)[seeking]
@@ -449,7 +459,7 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
         counts[guided] = np.maximum(0, quota - used)[group[guided]]
     ceiling = ctx.config.ceiling
     if ceiling.binds:
-        room = ceiling.room(ctx.config.run_date, ctx.step, strength)
+        room = ceiling.room(ctx.config.run_date, ctx.step, state.headcount, state.open_openings)
         counts = np.minimum(counts, np.minimum(room, np.iinfo(np.int64).max)).astype(np.int64)
     if guided.any():
         mine = np.bincount(group[guided], weights=counts[guided], minlength=len(quota))

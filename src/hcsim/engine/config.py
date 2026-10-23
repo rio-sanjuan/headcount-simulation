@@ -461,7 +461,9 @@ class SimulationConfig:
         opened = self._opened_coverage()
         try:
             supply = supplied(method, opened)
-            ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan, supply)
+            ceiling = Ceiling.build(
+                self.schema, self.capacity_caps, self.plan, supply, *self._clamped_rule(typed)
+            )
             object.__setattr__(self, "ceiling", ceiling)
         except CeilingError as error:
             problems += [f"ceiling: {p}" for p in error.problems]
@@ -763,6 +765,18 @@ class SimulationConfig:
         except SchemaError as error:
             problems.append(f"guidance doesn't fit the schema: {error}")
         return problems
+
+    def _clamped_rule(self, typed: set[str]) -> tuple[SupplyRule, float]:
+        """The supply rule and fill yield the plan clamp bounds, the defaults where either is
+        refused."""
+        rule = (
+            self.requisitions_supply_rule
+            if "requisitions_supply_rule" in typed
+            else SupplyRule.STRENGTH
+        )
+        y = self.requisitions_fill_yield
+        valid = "requisitions_fill_yield" in typed and 0.0 < y <= 1.0
+        return rule, (y if valid else 1.0)
 
     def _opened_coverage(self) -> NDArray[np.bool_]:
         """Per cost-center code, whether guidance covers its requisitions opened."""
