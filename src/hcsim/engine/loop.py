@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from hcsim.engine.alignment import AlignmentMethod
 from hcsim.engine.apply import Applied, apply, per_cost_center
 from hcsim.engine.awards import (
     ANNUAL_AWARD,
@@ -42,6 +43,7 @@ from hcsim.engine.awards import (
     anticipated_award,
     trajectory_price,
 )
+from hcsim.engine.calibration import Calibration, calibrate
 from hcsim.engine.campus import CAMPUS, campus
 from hcsim.engine.config import AwardSettings, SimulationConfig
 from hcsim.engine.digest import digest
@@ -257,6 +259,8 @@ class SimulationResult:
     unregistered: tuple[str, ...] = ()
     #: For a streamed run, each trajectory's digest, in trajectory order.
     streamed: tuple[str, ...] = ()
+    #: Under `rate_calibration`, the shifts every trajectory ran with.
+    calibration: Calibration | None = None
 
     @property
     def headcount(self) -> Ints:
@@ -479,9 +483,11 @@ def run_trajectory(
     registered: Registered | None = None,
     known: ResolvedPlan | None = None,
     replay: ReplayedRequisitions | None = None,
+    calibration: Calibration | None = None,
 ) -> TrajectoryResult:
     """Run one trajectory from a copy of `initial`. `validate` recounts state after every
-    domain, which costs a pass over both buffers each time."""
+    domain, which costs a pass over both buffers each time. Under `rate_calibration`, the
+    attrition and fill hazards take `calibration`'s shifts."""
     state = initial.clone()
     awards = config.awards if config.computes_sbc else None
     window = config.award_window
@@ -516,7 +522,16 @@ def run_trajectory(
             state.price.step(calendar_month(config.run_date, step))
             prices[step] = state.price.price
         state.category_ledger = {}
-        ctx = StepContext(config, step, trajectory, seeds, known=known, fired=fired, replay=replay)
+        ctx = StepContext(
+            config,
+            step,
+            trajectory,
+            seeds,
+            known=known,
+            fired=fired,
+            replay=replay,
+            calibration=calibration,
+        )
         month = calendar_month(config.run_date, step)
         for domain in registered.domains:
             if not registered.opens(domain, month, ctx.rng(f"gate:{domain}")):
@@ -615,6 +630,7 @@ def stream(
     draws only from its own streams, so these are the trajectories `simulate` holds."""
     seeds = SeedManager(config.seed)
     registered = _register(config)
+    shifts = calibrated(config, initial, known, replay)
     for j in range(config.num_trajectories):
         yield run_trajectory(
             config,
@@ -625,7 +641,22 @@ def stream(
             registered=registered,
             known=known,
             replay=replay,
+            calibration=shifts,
         )
+
+
+def calibrated(
+    config: SimulationConfig,
+    initial: SimulationState,
+    known: ResolvedPlan | None = None,
+    replay: ReplayedRequisitions | None = None,
+) -> Calibration | None:
+    """Under `rate_calibration`, the shifts every trajectory runs with, solved once from the
+    seed; None under any other method."""
+    if config.alignment_method is not AlignmentMethod.RATE_CALIBRATION:
+        return None
+    ctx = StepContext(config, 0, 0, SeedManager(config.seed), known=known, replay=replay)
+    return calibrate(initial, ctx)
 
 
 def simulate(
@@ -649,14 +680,15 @@ def simulate(
     if sink is not None and not streaming:
         raise ValueError("a sink takes trajectories only from a run with results_streaming")
     unregistered = _register(config).unregistered
+    shifts = calibrated(config, initial, known, replay)
     runs = stream(config, initial, known=known, replay=replay, validate=validate)
     if sink is None:
-        return SimulationResult(config, tuple(runs), unregistered)
+        return SimulationResult(config, tuple(runs), unregistered, calibration=shifts)
     digests = []
     for result in runs:
         digests.append(digest(result))
         sink(result)
-    return SimulationResult(config, (), unregistered, tuple(digests))
+    return SimulationResult(config, (), unregistered, tuple(digests), shifts)
 
 
 def _register(config: SimulationConfig) -> Registered:

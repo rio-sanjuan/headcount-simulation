@@ -21,11 +21,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.attainability import known_credit
+from hcsim.engine.calibration import Calibration
 from hcsim.engine.campus import is_campus
 from hcsim.engine.config import BackfillSource, SimulationConfig
 from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
+from hcsim.engine.logit import logit_shift
 from hcsim.engine.modes import RunMode
 from hcsim.engine.replay import ReplayedRequisitions
 from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
@@ -90,6 +92,8 @@ class StepContext:
     fired: FiringLog = field(default_factory=FiringLog)
     #: The realized requisitions a replay keeps on history's track.
     replay: ReplayedRequisitions | None = None
+    #: The rate-calibration shifts, under `rate_calibration` (see `calibration`).
+    calibration: Calibration | None = None
     _quotas: dict[GuidanceCategory, Ints] = field(default_factory=dict)
 
     def rng(self, domain: str) -> np.random.Generator:
@@ -235,11 +239,15 @@ def _requisitions(n: int, cost_centers: Ints, req_type: int, step: int) -> Buffe
 
 def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     """The month's known terminations leave first. Then everyone else draws from the model,
-    except those excluded by eligibility or waiting on a known event; under guidance, the known
-    terminations count against their group's quota, and sampling realizes what's left."""
+    shifted by rate calibration where the run calibrates, except those excluded by eligibility
+    or waiting on a known event; under guidance, the known terminations count against their
+    group's quota, and sampling realizes what's left."""
     rows = state.live_employees
     known = ctx.fire_known(rows, EventKind.TERMINATION)
     p = ctx.config.models.attrition.compute_probability(rows)
+    if ctx.calibration is not None:
+        shift = ctx.calibration.attrition[rows[:, EmployeeColumn.COST_CENTER].astype(np.int64)]
+        p = logit_shift(np.asarray(p, dtype=np.float64), shift)
     p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p))
     p = np.where(known, 0.0, p)
     sampled, quotas = draw(

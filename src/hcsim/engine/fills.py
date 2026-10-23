@@ -29,6 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.campus import is_campus
+from hcsim.engine.logit import logit_shift
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.categories import GuidanceCategory
@@ -69,15 +70,27 @@ def rescale(hazards: Floats) -> Floats:
     return result
 
 
-def channel_hazards(openings: Buffer, ctx: StepContext) -> Floats:
-    """(rows, channels): each requisition row's monthly hazard of filling by each channel."""
+def model_hazards(openings: Buffer, ctx: StepContext) -> Floats:
+    """(rows, channels): each channel's model score of each requisition row, zero for a channel
+    without a model, before any shift, eligibility rule, or rescaling."""
     hazards = np.zeros((len(openings), len(CHANNELS)))
     for k, domain in enumerate(CHANNEL_DOMAINS):
         model = getattr(ctx.config.models, domain)
-        if model is None or not len(openings):
-            continue
-        p = np.asarray(model.compute_probability(openings), dtype=np.float64)
-        hazards[:, k] = ctx.config.resolved_eligibility.restrict(domain, openings, p)
+        if model is not None and len(openings):
+            hazards[:, k] = np.asarray(model.compute_probability(openings), dtype=np.float64)
+    return hazards
+
+
+def channel_hazards(openings: Buffer, ctx: StepContext) -> Floats:
+    """(rows, channels): each requisition row's monthly hazard of filling by each channel. Under
+    rate calibration, each channel's score takes its cost center's fill shift before the
+    eligibility rules (see `calibration`)."""
+    hazards = model_hazards(openings, ctx)
+    if ctx.calibration is not None and len(openings):
+        cost_centers = openings[:, OpeningColumn.COST_CENTER].astype(np.int64)
+        hazards = logit_shift(hazards, ctx.calibration.fill[cost_centers][:, None])
+    for k, domain in enumerate(CHANNEL_DOMAINS):
+        hazards[:, k] = ctx.config.resolved_eligibility.restrict(domain, openings, hazards[:, k])
     hazards[is_campus(openings, ctx)] = 0.0  # campus requisitions fill on their schedule
     if ctx.pinned:  # replay fills only what history filled
         hazards[:] = 0.0
