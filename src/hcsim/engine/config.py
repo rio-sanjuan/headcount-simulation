@@ -28,6 +28,7 @@ from types import MappingProxyType
 from typing import Any, Final, cast
 
 import numpy as np
+import pandas as pd
 
 from hcsim.engine.campus import CampusSchedule
 from hcsim.engine.ceiling import Ceiling, CeilingError
@@ -41,6 +42,7 @@ from hcsim.financial.expense import ExpenseConfig
 from hcsim.financial.prices import StockPriceModel, covers
 from hcsim.financial.routing import HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
+from hcsim.financial.streams import ManualAdjustments, OfflineStream
 from hcsim.financial.timing import AnnualCutoff, AwardTiming
 from hcsim.model.core.aligner import GroupAligner
 from hcsim.model.core.alignment import AlignmentTarget
@@ -255,10 +257,21 @@ class AwardSettings:
     #: Per award type, who's eligible by hire date. A type without a cutoff grants everyone
     #: its domain dispatches.
     eligibility: Mapping[str, AnnualCutoff] = field(default_factory=dict)
+    #: The offline subsidiaries' stream, and expense added by hand: SBC every trajectory
+    #: carries beside its own.
+    offline: OfflineStream | None = None
+    manual: ManualAdjustments | None = None
 
     @property
     def window(self) -> HybridWindow:
         return HybridWindow(self.replay_through)
+
+    @functools.cached_property
+    def streams(self) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+        """The offline stream's SBC frame and the manual adjustments', calculated once."""
+        offline = None if self.offline is None else self.offline.sbc(self.expense)
+        manual = None if self.manual is None else self.manual.sbc()
+        return offline, manual
 
     def sizer(self, award_type: str) -> SizingStrategy | None:
         """The sizer for an award type, if the run has one."""
