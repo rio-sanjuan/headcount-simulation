@@ -141,3 +141,55 @@ def test_an_identity_violation_names_the_worst_tranche() -> None:
         check_identity(recognized, vested, 0.01)
     within = check_identity(np.array([100.005]), np.array([100.0]), 0.01)
     assert within.tolist() == pytest.approx([0.005])
+
+
+# --- preparation and the stateless calculator ----------------------------------------------------
+
+
+def test_preparation_gives_windows_values_cohorts_and_survival() -> None:
+    from hcsim.financial.expense import prepare
+
+    t = Tranches(
+        holder=np.array([0, 1, 2, 3]),
+        award_month=np.array([-13, 0, 11, 12]),
+        vest_month=np.array([5, 6, 20, 30]),
+        shares=np.array([10.0, 10.0, 10.0, 10.0]),
+        forfeit_month=np.array([-1, 3, 25, -1]),
+        award_type=np.zeros(4, dtype=np.int64),
+        level=np.zeros(4, dtype=np.int64),
+        cost_center=np.zeros(4, dtype=np.int64),
+    )
+    held = np.ones((4, 2))
+    prepared = prepare(t, np.array([2.0, 3.0, 4.0, 5.0]), pd.Period("2026-01", "M"), held)
+    assert prepared.value.tolist() == [20.0, 30.0, 40.0, 50.0]
+    assert prepared.forfeited.tolist() == [False, True, False, False]  # 25 is past its vest
+    assert prepared.last.tolist() == [5, 3, 20, 30]
+    assert prepared.cohort.tolist() == [2024, 2026, 2026, 2027]
+    assert prepared.survival is not None
+    assert prepare(t, np.ones(4)).cohort.tolist() == [-1, -1, -1, -1]
+
+
+def test_preparation_refuses_every_problem_at_once() -> None:
+    from hcsim.financial.expense import prepare
+
+    t = tranches((5, 2, 1.0, -1))
+    with pytest.raises(ValueError, match="one value per share") as error:
+        prepare(t, np.array([1.0, 2.0]), survival=np.array([[0.5, 0.9]]))
+    message = str(error.value)
+    assert "one value per share per tranche" in message
+    assert "can't vest before its award month" in message
+    assert "survival never rises" in message
+    with pytest.raises(ValueError, match=r"survival is a chance in \[0, 1\]"):
+        prepare(tranches((0, 2, 1.0, -1)), np.ones(1), survival=np.array([[1.5]]))
+    with pytest.raises(ValueError, match="survival is \\(tranches, months\\)"):
+        prepare(tranches((0, 2, 1.0, -1)), np.ones(1), survival=np.ones(3))
+
+
+def test_the_calculator_reads_only_its_table() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    t = tranches((0, 5, 1.0, -1), (2, 9, 1.0, 4))
+    prepared = prepare(t, np.array([10.0, 20.0]))
+    first, again = calculate(prepared), calculate(prepared)
+    pd.testing.assert_frame_equal(first.rows, again.rows)
+    pd.testing.assert_frame_equal(first.rows, compute_expense(t, np.array([10.0, 20.0])).rows)

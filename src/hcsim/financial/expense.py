@@ -1,12 +1,22 @@
 """Phase 3: amortize every tranche into monthly expense, after the simulation.
 
-The calculator is stateless and vectorized over tranches. For each tranche, worth
-`shares * value_per_share`:
+**Preparation** (`prepare`) turns what a run leaves, its ledger's tranches, their values, and its
+calendar, into one table, in four steps, every problem with the inputs refused at once:
+
+1. **Windows**: each tranche's accrual window, from its award month through its last month, its
+   vest, or its forfeit when that comes first.
+2. **Values**: each tranche's value, its shares times its value per share.
+3. **Calendar**: the calendar month of the run's first step, its origin, and each tranche's
+   cohort, the calendar year it was awarded in.
+4. **Survival**: for tranches whose holder the run doesn't simulate, the chance, month by month
+   from the run's first, that the holder still holds it.
+
+**The calculator** (`calculate`) is stateless: it reads only the prepared table and the expense
+settings, so the same table always gives the same expense, and it can be checked on hand-built
+schedules. Vectorized over tranches, for each tranche:
 
 1. Gross expense accrues in equal monthly shares from the award month through the vest month.
-   Day-weighted amortization arrives in M6.
-2. Net expense is gross times `1 - e`, for a flat effective forfeiture rate `e`. The cohort rate
-   path arrives in M6.
+2. Net expense is gross times `1 - e`, for a flat effective forfeiture rate `e`.
 3. A forfeited tranche (the holder left before it vested) accrues through its forfeiture month,
    where the attrition true-up reverses every net dollar recognized.
 4. A tranche that vests gets the vesting true-up at its vest month: the residual between its
@@ -15,6 +25,8 @@ The calculator is stateless and vectorized over tranches. For each tranche, wort
        cumulative net + true-ups = vested shares * value per share
 
 A residual above the tolerance therefore means a defect in this code, and it raises.
+
+`compute_expense` is the two together.
 """
 
 from __future__ import annotations
@@ -69,30 +81,85 @@ class ExpenseResult:
         return float(np.abs(self.residual).max(initial=0.0))
 
 
-def compute_expense(
+@dataclass(frozen=True)
+class Prepared:
+    """The table the calculator reads: one row per tranche, from the four preparation steps."""
+
+    tranches: Tranches
+    #: 2. Each tranche's value: shares times value per share.
+    value: NDArray[np.float64]
+    #: 1. Whether it forfeits before it vests, and its last accrual month.
+    forfeited: NDArray[np.bool_]
+    last: NDArray[np.int64]
+    #: 3. The calendar month of the run's first step, and each tranche's award year, or -1
+    #: without an origin.
+    origin: pd.Period | None
+    cohort: NDArray[np.int64]
+    #: 4. (tranches, months): the chance each tranche's holder still holds it at each month's
+    #: end from the run's first, or None when the run simulates every holder.
+    survival: NDArray[np.float64] | None
+
+    def __len__(self) -> int:
+        return len(self.tranches)
+
+
+def prepare(
     tranches: Tranches,
     value_per_share: NDArray[np.float64],
-    config: ExpenseConfig | None = None,
-    first_month: int | None = None,
-) -> ExpenseResult:
-    """Every tranche's monthly expense and true-ups. With `first_month`, as a run's first, the
-    rows start there: what a tranche recognized before it, net accrual and any true-up, is its
-    opening balance instead, and the identity still holds over the tranche's whole life."""
-    config = config or ExpenseConfig()
+    origin: pd.Period | None = None,
+    survival: NDArray[np.float64] | None = None,
+) -> Prepared:
+    """The calculator's table, in four steps, refusing every problem with the inputs at once."""
     n = len(tranches)
+    problems = []
     vps = np.asarray(value_per_share, dtype=np.float64)
     if vps.shape != (n,):
-        raise ValueError("one value per share per tranche")
-    if not np.isfinite(vps).all() or (vps < 0).any():
-        raise ValueError("values per share must be finite and non-negative")
+        problems.append("one value per share per tranche")
+    elif not np.isfinite(vps).all() or (vps < 0).any():
+        problems.append("values per share must be finite and non-negative")
     a, v, f = tranches.award_month, tranches.vest_month, tranches.forfeit_month
     if (v < a).any():
-        raise ValueError("a tranche can't vest before its award month")
-    e = config.forfeiture_rate
-    value = tranches.shares * vps
-    per_month = value / (v - a + 1)
+        problems.append("a tranche can't vest before its award month")
+    if survival is not None:
+        held = np.asarray(survival, dtype=np.float64)
+        if held.ndim != 2 or len(held) != n:
+            problems.append(f"survival is (tranches, months): {n} rows, not {held.shape}")
+        elif not (np.isfinite(held) & (held >= 0) & (held <= 1)).all():
+            problems.append("survival is a chance in [0, 1]")
+        elif (np.diff(held, axis=1) > 1e-12).any():
+            problems.append("survival never rises")
+    if problems:
+        raise ValueError("; ".join(problems))
+    # 1. Windows.
     forfeited = (f >= 0) & (f < v)
     last = np.where(forfeited, f, v)
+    # 2. Values.
+    value = tranches.shares * vps
+    # 3. Calendar.
+    if origin is None:
+        cohort = np.full(n, -1, dtype=np.int64)
+    else:
+        origin = pd.Period(origin, "M")
+        cohort = ((origin.year * 12 + origin.month - 1 + a) // 12).astype(np.int64)
+    # 4. Survival.
+    kept = None if survival is None else np.asarray(survival, dtype=np.float64)
+    return Prepared(tranches, value, forfeited, last, origin, cohort, kept)
+
+
+def calculate(
+    prepared: Prepared, config: ExpenseConfig | None = None, first_month: int | None = None
+) -> ExpenseResult:
+    """Every tranche's monthly expense and true-ups, from the prepared table alone. With
+    `first_month`, as a run's first, the rows start there: what a tranche recognized before it,
+    net accrual and any true-up, is its opening balance instead, and the identity still holds
+    over the tranche's whole life."""
+    config = config or ExpenseConfig()
+    t = prepared.tranches
+    n = len(t)
+    a, v, f = t.award_month, t.vest_month, t.forfeit_month
+    e = config.forfeiture_rate
+    value, forfeited, last = prepared.value, prepared.forfeited, prepared.last
+    per_month = value / (v - a + 1)
     months_accrued = np.maximum(0, last - a + 1)
     start = a if first_month is None else np.maximum(a, first_month)
     before = months_accrued - np.maximum(0, last - start + 1)
@@ -123,6 +190,17 @@ def compute_expense(
         np.add.at(total, rows["tranche"].to_numpy(), rows[column].to_numpy())
     residual = check_identity(total, np.where(forfeited, 0.0, value), config.identity_tolerance)
     return ExpenseResult(rows, residual, opening if first_month is not None else None)
+
+
+def compute_expense(
+    tranches: Tranches,
+    value_per_share: NDArray[np.float64],
+    config: ExpenseConfig | None = None,
+    first_month: int | None = None,
+    origin: pd.Period | None = None,
+) -> ExpenseResult:
+    """Prepare and calculate in one call (see `prepare` and `calculate`)."""
+    return calculate(prepare(tranches, value_per_share, origin), config, first_month)
 
 
 def check_identity(
