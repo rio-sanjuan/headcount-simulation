@@ -38,7 +38,7 @@ from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
-from hcsim.financial.prices import StockPriceModel
+from hcsim.financial.prices import StockPriceModel, covers
 from hcsim.financial.routing import HybridWindow, RecordedAwards
 from hcsim.financial.sizing import SizingStrategy
 from hcsim.financial.timing import AnnualCutoff, AwardTiming
@@ -537,6 +537,14 @@ class SimulationConfig:
             (
                 ("forecast_scope",),
                 lambda: self._check_promotion_sizer(),
+            ),
+            (
+                ("forecast_scope", "simulation_months"),
+                lambda: (
+                    []
+                    if self.awards is None
+                    else covers(self.awards.price_model, self.simulation_months)
+                ),
             ),
             (
                 ("pending_starts_staleness_days",),

@@ -184,3 +184,31 @@ def test_a_model_that_can_t_serve_its_field_is_refused(tmp_path: Path) -> None:
 def test_an_unknown_record_version_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unsupported configuration record 9"):
         from_record({"record_version": 9}, schema=SCHEMA, models_root=tmp_path)
+
+
+def test_a_record_names_its_price_model_and_refuses_another(tmp_path: Path) -> None:
+    import dataclasses
+
+    from hcsim.financial.prices import StaticPrice, digest
+
+    original = config(models=_saved(tmp_path, SCHEMA.fingerprint()), guidance=guidance())
+    record = _round_trip(to_record(original))
+    assert original.awards is not None
+    assert record["price"] == digest(original.awards.price_model)
+    other = dataclasses.replace(awards(), price_model=StaticPrice(1.0))
+    with pytest.raises(ConfigError, match="the record names price model pm1-"):
+        from_record(record, schema=SCHEMA, models_root=tmp_path, guidance=guidance(), awards=other)
+
+
+def test_a_custom_price_path_must_cover_the_run() -> None:
+    import dataclasses
+
+    from hcsim.financial.prices import AnnualGrowthPrice, CustomPrice
+
+    short = dataclasses.replace(awards(), price_model=CustomPrice([100.0, 101.0]))
+    with pytest.raises(
+        ConfigError, match="the custom price path covers 2 months, but the run needs"
+    ):
+        config(awards=short)
+    extended = CustomPrice([100.0, 101.0], extend_with=AnnualGrowthPrice(101.0))
+    assert config(awards=dataclasses.replace(awards(), price_model=extended)).awards is not None
