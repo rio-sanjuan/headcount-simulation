@@ -26,7 +26,7 @@ from numpy.typing import NDArray
 from hcsim.engine.config import AwardSettings
 from hcsim.engine.results import DomainResult, RowChange
 from hcsim.engine.state import SimulationState
-from hcsim.financial.routing import route
+from hcsim.financial.routing import HybridWindow, route
 from hcsim.financial.sizing import SizingContext
 from hcsim.model.core.layouts import Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import AWARD_TYPE, SimulationSchema
@@ -52,6 +52,9 @@ class Applied:
     ineligible_grants: int = 0
     #: Grant recipients who took a recorded award the offline stream holds.
     offline_grants: int = 0
+    #: Grant recipients a replay grants nothing, since history's complete record holds no
+    #: award for them in the grant's window.
+    ungranted_grants: int = 0
 
 
 def per_cost_center(rows: Buffer, column: int, n: int, weights: int | None = None) -> Ints:
@@ -113,9 +116,12 @@ def apply(
     awards: AwardSettings | None = None,
     calendar_month: int = 1,
     rng: np.random.Generator | None = None,
+    window: HybridWindow | None = None,
 ) -> Applied:
     """Apply `result` to `state` at simulation step `step`, in `calendar_month`. `rng` draws
-    award timing, for award types with a lag."""
+    award timing, for award types with a lag. Grants route recorded awards through `window`,
+    the awards' own unless given, as a replay gives one that knows where history's record
+    ends."""
     n = state.n_cost_centers
     e, o = result.employees, result.openings
     _check(e, state.live_employees)
@@ -192,10 +198,12 @@ def apply(
 
     # 7. Route, size, and record grants, for the appended employees, the written ones, or the
     # listed ones: a recorded award where the recipient holds one in the grant's window, sizing
-    # otherwise. One the offline stream holds records nothing, since the stream carries it.
-    recorded = unsized = replayed = ineligible = offline = 0
+    # otherwise. One the offline stream holds records nothing, since the stream carries it, and
+    # nor does one a replay's complete record holds no award for.
+    recorded = unsized = replayed = ineligible = offline = ungranted = 0
     streamed = None if awards is None or awards.offline is None else awards.offline.recorded
     if result.grants and awards is not None and state.ledger is not None:
+        window = window or awards.window
         first = state.n_employees - len(appended)
         for grant in result.grants:
             if grant.rows == "appended":
@@ -223,7 +231,7 @@ def apply(
                 state.price,
                 SizingContext(step, calendar_month, state.ledger),
                 awards.replayed,
-                awards.window,
+                window,
                 state.replayed_awards,
                 streamed,
             )
@@ -231,13 +239,13 @@ def apply(
                 unsized += len(positions)
                 continue
             granted = routed.replayed | routed.sized | routed.offline
-            unsized += int((~granted).sum())
+            unsized += int((~granted & ~routed.ungranted).sum())
             replayed += int(routed.replayed.sum())
             offline += int(routed.offline.sum())
+            ungranted += int(routed.ungranted.sum())
             batch = routed.batch
-            state.employees[positions[granted], EmployeeColumn.BASE_SALARY] = batch.base_salary[
-                granted
-            ]
+            based = granted | routed.ungranted
+            state.employees[positions[based], EmployeeColumn.BASE_SALARY] = batch.base_salary[based]
             timing = awards.timing.get(grant.award_type)
             if timing is None or timing.immediate:
                 award_steps = np.full(len(rows), step, dtype=np.int64)
@@ -282,4 +290,5 @@ def apply(
         replayed,
         ineligible,
         offline,
+        ungranted,
     )

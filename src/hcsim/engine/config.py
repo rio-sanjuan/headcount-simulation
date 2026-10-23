@@ -752,3 +752,16 @@ class SimulationConfig:
     @property
     def computes_sbc(self) -> bool:
         return self.forecast_scope is ForecastScope.HEADCOUNT_AND_SBC
+
+    @property
+    def award_window(self) -> HybridWindow | None:
+        """The window grants route recorded awards through. In a replay with a record of
+        awards, every grant is one history made, and the record is complete through the run's
+        last month: a grant whose window lies within it, and finds no award there, is granted
+        nothing."""
+        if self.awards is None:
+            return None
+        window = self.awards.window
+        if self.run_mode is RunMode.REPLAY and self.awards.replayed is not None:
+            window = dataclasses.replace(window, complete_through=self.simulation_months - 1)
+        return window

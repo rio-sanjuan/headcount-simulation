@@ -11,7 +11,9 @@
   every grant after it is sized, as when a run starts before its data ends: its first months
   replay what was granted, and the rest forecast it. The window also holds each award type's
   lag: how many months after a grant's dispatch its recorded award may fall, as a new hire's
-  award follows their start.
+  award follows their start. In a replay, the window also holds where history's record of
+  awards ends: a grant whose window lies wholly within it, and finds no award there, is granted
+  nothing, since history granted none, as for a contingent worker converted in.
 - **Overrides** (`Overridden`): an aggregate override scales every grant a strategy sizes by
   one factor, as for a budget change. Individual overrides set named employees' shares per
   forward year outright, and aren't scaled.
@@ -200,10 +202,17 @@ class HybridWindow:
     """Recorded awards route through step `through`, and grants after it are sized. With no
     last step, they route at every step. A grant routes to a recorded award of its type from its
     dispatch step through `lag` months after it, by award type, and in its dispatch step alone
-    for a type without one."""
+    for a type without one.
+
+    In a replay, every grant is one history made, and its record of awards is complete through
+    step `complete_through`. A grant whose window lies wholly within the record, and finds no
+    award there, is granted nothing, since history granted none. One whose window reaches past
+    the record's end is sized, as is every grant that finds none when the record isn't
+    complete."""
 
     through: int | None = None
     lag: Mapping[str, int] = field(default_factory=dict)
+    complete_through: int | None = None
 
     def __post_init__(self) -> None:
         negative = sorted(t for t, months in self.lag.items() if months < 0)
@@ -222,18 +231,30 @@ class HybridWindow:
             last = min(last, self.through)
         return range(step, last + 1)
 
+    def settled(self, step: int, award_type: str) -> bool:
+        """Whether a grant dispatched at `step` has its whole window within the complete
+        record, so that finding no award there means history granted none."""
+        if self.complete_through is None:
+            return False
+        last = self.complete_through
+        if self.through is not None:
+            last = min(last, self.through)
+        return step + self.lag.get(award_type, 0) <= last
+
 
 @dataclass(frozen=True)
 class Routed:
-    """A routed grant: its batch, which rows took a recorded award, which were sized, and which
-    took an award the offline stream holds, with no shares in the batch. Each recorded award's
-    step is the one it was recorded at, and -1 for rows that took none."""
+    """A routed grant: its batch, which rows took a recorded award, which were sized, which
+    took an award the offline stream holds, with no shares in the batch, and which a complete
+    record grants nothing. Each recorded award's step is the one it was recorded at, and -1 for
+    rows that took none."""
 
     batch: AwardBatch
     replayed: NDArray[np.bool_]
     sized: NDArray[np.bool_]
     award_steps: Ints
     offline: NDArray[np.bool_]
+    ungranted: NDArray[np.bool_]
 
 
 def route(
@@ -249,11 +270,13 @@ def route(
 ) -> Routed | None:
     """Route one grant's recipients: the earliest recorded award they hold among the window's
     steps for this one and haven't been `granted`, then the earliest of the `offline` stream's,
-    sizing by `strategy` otherwise. None when no recipient is covered any way. Without a
-    strategy, recorded recipients keep the base they have."""
+    sizing by `strategy` otherwise, unless the window is settled in a complete record, which
+    grants them nothing. None when no recipient is covered any way. Without a strategy,
+    recorded recipients keep the base they have."""
     ids = np.asarray(rows[:, EmployeeColumn.EMPLOYEE_ID], dtype=np.int64)
     n = len(rows)
-    steps = (window or HybridWindow()).steps(context.step, award_type)
+    window = window or HybridWindow()
+    steps = window.steps(context.step, award_type)
     covered = np.zeros(n, dtype=bool)
     schedule = np.zeros((n, CANONICAL_VEST_MONTHS), dtype=np.int64)
     award_steps = np.full(n, -1, dtype=np.int64)
@@ -264,17 +287,18 @@ def route(
         held, _, offline_steps = offline.lookup(ids, steps, award_type, granted)
         streamed = held & ~covered
         award_steps = np.where(streamed, offline_steps, award_steps)
-    if strategy is None and not (covered | streamed).any():
+    ungranted = ~(covered | streamed) & window.settled(context.step, award_type)
+    if strategy is None and not (covered | streamed | ungranted).any():
         return None
     base = rows[:, EmployeeColumn.BASE_SALARY].astype(np.float64)
     sized = np.zeros(n, dtype=bool)
     if strategy is not None:
         batch = strategy.size(rows, prices, context)
         base = batch.base_salary
-        sized = ~covered & ~streamed
+        sized = ~(covered | streamed | ungranted)
         schedule = np.where(sized[:, None], batch.vest_schedule, schedule)
     batch = AwardBatch(award_type, base, per_year(schedule), schedule)
-    return Routed(batch, covered, sized, award_steps, streamed)
+    return Routed(batch, covered, sized, award_steps, streamed, ungranted)
 
 
 @dataclass(frozen=True)

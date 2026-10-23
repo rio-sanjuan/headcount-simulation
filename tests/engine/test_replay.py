@@ -41,6 +41,7 @@ from hcsim.studies.inputs import fit_models
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
 from tests.engine.test_loop import SCHEMA, awards, initial_state, models
+from tests.engine.test_loop import config as loop_config
 
 RUN = dt.date(2025, 1, 1)
 MONTHS = 6
@@ -225,6 +226,33 @@ def test_replayed_awards_replace_sizing_for_the_grants_they_cover(tmp_path: Path
     state = initial_state()
     state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
     assert apply(state, result, 0, SCHEMA, later).replayed_grants == 0
+
+
+def test_a_replay_grants_nothing_where_history_s_complete_record_holds_no_award() -> None:
+    settings = dataclasses.replace(awards(), replayed=RECORDED)
+    replay = loop_config(run_mode=RunMode.REPLAY, awards=settings)
+    window = replay.award_window
+    assert window is not None
+    assert window.complete_through == replay.simulation_months - 1
+    # A forecast's grants aren't history's, and a replay with no record of awards has nothing
+    # to say a grant was granted none, so each sizes every grant that finds no award.
+    for other in (loop_config(awards=settings), loop_config(run_mode=RunMode.REPLAY)):
+        assert other.award_window is not None
+        assert other.award_window.complete_through is None
+    state = initial_state()
+    state.ledger, state.price = HolderLedger(), StaticPrice(100.0)
+    hires = EMPLOYEE.empty(2)
+    hires[:, EmployeeColumn.EMPLOYEE_ID] = [900, 901]  # 900 holds a recorded award, 901 doesn't
+    result = DomainResult(
+        "fills", employees=RowChange(EMPLOYEE, append=hires), grants=(Grant("new_hire"),)
+    )
+    applied = apply(state, result, 0, SCHEMA, settings, window=window)
+    assert (applied.replayed_grants, applied.ungranted_grants, applied.unsized_grants) == (1, 1, 0)
+    # The ledger holds 900's award alone, and both bases are imputed.
+    joined = state.employees[state.n_employees - 2 : state.n_employees]
+    assert (joined[:, EmployeeColumn.BASE_SALARY] > 0).all()
+    holders = state.ledger.tranches().holder
+    assert set(holders.tolist()) == {int(joined[0, EmployeeColumn.VEST_INDEX])}
 
 
 def test_requisitions_the_schema_can_t_hold_are_pruned(con: duckdb.DuckDBPyConnection) -> None:

@@ -235,6 +235,9 @@ class TrajectoryResult:
     event_cells: Ints = field(default_factory=no_cells)
     #: Grants each domain emitted that the run's award settings had no sizer for.
     unsized_grants: Mapping[str, int] = field(default_factory=dict)
+    #: Grants each domain emitted that a replay granted nothing, since history's complete
+    #: record holds no award for them.
+    ungranted_grants: Mapping[str, int] = field(default_factory=dict)
     #: The buffers at the start of each step the run keeps, and at the end as step `months`.
     snapshots: Mapping[int, Snapshot] = field(default_factory=dict)
     #: SBC for tranches whose holder was outside the run's subset that month: the run's
@@ -340,7 +343,8 @@ class SimulationResult:
 
     def run_counts(self, *, trajectory: int | None = None) -> pd.DataFrame:
         """Each trajectory's counts for the whole run: months each domain's step gate
-        bypassed it, known events fired by kind, and grants left unsized by domain."""
+        bypassed it, known events fired by kind, and grants left unsized or ungranted by
+        domain."""
         rows = [
             {"trajectory": t.trajectory, "kind": kind, "name": name, "count": int(count)}
             for t in self._of(trajectory)
@@ -348,6 +352,7 @@ class SimulationResult:
                 ("bypassed", t.bypasses),
                 ("known_fired", t.known_fired),
                 ("unsized_grants", t.unsized_grants),
+                ("ungranted_grants", t.ungranted_grants),
             )
             for name, count in counts.items()
             if count
@@ -476,6 +481,7 @@ def run_trajectory(
     domain, which costs a pass over both buffers each time."""
     state = initial.clone()
     awards = config.awards if config.computes_sbc else None
+    window = config.award_window
     if awards is not None:
         state.price = trajectory_price(awards.price_model, seeds, trajectory)
         if state.ledger is None:
@@ -495,6 +501,7 @@ def run_trajectory(
     diagnostics: dict[str, Ints] = {}
     cells = EventCells(config.schema)
     unsized = dict.fromkeys(registered.domains, 0)
+    ungranted = dict.fromkeys(registered.domains, 0)
     keep = set(config.results_snapshot_steps)
     snapshots: dict[int, Snapshot] = {}
 
@@ -514,9 +521,10 @@ def run_trajectory(
             result = handlers[domain](state, ctx)
             cells.capture(step, DOMAIN_INDEX[domain], result, state)
             applied = apply(
-                state, result, step, config.schema, awards, month, ctx.rng("award_timing")
+                state, result, step, config.schema, awards, month, ctx.rng("award_timing"), window
             )
             unsized[domain] += applied.unsized_grants
+            ungranted[domain] += applied.ungranted_grants
             if validate and not state.counters_agree():
                 raise InvariantError(f"counters drifted after {domain} at step {step}")
             for name, counts in result.diagnostics.items():
@@ -555,6 +563,7 @@ def run_trajectory(
             diagnostics=diagnostics,
             event_cells=cells.array(),
             unsized_grants=unsized,
+            ungranted_grants=ungranted,
             snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
@@ -580,6 +589,7 @@ def run_trajectory(
         diagnostics,
         cells.array(),
         unsized,
+        ungranted,
         snapshots,
         scratch,
     )

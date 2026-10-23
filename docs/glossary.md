@@ -78,6 +78,7 @@ The public vocabulary of this repository. Names are generic on purpose (see [san
 | Tranche | Shares granted in one award month that vest in one vest month, for one combination of attributes |
 | Transaction code | A typed code on the workforce fact, such as `HIRE`, `TERM`, `XFER_IN`, or `XFER_OUT` |
 | True-up | An expense adjustment for attrition, for a change in the effective forfeiture rate, or for the shares that actually vest |
+| Ungranted grant | In replay, a grant whose window lies within history's record of awards and finds none, so it's granted nothing, as history granted none |
 | Valve | One of three separate controls: supply from the plan, flow from guidance, and the capacity veto |
 | Vest template | The monthly vesting fractions per forward year for an award type |
 | WAPE | Weighted absolute percentage error: absolute error summed over cells, divided by summed actuals |
