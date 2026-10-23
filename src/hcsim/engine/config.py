@@ -259,8 +259,12 @@ class AwardSettings:
     #: The hybrid window's last step for recorded awards: grants after it are all sized. None
     #: routes recorded awards at every step.
     replay_through: int | None = None
+    #: Per award type, how many months after a grant's dispatch its recorded award may fall, as
+    #: a new hire's follows their start. A recipient takes their earliest recorded award in that
+    #: window, in the award's own month. A type without one routes only in its dispatch month.
+    replay_lag: Mapping[str, int] = field(default_factory=dict)
     #: Per award type, when its grants are awarded after dispatch. A type without one is
-    #: awarded in its dispatch month.
+    #: awarded in its dispatch month. A recorded award is awarded in the month it was recorded.
     timing: Mapping[str, AwardTiming] = field(default_factory=dict)
     #: Per award type, who's eligible by hire date. A type without a cutoff grants everyone
     #: its domain dispatches.
@@ -272,7 +276,7 @@ class AwardSettings:
 
     @property
     def window(self) -> HybridWindow:
-        return HybridWindow(self.replay_through)
+        return HybridWindow(self.replay_through, self.replay_lag)
 
     @functools.cached_property
     def streams(self) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
@@ -621,8 +625,9 @@ class SimulationConfig:
 
     def _check_sizers(self) -> list[str]:
         """Each sizer grants the award type it's given for, one the schema knows, and no type
-        has two; the annual award falls in a calendar month; and the anticipated awards are of
-        types the schema knows, inside the run."""
+        has two; the annual award falls in a calendar month; the replay lags are months from 0,
+        of types the schema knows; and the anticipated awards are of types the schema knows,
+        inside the run."""
         if self.awards is None:
             return []
         known = self.schema.vocabulary(AWARD_TYPE) if AWARD_TYPE in self.schema.vocabularies else ()
@@ -643,6 +648,13 @@ class SimulationConfig:
         month = self.awards.annual_month
         if month is not None and not 1 <= month <= 12:
             problems.append(f"the annual award's month is a calendar month, 1 to 12, not {month}")
+        lag = self.awards.replay_lag
+        unknown = sorted(t for t in lag if t not in known)
+        if unknown:
+            problems.append(f"replay lags for award types the schema doesn't know: {unknown}")
+        negative = sorted(t for t, months in lag.items() if months < 0)
+        if negative:
+            problems.append(f"a replay lag is a number of months from 0, which {negative} isn't")
         anticipated = self.awards.anticipated
         if anticipated is not None:
             unknown = sorted(t for t in anticipated.award_types if t not in known)

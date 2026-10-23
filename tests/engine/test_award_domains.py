@@ -24,7 +24,12 @@ from hcsim.engine.results import DomainResult, Grant
 from hcsim.engine.seeds import SeedManager
 from hcsim.financial.calculator import SizingError
 from hcsim.financial.prices import GBMPrice, StaticPrice
-from hcsim.financial.routing import AnticipatedAwards, Overridden
+from hcsim.financial.routing import (
+    RECORDED_COLUMNS,
+    AnticipatedAwards,
+    Overridden,
+    RecordedAwards,
+)
 from hcsim.financial.tracker import HolderLedger
 from hcsim.model.core.layouts import EmployeeColumn
 from hcsim.model.core.schema import AWARD_TYPE
@@ -145,12 +150,32 @@ def test_a_run_grants_each_anticipated_award_at_its_step() -> None:
     assert ANTICIPATED_AWARD not in result.unregistered
 
 
+def test_each_trajectory_grants_a_lagged_recorded_award_in_its_own_month() -> None:
+    # Employee 7's retention award is anticipated at step 3, and recorded a month later.
+    history = RecordedAwards.from_frame(
+        pd.DataFrame([(7, "retention", 4, 24, 12)], columns=list(RECORDED_COLUMNS))
+    )
+    named = anticipated([(7, 3, "retention")])
+    result = simulated(anticipated=named, replayed=history, replay_lag={"retention": 1})
+    code = EVERY.vocabulary(AWARD_TYPE).code("retention")
+    assert len(result.trajectories) > 1
+    for t in result.trajectories:
+        assert t.tranches is not None
+        mine = t.tranches.award_type == code
+        assert t.tranches.award_month[mine].tolist() == [4]
+        assert t.tranches.shares[mine].tolist() == [12.0]
+        assert t.tranches.recorded[mine].all()
+
+
 def test_award_settings_check_the_annual_month_and_the_anticipated_awards() -> None:
     late = anticipated([(7, 6, "retention"), (7, 2, "bonus")])
+    lag = {"bonus": 1, "retention": -1}
     with pytest.raises(ConfigError) as caught:
-        config(schema=EVERY, awards=settings(annual_month=13, anticipated=late))
+        config(schema=EVERY, awards=settings(annual_month=13, anticipated=late, replay_lag=lag))
     assert caught.value.problems == [
         "the annual award's month is a calendar month, 1 to 12, not 13",
+        "replay lags for award types the schema doesn't know: ['bonus']",
+        "a replay lag is a number of months from 0, which ['retention'] isn't",
         "anticipated awards of types the schema doesn't know: ['bonus']",
         "an anticipated award at step 6 lies past the run's last, 5",
     ]
