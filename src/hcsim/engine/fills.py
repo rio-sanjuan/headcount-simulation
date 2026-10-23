@@ -12,8 +12,9 @@ An opening fills, in a month, by at most one of three channels:
 
 `channel_hazards` scores every requisition row by each channel's model, a channel without one
 scoring zero, and zeroes the rows each channel's eligibility rules exclude (the domains
-`external_fill`, `conversion_fill`, and `transfer_fill`). A **planner-mix hook** may then reshape
-the hazards, as a planner's fill-share targets do for the channels guidance leaves free (M7).
+`external_fill`, `conversion_fill`, and `transfer_fill`). The planner's **fill-share targets**
+then reshape the hazards toward each scope's channel mix (see `planner`), and a **planner-mix
+hook** in code may reshape them further; guidance still fixes the channels it covers.
 Last, a row whose hazards sum past 1 is **rescaled** to sum to exactly 1, keeping its channels'
 proportions, since an opening can't fill twice in a month.
 """
@@ -94,6 +95,8 @@ def channel_hazards(openings: Buffer, ctx: StepContext) -> Floats:
     hazards[is_campus(openings, ctx)] = 0.0  # campus requisitions fill on their schedule
     if ctx.pinned:  # replay fills only what history filled
         hazards[:] = 0.0
+    if ctx.config.resolved_fill_shares is not None and len(openings):
+        hazards = ctx.config.resolved_fill_shares.apply(hazards, openings)
     if ctx.config.fill_mix is not None:
         hazards = np.asarray(ctx.config.fill_mix(hazards, openings, ctx.step), dtype=np.float64)
         if hazards.shape != (len(openings), len(CHANNELS)):
