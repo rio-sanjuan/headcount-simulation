@@ -1,5 +1,5 @@
 evaluator,metric,value,threshold,passed,world_generator,world_preset,world_seed,profile,mode,scope,seed,run_date,schema_fingerprint
-invariants,accounting_identity_max_residual,1.609987521e-08,0.01,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-06f8cad02b5677d5
+invariants,accounting_identity_max_residual,2.910383046e-11,0.01,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-06f8cad02b5677d5
 invariants,headcount_identity_max_gap,0,0,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-06f8cad02b5677d5
 invariants,opening_identity_max_gap,0,0,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-06f8cad02b5677d5
 invariants,quota_shortfall,0,,True,1,tiny,1,reference_unguided,unguided,hcf+sbc,2026,2026-01-01,sc2-06f8cad02b5677d5
