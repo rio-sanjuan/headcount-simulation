@@ -354,6 +354,7 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "gates": [gate.to_dict() for gate in config.gates],
         "capacity_caps": dict(sorted(config.capacity_caps.items())),
         "plan": None if config.plan is None else config.plan.digest(),
+        "alignment": config.alignment.to_dict(),
         "campus": None
         if config.campus is None
         else {

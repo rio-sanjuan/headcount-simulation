@@ -220,4 +220,4 @@ def test_the_engine_refuses_guidance_aligned_to_another_plan() -> None:
     with pytest.raises(ConfigError, match="guidance was aligned to the plan"):
         config(guidance=aligned, plan=run_plan)
     matching = dataclasses.replace(aligned, aligned_to=run_plan.digest())
-    assert config(guidance=matching, plan=run_plan).guidance is matching
+    assert config(guidance=matching, plan=run_plan, alignment_method="demand").guidance is matching

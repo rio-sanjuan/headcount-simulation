@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -35,13 +37,14 @@ def test_each_method_drives_one_kind_of_valve() -> None:
         assert not supplied(method, covered).any()
 
 
-#: The plan targets CC-01 and CC-02, and guidance covers CC-01's requisitions opened.
+#: The plan targets CC-01 and CC-02, and guidance covers CC-01's requisitions opened. Under
+#: demand and hybrid it's aligned to the plan.
 def both(method: str) -> tuple[list[int], list[float]]:
-    overrides = {
-        "guidance": guidance({"requisitions_opened": {"CC-01": 2.0}}),
-        "plan": plan({"CC-01": 40.0, "CC-02": 40.0}),
-        "alignment_method": method,
-    }
+    target = plan({"CC-01": 40.0, "CC-02": 40.0})
+    covering = guidance({"requisitions_opened": {"CC-01": 2.0}})
+    if method in ("demand", "hybrid"):
+        covering = dataclasses.replace(covering, aligned_to=target.digest())
+    overrides = {"guidance": covering, "plan": target, "alignment_method": method}
     ctx = StepContext(config(**overrides), 0, 0, SeedManager(1))
     targets = ctx.config.ceiling.targets(RUN_DATE, 0)
     return regimes(initial_state(), ctx).tolist(), np.nan_to_num(targets, nan=-1).tolist()
@@ -73,7 +76,7 @@ def test_without_supply_the_plan_bounds_nothing() -> None:
     assert opened(free)[2] == 2
     held, _ = grow(plan=plan({"CC-03": 30.0}))
     assert opened(held)[2] == 0
-    for method in ("none", "demand", "rate_calibration"):
+    for method in ("none", "rate_calibration"):
         unbound, _ = grow(plan=plan({"CC-03": 30.0}), alignment_method=method)
         assert opened(unbound) == opened(free)
     capped, _ = grow(
@@ -84,7 +87,7 @@ def test_without_supply_the_plan_bounds_nothing() -> None:
 
 def test_the_method_is_a_setting() -> None:
     assert config().alignment_method is M.SUPPLY
-    assert config(alignment_method="hybrid").alignment_method is M.HYBRID
+    assert config(alignment_method="none").alignment_method is M.NONE
     with pytest.raises(ConfigError, match="alignment_method"):
         config(alignment_method="both")
 
