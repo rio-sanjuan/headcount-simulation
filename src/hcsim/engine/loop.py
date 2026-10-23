@@ -20,7 +20,6 @@ accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 from __future__ import annotations
 
 import copy
-import dataclasses
 import datetime as dt
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -32,7 +31,7 @@ from numpy.typing import NDArray
 
 from hcsim.engine.apply import Applied, apply, per_cost_center
 from hcsim.engine.campus import CAMPUS, campus
-from hcsim.engine.config import SimulationConfig
+from hcsim.engine.config import AwardSettings, SimulationConfig
 from hcsim.engine.digest import digest
 from hcsim.engine.domains import (
     ATTRITION,
@@ -70,7 +69,14 @@ from hcsim.engine.snapshots import Snapshot, snapshot_frame
 from hcsim.engine.state import SimulationState
 from hcsim.engine.transfers import TRANSFERS_DOMAIN as TRANSFERS
 from hcsim.engine.transfers import transfers
-from hcsim.financial.expense import ExpenseResult, calculate, prepare, sbc_frame
+from hcsim.financial.expense import (
+    SBC_KEYS,
+    SBC_VALUES,
+    ExpenseResult,
+    calculate,
+    prepare,
+    sbc_frame,
+)
 from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
@@ -375,6 +381,36 @@ class SimulationResult:
         return frame
 
 
+#: Tranches a trajectory calculates at a time, so its long-form expense rows never pile up.
+EXPENSE_CHUNK: Final = 2_000
+
+
+def trajectory_expense(
+    tranches: Tranches,
+    values: NDArray[np.float64],
+    awards: AwardSettings,
+    origin: pd.Period,
+) -> tuple[ExpenseResult, pd.DataFrame]:
+    """A trajectory's expense from the run's first month, and its SBC frame. The tranches are
+    calculated `EXPENSE_CHUNK` at a time, each chunk's rows summed into SBC and released, so a
+    seeded workforce's many rows are never all held: at the flat rate every tranche's expense is
+    its own. Cohort rates read the whole set, so they're calculated in one chunk. The result
+    keeps every tranche's residual and opening balance, and no rows."""
+    n = len(tranches)
+    size = n if awards.expense.forfeiture == "cohort" else EXPENSE_CHUNK
+    frames, residuals, openings = [], [], []
+    for lo in range(0, max(n, 1), max(size, 1)):
+        part = tranches.take(lo, min(lo + size, n))
+        result = calculate(prepare(part, values[lo : lo + size], origin), awards.expense, 0)
+        frames.append(sbc_frame(result, part))
+        residuals.append(result.residual)
+        openings.append(result.opening if result.opening is not None else np.zeros(len(part)))
+    sbc = pd.concat(frames, ignore_index=True)
+    sbc = sbc.groupby(SBC_KEYS, as_index=False)[SBC_VALUES].sum()
+    empty = frames[0].iloc[0:0].copy()
+    return ExpenseResult(empty, np.concatenate(residuals), np.concatenate(openings)), sbc
+
+
 def values_per_share(tranches: Tranches, prices: NDArray[np.float64]) -> NDArray[np.float64]:
     """Each tranche's value per share: its own where it carries one, as a seed tranche does;
     else the run's price in its award month, the last month's for an award after the run."""
@@ -497,13 +533,9 @@ def run_trajectory(
             snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
-    origin = pd.Period(config.run_date, "M")
-    prepared = prepare(tranches, values_per_share(tranches, prices), origin)
-    expense = calculate(prepared, awards.expense, first_month=0)
-    sbc = sbc_frame(expense, tranches)
-    # The long-form rows are summed into the SBC frame, then released: a seeded workforce's
-    # tranches make far more of them than any trajectory needs to keep.
-    expense = dataclasses.replace(expense, rows=expense.rows.iloc[0:0].copy())
+    expense, sbc = trajectory_expense(
+        tranches, values_per_share(tranches, prices), awards, pd.Period(config.run_date, "M")
+    )
     return TrajectoryResult(
         trajectory,
         headcount,

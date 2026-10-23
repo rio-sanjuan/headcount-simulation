@@ -86,6 +86,7 @@ def test_the_sbc_frame_sums_by_cost_center_award_type_and_level() -> None:
         "gross",
         "net",
         "trueup_attrition",
+        "trueup_rate",
         "trueup_vesting",
         "trueup",
         "recognized",
@@ -193,3 +194,124 @@ def test_the_calculator_reads_only_its_table() -> None:
     first, again = calculate(prepared), calculate(prepared)
     pd.testing.assert_frame_equal(first.rows, again.rows)
     pd.testing.assert_frame_equal(first.rows, compute_expense(t, np.array([10.0, 20.0])).rows)
+
+
+# --- day weights, survival, cohort rates, and the three true-ups ---------------------------------
+
+
+def one(award: int, vest: int, value: float, forfeit: int = -1) -> Tranches:
+    return tranches((award, vest, value, forfeit))
+
+
+def column(result: object, name: str) -> list[float]:
+    rows = result.rows  # type: ignore[attr-defined]
+    return [round(float(x), 6) for x in rows.sort_values(["tranche", "month"])[name]]
+
+
+def test_gross_follows_calendar_days_given_an_origin() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    # January, February, and March 2026: 31, 28, and 31 of 90 days, on a value of 90.
+    flat = ExpenseConfig(forfeiture_rate=0.0)
+    result = calculate(prepare(one(0, 2, 90.0), np.ones(1), pd.Period("2026-01", "M")), flat)
+    assert column(result, "gross") == [31.0, 28.0, 31.0]
+    assert column(result, "trueup_vesting") == [0.0, 0.0, 0.0]
+    # At 10%: 81 net, and a 9 vesting true-up.
+    tenth = ExpenseConfig(forfeiture_rate=0.1)
+    taxed = calculate(prepare(one(0, 2, 90.0), np.ones(1), pd.Period("2026-01", "M")), tenth)
+    assert sum(column(taxed, "net")) == pytest.approx(81.0)
+    assert column(taxed, "trueup_vesting")[-1] == pytest.approx(9.0)
+
+
+def test_uncertain_survival_gives_the_expected_expense() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    # A value of 100 over two months; the holder has an even chance of leaving in the first.
+    # Month 0 accrues 45 net; leaving reverses it with chance 0.5; month 1 accrues 45 with chance
+    # 0.5, and the vest trues up 10 with chance 0.5. In all, 50: half the value.
+    prepared = prepare(one(0, 1, 100.0), np.ones(1), survival=np.array([[0.5, 0.5]]))
+    result = calculate(prepared, ExpenseConfig(forfeiture_rate=0.1))
+    assert column(result, "net") == [45.0, 22.5]
+    assert column(result, "trueup_attrition") == [-22.5, 0.0]
+    assert column(result, "trueup_vesting") == [0.0, 5.0]
+    total = result.rows[["net", "trueup_attrition", "trueup_rate", "trueup_vesting"]].sum().sum()
+    assert total == pytest.approx(50.0)
+
+
+def test_a_cohort_rate_is_recomputed_every_month_with_a_rate_true_up() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    # One cohort: A (100 over months 0-3) forfeits in month 1; B (100 over months 0-2) vests in
+    # month 2. The rate starts at the prior 10%, is 100% once A's shares forfeit and nothing has
+    # vested, and 50% once B vests.
+    t = tranches((0, 3, 100.0, 1), (0, 2, 100.0, -1))
+    result = calculate(prepare(t, np.ones(2)), ExpenseConfig(forfeiture="cohort"))
+    rows = result.rows.set_index(["tranche", "month"])
+    b = rows.loc[1]
+    assert b["net"].tolist() == pytest.approx([30.0, 0.0, 100 / 6], abs=1e-6)
+    # Month 1 takes back what month 0 accrued at the rate's rise; month 2 gives half of the two
+    # months' gross back as the rate falls to 50%.
+    assert b["trueup_rate"].tolist() == pytest.approx([0.0, -30.0, 100 / 3], abs=1e-6)
+    assert b["trueup_vesting"].tolist() == pytest.approx([0.0, 0.0, 50.0], abs=1e-6)
+    a = rows.loc[0]
+    assert a[
+        ["net", "trueup_attrition", "trueup_rate", "trueup_vesting"]
+    ].sum().sum() == pytest.approx(0.0, abs=1e-6)
+    assert result.max_identity_residual < 1e-6
+
+
+def test_cohorts_are_the_calendar_years_awards_fall_in() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    # Given an origin in December 2025, month 0 is 2025's cohort and month 1 2026's: one's
+    # forfeit doesn't move the other's rate.
+    cohort = ExpenseConfig(forfeiture="cohort")
+    origin = pd.Period("2025-12", "M")
+    both = calculate(
+        prepare(tranches((0, 3, 100.0, 1), (1, 3, 100.0, -1)), np.ones(2), origin), cohort
+    )
+    alone = calculate(prepare(tranches((1, 3, 100.0, -1)), np.ones(1), origin), cohort)
+    later = both.rows[both.rows["tranche"] == 1].drop(columns="tranche").reset_index(drop=True)
+    pd.testing.assert_frame_equal(later, alone.rows.drop(columns="tranche"))
+    same_year = calculate(
+        prepare(
+            tranches((0, 3, 100.0, 1), (1, 3, 100.0, -1)), np.ones(2), pd.Period("2026-01", "M")
+        ),
+        cohort,
+    )
+    moved = (
+        same_year.rows[same_year.rows["tranche"] == 1]
+        .drop(columns="tranche")
+        .reset_index(drop=True)
+    )
+    assert not moved.equals(alone.rows.drop(columns="tranche"))
+
+
+def test_the_identity_holds_in_expectation_for_any_mix() -> None:
+    from hcsim.financial.expense import calculate, prepare
+
+    rng = np.random.default_rng(9)
+    n = 200
+    award = rng.integers(-24, 12, n)
+    vest = award + rng.integers(0, 48, n)
+    forfeit = np.where(rng.random(n) < 0.3, award + rng.integers(-2, 50, n), -1)
+    rows = tuple(zip(award, vest, rng.integers(1, 500, n).astype(float), forfeit, strict=True))
+    t = tranches(*rows)
+    survival = np.minimum.accumulate(rng.uniform(0.6, 1.0, (n, 36)), axis=1)
+    for held in (None, survival):
+        for forfeiture in ("flat", "cohort"):
+            prepared = prepare(t, rng.uniform(5, 50, n), pd.Period("2025-07", "M"), held)
+            config = ExpenseConfig(forfeiture=forfeiture)
+            whole = calculate(prepared, config)
+            assert whole.max_identity_residual < 1e-6
+            split = calculate(prepared, config, first_month=0)
+            assert split.opening is not None
+            parts = split.rows[["net", "trueup_attrition", "trueup_rate", "trueup_vesting"]]
+            assert parts.to_numpy().sum() + split.opening.sum() == pytest.approx(
+                whole.rows[parts.columns].to_numpy().sum()
+            )
+
+
+def test_the_forfeiture_setting_is_checked() -> None:
+    with pytest.raises(ValueError, match="'flat' or 'cohort'"):
+        ExpenseConfig(forfeiture="annual")  # type: ignore[arg-type]
