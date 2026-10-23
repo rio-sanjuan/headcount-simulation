@@ -19,6 +19,17 @@ method says:
 
 **Overrides per arm.** A study's arms can each run under their own method: `MethodChoice`
 holds the run's method and any arm's override, and `resolve` gives the one an arm runs under.
+
+**Preflight** (`refusals`) refuses, every problem at once, a method its run can't honor:
+`demand`, `hybrid`, or `rate_calibration` with no plan; `demand` or `hybrid` without guidance
+aligned to the plan; guidance aligned to the plan under any other method, since it would drive
+the plan's flow beside whatever the method drives; and `rate_calibration` where guidance fixes
+the counts a rate shift would move, attrition's or a fill channel's.
+
+**Resolved metadata** (`ResolvedAlignment`) records what a run resolved: its method, the plan
+and the plan the guidance was aligned to, by digest, and the cost centers whose target each
+valve drives, with any target no valve reaches, as one under `demand` that guidance doesn't
+cover.
 """
 
 from __future__ import annotations
@@ -31,6 +42,11 @@ from typing import Any, Final
 
 import numpy as np
 from numpy.typing import NDArray
+
+from hcsim.model.core.alignment import AlignmentTarget
+from hcsim.model.core.categories import GuidanceCategory
+from hcsim.model.core.guidance import GuidanceForecast
+from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 
 Mask = NDArray[np.bool_]
 
@@ -62,6 +78,139 @@ VALVES: Final[Mapping[AlignmentMethod, frozenset[Valve]]] = MappingProxyType(
         AlignmentMethod.RATE_CALIBRATION: frozenset({Valve.RATE}),
     }
 )
+
+
+#: The methods that align to a plan, and the ones that drive flow through aligned guidance.
+NEEDS_PLAN: Final = frozenset(
+    {AlignmentMethod.DEMAND, AlignmentMethod.HYBRID, AlignmentMethod.RATE_CALIBRATION}
+)
+NEEDS_ALIGNED_GUIDANCE: Final = frozenset({AlignmentMethod.DEMAND, AlignmentMethod.HYBRID})
+#: The counts rate calibration moves, by shifting attrition's and the fill channels' hazards.
+CALIBRATED: Final = frozenset(
+    {
+        GuidanceCategory.ATTRITION,
+        GuidanceCategory.EXTERNAL_HIRES,
+        GuidanceCategory.CONVERSION_HIRES,
+        GuidanceCategory.INTERNAL_STARTS,
+        GuidanceCategory.HIRES,
+        GuidanceCategory.FILLS,
+    }
+)
+#: What each method makes the plan drive, in words, for a refusal.
+_DRIVES: Final = {
+    AlignmentMethod.NONE: "nothing",
+    AlignmentMethod.SUPPLY: "supply",
+    AlignmentMethod.RATE_CALIBRATION: "the domain rates",
+}
+
+
+def refusals(
+    method: AlignmentMethod, plan: AlignmentTarget | None, guidance: GuidanceForecast | None
+) -> list[str]:
+    """Every reason a run can't align under `method`, given its plan and guidance."""
+    problems = []
+    if method in NEEDS_PLAN and plan is None:
+        problems.append(f"alignment_method {method} aligns to a plan, and the run has none")
+    if method in NEEDS_ALIGNED_GUIDANCE:
+        if guidance is None:
+            problems.append(
+                f"alignment_method {method} drives the plan's flow through guidance aligned to "
+                "it, and the run has no guidance"
+            )
+        elif guidance.aligned_to is None:
+            problems.append(
+                f"alignment_method {method} needs guidance aligned to the plan, and the run's "
+                "guidance isn't aligned to any"
+            )
+    elif guidance is not None and guidance.aligned_to is not None and plan is not None:
+        problems.append(
+            f"the guidance is aligned to the plan, so it drives the plan's flow, while "
+            f"alignment_method {method} makes the plan drive {_DRIVES[method]}: run demand or "
+            "hybrid, or guidance that isn't aligned to it"
+        )
+    if method is AlignmentMethod.RATE_CALIBRATION and guidance is not None:
+        fixed = sorted(c.value for c in CALIBRATED if guidance.covers(c))
+        if fixed:
+            problems.append(
+                "rate calibration shifts the attrition and fill hazards, but guidance fixes "
+                f"the counts of {fixed}, which no shift moves"
+            )
+    return problems
+
+
+@dataclass(frozen=True)
+class ResolvedAlignment:
+    """What a run resolved: its method, the plan and the guidance's alignment by digest, and
+    the cost centers, by label, whose target each valve drives, or none does."""
+
+    method: AlignmentMethod
+    plan: str | None = None
+    aligned_to: str | None = None
+    supply: tuple[str, ...] = ()
+    flow: tuple[str, ...] = ()
+    rate: tuple[str, ...] = ()
+    undriven: tuple[str, ...] = ()
+
+    @classmethod
+    def build(
+        cls,
+        method: AlignmentMethod,
+        schema: SimulationSchema,
+        plan: AlignmentTarget | None,
+        guidance: GuidanceForecast | None,
+        opened: Mask,
+        grouped: Mask,
+    ) -> ResolvedAlignment:
+        """`opened` and `grouped` say, per cost-center code, whether guidance covers its
+        requisitions opened, and whether it's in any guidance group at all."""
+        labels = schema.vocabulary(COST_CENTER).labels
+        targeted = np.zeros(len(labels), dtype=bool)
+        if plan is not None and any(m.grouping == COST_CENTER for m in plan.marginals):
+            groups = set(plan.marginal(COST_CENTER).groups)
+            targeted = np.array([label in groups for label in labels], dtype=bool)
+        supply = targeted & supplied(method, opened)
+        flow = np.zeros(len(labels), dtype=bool)
+        if method is AlignmentMethod.DEMAND:
+            flow = targeted & np.asarray(grouped, dtype=bool)
+        elif method is AlignmentMethod.HYBRID:
+            flow = targeted & ~supply & np.asarray(grouped, dtype=bool)
+        rate = targeted & (method is AlignmentMethod.RATE_CALIBRATION)
+        undriven = targeted & ~(supply | flow | rate) & (method is not AlignmentMethod.NONE)
+
+        def named(mask: Mask) -> tuple[str, ...]:
+            return tuple(labels[int(c)] for c in np.flatnonzero(mask))
+
+        return cls(
+            method,
+            None if plan is None else plan.digest(),
+            None if guidance is None else guidance.aligned_to,
+            named(supply),
+            named(flow),
+            named(rate),
+            named(undriven),
+        )
+
+    @property
+    def valves(self) -> tuple[Valve, ...]:
+        """The valves the plan drives somewhere."""
+        driven = (
+            (Valve.SUPPLY, self.supply),
+            (Valve.FLOW, self.flow),
+            (Valve.RATE, self.rate),
+        )
+        return tuple(v for v, where in driven if where)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method.value,
+            "plan": self.plan,
+            "aligned_to": self.aligned_to,
+            "valves": [v.value for v in self.valves],
+            "supply": list(self.supply),
+            "flow": list(self.flow),
+            "rate": list(self.rate),
+            "undriven": list(self.undriven),
+        }
 
 
 class MethodError(ValueError):

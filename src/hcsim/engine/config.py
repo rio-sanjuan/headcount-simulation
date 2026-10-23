@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from hcsim.engine.alignment import AlignmentMethod, supplied
+from hcsim.engine.alignment import AlignmentMethod, ResolvedAlignment, refusals, supplied
 from hcsim.engine.campus import CampusSchedule
 from hcsim.engine.ceiling import Ceiling, CeilingError
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
@@ -427,6 +427,10 @@ class SimulationConfig:
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
     #: `Cap_eff(c, t)`, from the caps and the plan.
     ceiling: Ceiling = field(init=False, default_factory=lambda: Ceiling(np.zeros(0)))
+    #: Which valve the plan drives, and where.
+    alignment: ResolvedAlignment = field(
+        init=False, default_factory=lambda: ResolvedAlignment(AlignmentMethod.SUPPLY)
+    )
 
     def __post_init__(self) -> None:
         problems: list[str] = []
@@ -442,15 +446,20 @@ class SimulationConfig:
             problems += [f"campus: {p}" for p in self.campus.problems(self.schema)]
             if self.models.campus_attributes is None:
                 problems.append("campus: a campus schedule needs a campus attribute generator")
+        method = self.alignment_method if "alignment_method" in typed else AlignmentMethod.SUPPLY
+        opened = self._opened_coverage()
         try:
-            method = (
-                self.alignment_method if "alignment_method" in typed else AlignmentMethod.SUPPLY
-            )
-            supply = supplied(method, self._opened_coverage())
+            supply = supplied(method, opened)
             ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan, supply)
             object.__setattr__(self, "ceiling", ceiling)
         except CeilingError as error:
             problems += [f"ceiling: {p}" for p in error.problems]
+        if "alignment_method" in typed:
+            problems += [f"alignment: {p}" for p in refusals(method, self.plan, self.guidance)]
+            resolved = ResolvedAlignment.build(
+                method, self.schema, self.plan, self.guidance, opened, self._grouped()
+            )
+            object.__setattr__(self, "alignment", resolved)
         try:
             rules = (*self.eligibility, *self._executive_rule())
             object.__setattr__(self, "resolved_eligibility", resolve(rules, self.schema))
@@ -748,6 +757,14 @@ class SimulationConfig:
         cover = guidance.group_coverage(opened)
         covered: NDArray[np.bool_] = (groups >= 0) & cover[np.maximum(groups, 0)]
         return covered
+
+    def _grouped(self) -> NDArray[np.bool_]:
+        """Per cost-center code, whether it's in any guidance group."""
+        n = len(self.schema.vocabulary(COST_CENTER))
+        if self.aligner is None:
+            return np.zeros(n, dtype=bool)
+        grouped: NDArray[np.bool_] = self.aligner.groups_of_codes(np.arange(n, dtype=np.int64)) >= 0
+        return grouped
 
     @property
     def computes_sbc(self) -> bool:
