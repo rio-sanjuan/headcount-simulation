@@ -70,7 +70,7 @@ from hcsim.engine.snapshots import Snapshot, snapshot_frame
 from hcsim.engine.state import SimulationState
 from hcsim.engine.transfers import TRANSFERS_DOMAIN as TRANSFERS
 from hcsim.engine.transfers import transfers
-from hcsim.financial.expense import ExpenseResult, compute_expense, sbc_frame
+from hcsim.financial.expense import ExpenseResult, calculate, prepare, sbc_frame
 from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
@@ -497,9 +497,9 @@ def run_trajectory(
             snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
-    expense = compute_expense(
-        tranches, values_per_share(tranches, prices), awards.expense, first_month=0
-    )
+    origin = pd.Period(config.run_date, "M")
+    prepared = prepare(tranches, values_per_share(tranches, prices), origin)
+    expense = calculate(prepared, awards.expense, first_month=0)
     sbc = sbc_frame(expense, tranches)
     # The long-form rows are summed into the SBC frame, then released: a seeded workforce's
     # tranches make far more of them than any trajectory needs to keep.
