@@ -59,17 +59,20 @@ def scorecard(run: StudyRun) -> pd.DataFrame:
 
 def results_digest(result: SimulationResult) -> str:
     """`rd1-` and 16 hex characters of a SHA-256 over every trajectory's raw results: stocks,
-    flows, quota records, prices, and SBC. Equal digests mean bit-identical results."""
+    flows, quota records, prices, and SBC, published and scratch. Equal digests mean
+    bit-identical results."""
     digest = hashlib.sha256()
     for t in result.trajectories:
         arrays = [t.headcount, t.open_openings, t.prices, *(t.flows[k] for k in sorted(t.flows))]
         for q in t.quotas:
             digest.update(f"{q.step}|{q.domain}|{q.category}".encode())
             arrays += [q.record.quota, q.record.eligible, q.record.realized]
-        if t.sbc is not None:
-            arrays.append(t.sbc.select_dtypes("number").to_numpy(dtype=np.float64))
-            for label in t.sbc.select_dtypes(exclude="number").columns:
-                digest.update("|".join(t.sbc[label].astype(str)).encode())
+        for sbc in (t.sbc, t.sbc_scratch):
+            if sbc is None or sbc.empty:
+                continue
+            arrays.append(sbc.select_dtypes("number").to_numpy(dtype=np.float64))
+            for label in sbc.select_dtypes(exclude="number").columns:
+                digest.update("|".join(sbc[label].astype(str)).encode())
         for array in arrays:
             digest.update(np.ascontiguousarray(array).tobytes())
     return "rd1-" + digest.hexdigest()[:16]

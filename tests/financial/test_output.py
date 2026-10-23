@@ -90,3 +90,25 @@ def test_chunks_parts_sum_into_one_frame() -> None:
     assert doubled["recognized"].sum() == pytest.approx(2 * whole["recognized"].sum())
     assert combine_parts([]).empty
     assert streams(None, None) == []
+
+
+def test_only_rows_whose_holder_is_inside_that_month_are_published() -> None:
+    from hcsim.financial.output import combine_parts, publish
+
+    book = ledger()
+    book.leave(np.array([3]), 2)  # the sized grant's holder leaves the subset from month 2
+    t = book.tranches()
+    values = np.where(np.isnan(t.values), 10.0, t.values)
+    result = compute_expense(t, values, FLAT, first_month=0)
+    rows = result.rows
+    holder = t.holder[rows["tranche"].to_numpy()]
+    shown, held = publish(result, book.inside(holder, rows["month"].to_numpy()))
+    assert len(shown.rows) + len(held.rows) == len(rows)
+    outside = held.rows[["tranche", "month"]].to_numpy()
+    assert set(t.holder[outside[:, 0]]) == {3}
+    assert outside[:, 1].min() == 2
+    assert np.array_equal(shown.residual, result.residual)
+    whole = combine_parts([sbc_parts(shown, t), sbc_parts(held, t)])
+    pd.testing.assert_frame_equal(whole, sbc_parts(result, t), check_exact=False)
+    with pytest.raises(OutputError, match=r"one membership flag per row: \d+, not \(1,\)"):
+        publish(result, np.ones(1, dtype=bool))

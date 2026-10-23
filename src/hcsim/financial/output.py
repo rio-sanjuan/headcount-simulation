@@ -9,6 +9,11 @@ award type, and level (`expense.SBC_KEYS`), and labelled two ways:
   are and a run's grant is when a recorded award routed it; or `sized`, one a strategy sized,
   which a manual adjustment counts as too.
 
+**Publication.** A subset run publishes SBC only for holders inside its subset, month by month
+(see `model.data.publication`): `publish` splits a result's rows by their holder's membership in
+each row's month, into the published rows and the rest, the run's scratch, which stays out of
+its SBC output and reconciles it with the whole.
+
 **Aligned to actuals.** `align` sets a forecast's SBC beside the actual SBC history recorded for
 the same months, part, and keys, a row per combination either holds, with the gap between them,
 so a run's SBC can be scored against the record.
@@ -16,10 +21,12 @@ so a run's SBC can be scored against the record.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Final
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from hcsim.financial.expense import SBC_KEYS, SBC_VALUES, TRUEUPS, ExpenseResult
 from hcsim.financial.tracker import Tranches
@@ -32,6 +39,22 @@ PART_KEYS: Final = ["part", "basis", *SBC_KEYS]
 
 class OutputError(ValueError):
     """SBC parts that don't line up."""
+
+
+def publish(
+    result: ExpenseResult, inside: NDArray[np.bool_]
+) -> tuple[ExpenseResult, ExpenseResult]:
+    """The result's rows split by the publication rule: those whose holder is inside the subset
+    in the row's month (`inside`, one flag per row), and the rest, the run's scratch. Each half
+    keeps the result's residuals and opening balances."""
+    flags = np.asarray(inside, dtype=bool)
+    if flags.shape != (len(result.rows),):
+        raise OutputError(f"one membership flag per row: {len(result.rows)}, not {flags.shape}")
+    rows = result.rows
+    return (
+        replace(result, rows=rows[flags].reset_index(drop=True)),
+        replace(result, rows=rows[~flags].reset_index(drop=True)),
+    )
 
 
 def _labelled(frame: pd.DataFrame, part: str, basis: str) -> pd.DataFrame:

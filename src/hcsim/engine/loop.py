@@ -74,8 +74,8 @@ from hcsim.financial.expense import (
     calculate_chunks,
     prepare,
 )
-from hcsim.financial.output import combine_parts, sbc_parts, streams
-from hcsim.financial.tracker import HolderLedger, Intervals, Tranches
+from hcsim.financial.output import combine_parts, publish, sbc_parts, streams
+from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
 
@@ -223,6 +223,9 @@ class TrajectoryResult:
     unsized_grants: Mapping[str, int] = field(default_factory=dict)
     #: The buffers at the start of each step the run keeps, and at the end as step `months`.
     snapshots: Mapping[int, Snapshot] = field(default_factory=dict)
+    #: SBC for tranches whose holder was outside the run's subset that month: the run's
+    #: scratch, never published in `sbc`, which with it makes the whole.
+    sbc_scratch: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -384,27 +387,39 @@ def trajectory_expense(
     values: NDArray[np.float64],
     awards: AwardSettings,
     origin: pd.Period,
-    intervals: Intervals | None = None,
-) -> tuple[ExpenseResult, pd.DataFrame]:
+    ledger: HolderLedger | None = None,
+) -> tuple[ExpenseResult, pd.DataFrame, pd.DataFrame]:
     """A trajectory's expense from the run's first month, and its SBC frame by part and basis
     (see `financial.output`), each piece in its holder's cost center, with the offline stream's
     and the manual adjustments' beside it. The calculator works a chunk of tranches at a time
     (the expense settings' `chunk_size`), and each chunk's rows are summed into SBC and
-    released, so a seeded workforce's many rows are never all held. The result keeps every
-    tranche's residual and
+    released, so a seeded workforce's many rows are never all held. A row whose holder is
+    outside the run's subset that month, by the ledger's membership, goes to the scratch frame,
+    which isn't published. The result keeps every tranche's residual and
     opening balance, and no rows."""
+    intervals = None if ledger is None else ledger.intervals()
     prepared = prepare(tranches, values, origin, intervals=intervals)
-    frames, residuals, openings = [], [], []
+    frames, scratches, residuals, openings = [], [], [], []
     for _, chunk, result in calculate_chunks(prepared, awards.expense, first_month=0):
-        frames.append(sbc_parts(result, chunk.tranches))
+        rows = result.rows
+        holders = chunk.tranches.holder[rows["tranche"].to_numpy()]
+        inside = (
+            np.ones(len(rows), dtype=bool)
+            if ledger is None
+            else ledger.inside(holders, rows["month"].to_numpy())
+        )
+        shown, held = publish(result, inside)
+        frames.append(sbc_parts(shown, chunk.tranches))
+        scratches.append(sbc_parts(held, chunk.tranches))
         residuals.append(result.residual)
         openings.append(result.opening if result.opening is not None else np.zeros(len(chunk)))
     sbc = combine_parts([*frames, *streams(*awards.streams)])
+    scratch = combine_parts(scratches)
     empty = result.rows.iloc[0:0].copy()
     result = ExpenseResult(
         empty, np.concatenate(residuals), np.concatenate(openings), awards.expense.enforces_identity
     )
-    return result, sbc
+    return result, sbc, scratch
 
 
 def values_per_share(tranches: Tranches, prices: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -529,12 +544,12 @@ def run_trajectory(
             snapshots=snapshots,
         )
     tranches = state.ledger.tranches()
-    expense, sbc = trajectory_expense(
+    expense, sbc, scratch = trajectory_expense(
         tranches,
         values_per_share(tranches, prices),
         awards,
         pd.Period(config.run_date, "M"),
-        state.ledger.intervals(),
+        state.ledger,
     )
     return TrajectoryResult(
         trajectory,
@@ -552,6 +567,7 @@ def run_trajectory(
         cells.array(),
         unsized,
         snapshots,
+        scratch,
     )
 
 
