@@ -96,20 +96,25 @@ def test_an_unregistered_domain_never_runs() -> None:
         "replay_requisitions",
         "other_movement",
         "performance",
+        "annual_award",
+        "anticipated_award",
         "campus",
         "growth",
     )
     assert int(result.flow("G").sum()) == 0
     assert int(run().flow("G").sum()) > 0
     # Replayed requisitions and other movement come only from replayed history, performance
-    # needs a model, and campus a schedule, so all four are unregistered by default.
+    # needs a model, the award domains their awards, and campus a schedule, so all six are
+    # unregistered by default.
+    award_domains = ("annual_award", "anticipated_award")
     assert run().unregistered == (
         "replay_requisitions",
         "other_movement",
         "performance",
+        *award_domains,
         "campus",
     )
-    assert run(run_mode="replay").unregistered == ("performance", "campus")
+    assert run(run_mode="replay").unregistered == ("performance", *award_domains, "campus")
 
 
 def test_a_step_gate_bypasses_its_domain_and_counts_each_bypass() -> None:

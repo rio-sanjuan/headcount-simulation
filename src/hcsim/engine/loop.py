@@ -1,10 +1,11 @@
 """The step loop: every trajectory, every month, every domain, then the expense phase.
 
 Each trajectory runs on its own deep copy of the seeded state, with its own price path and
-holder ledger, and draws from its own random streams. A month advances the price, clears the
-category ledger, then runs the registered domains in order, applying each result before the next
-domain reads state. The known-event domains run first, so the sampled domains see the workforce
-they leave, and then performance, so the month's draws read its new ratings. After the last
+holder ledger, and draws from its own random streams. A month opens with the price step (see
+`awards`), clears the category ledger, then runs the registered domains in order, applying each
+result before the next domain reads state. The known-event domains run first, so the sampled
+domains see the workforce they leave, and then performance, so the month's draws read its new
+ratings. The annual and anticipated award domains follow attrition. After the last
 month, every recorded tranche is valued at the price in its award month and amortized, and every
 known event of a registered kind must have fired.
 
@@ -24,7 +25,6 @@ accounting identities, `HEADCOUNT_IDENTITY` and `OPENING_IDENTITY`:
 
 from __future__ import annotations
 
-import copy
 import datetime as dt
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -35,6 +35,13 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.engine.apply import Applied, apply, per_cost_center
+from hcsim.engine.awards import (
+    ANNUAL_AWARD,
+    ANTICIPATED_AWARD,
+    annual_award,
+    anticipated_award,
+    trajectory_price,
+)
 from hcsim.engine.campus import CAMPUS, campus
 from hcsim.engine.config import AwardSettings, SimulationConfig
 from hcsim.engine.digest import digest
@@ -149,6 +156,8 @@ STEP_ORDER: Final[tuple[tuple[str, Handler], ...]] = (
     (PERFORMANCE, performance),
     (PROMOTION, promotion),
     *DOMAINS[:2],  # attrition, then backfill for its departures
+    (ANNUAL_AWARD, annual_award),  # the workforce the month's departures and promotions leave
+    (ANTICIPATED_AWARD, anticipated_award),
     (PENDING_STARTS, pending_starts),  # starts take their reserved openings before fills
     DOMAINS[2],  # fills
     (TRANSFERS, transfers),  # places the fills' transfer assignments
@@ -468,7 +477,7 @@ def run_trajectory(
     state = initial.clone()
     awards = config.awards if config.computes_sbc else None
     if awards is not None:
-        state.price = copy.deepcopy(awards.price_model)
+        state.price = trajectory_price(awards.price_model, seeds, trajectory)
         if state.ledger is None:
             state.ledger = HolderLedger()
         state.ledger.buffer.cover(config.simulation_months)
@@ -641,4 +650,11 @@ def _register(config: SimulationConfig) -> Registered:
         defaults.append(RegistrationGate(CAMPUS, enabled=False, reason="no campus schedule"))
     if config.models.performance is None and PERFORMANCE in names:
         defaults.append(RegistrationGate(PERFORMANCE, enabled=False, reason="no model"))
+    awards = config.awards if config.computes_sbc else None
+    if (awards is None or awards.annual_month is None) and ANNUAL_AWARD in names:
+        defaults.append(RegistrationGate(ANNUAL_AWARD, enabled=False, reason="no annual award"))
+    if (awards is None or awards.anticipated is None) and ANTICIPATED_AWARD in names:
+        defaults.append(
+            RegistrationGate(ANTICIPATED_AWARD, enabled=False, reason="no anticipated awards")
+        )
     return register(names, (*defaults, *config.gates), mode)

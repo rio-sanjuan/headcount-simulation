@@ -207,8 +207,8 @@ class GBMPrice:
     Like the annual growth model, it doesn't move on its first step, so a run's first month
     opens at the opening price.
 
-    Code only: it has no world calibration behind it, and every trajectory's copy draws the same
-    path unless it's reseeded (`reseeded`).
+    Code only: it has no world calibration behind it. A copy draws the same path as the model
+    it's copied from unless it's reseeded (`reseeded`), as a run reseeds each trajectory's.
     """
 
     opening_price: float

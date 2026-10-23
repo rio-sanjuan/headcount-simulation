@@ -68,12 +68,21 @@ def _no_openings() -> RowChange:
 
 @dataclass(frozen=True)
 class Grant:
-    """An award for each employee the result appends, as a hire's is, or each it writes, as a
-    promotion's is. Handlers emit grants whatever the run's scope. A run sizes a grant only when
-    its award settings have a sizer for the award type, and counts the rest as unsized."""
+    """An award for each employee the result appends, as a hire's is, each it writes, as a
+    promotion's is, or each it lists by live row (`index`), as an award domain's are. Handlers
+    emit grants whatever the run's scope. A run sizes a grant only when its award settings have
+    a sizer for the award type, and counts the rest as unsized."""
 
     award_type: str
-    rows: Literal["appended", "written"] = "appended"
+    rows: Literal["appended", "written", "listed"] = "appended"
+    #: The live rows a listed grant goes to. Grants compare by type and rows alone.
+    index: Ints | None = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        if (self.rows == "listed") != (self.index is not None):
+            raise ValueError("a grant lists its rows (index) exactly when its rows are 'listed'")
+        if self.index is not None:
+            object.__setattr__(self, "index", np.asarray(self.index, dtype=np.int64))
 
 
 @dataclass(frozen=True)

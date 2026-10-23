@@ -18,6 +18,7 @@ settled state. Buffers never grow: an append past capacity raises before anythin
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -187,13 +188,18 @@ def apply(
         state.open_openings += per_cost_center(appended_reqs, occ, n, num)
         state.open_rows += per_cost_center(appended_reqs, occ, n)
 
-    # 7. Route, size, and record grants, for the appended employees or the written ones: a
-    # recorded award where the recipient holds one, sizing otherwise.
+    # 7. Route, size, and record grants, for the appended employees, the written ones, or the
+    # listed ones: a recorded award where the recipient holds one, sizing otherwise.
     recorded = unsized = replayed = ineligible = 0
     if result.grants and awards is not None and state.ledger is not None:
         first = state.n_employees - len(appended)
         for grant in result.grants:
-            positions = np.arange(first, state.n_employees) if grant.rows == "appended" else written
+            if grant.rows == "appended":
+                positions = np.arange(first, state.n_employees)
+            elif grant.rows == "written":
+                positions = written
+            else:
+                positions = _after_drops(cast(Ints, grant.index), e.drop)
             if not len(positions):
                 continue
             if state.price is None:
