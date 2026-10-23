@@ -1,0 +1,148 @@
+"""An SBC replay study: a year of history replayed with SBC, scored against the reference ledger.
+
+The run replays 2025 on a `small` world. Its seed is the workforce's unvested equity, the
+offline stream holds the offline plans' tranches outstanding at the start, and every grant a
+domain makes routes to the award history records for it, where history records one in the
+grant's month. The annual award runs in the world's annual month, and the retention and
+off-cycle awards history records are the run's anticipated awards. Grants history records in a
+later month than the run makes them, as a new hire's award lags their start, are sized instead.
+
+Each score is held to a tolerance set from this run, with room to spare: the recognized SBC per
+month against `equity_expense`, and the seed's total. The run's tranches also hold the identity
+within 0.01 under both forfeiture modes, and their expense is the same, bit for bit, however
+it's chunked.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+from collections.abc import Iterator
+from typing import Any
+
+import duckdb
+import numpy as np
+import pandas as pd
+import pytest
+
+from hcsim.engine.config import AwardSettings, ForecastScope, RunMode, SimulationConfig
+from hcsim.engine.known_events import Source, collect, from_replay
+from hcsim.engine.known_plan import sanitize
+from hcsim.engine.known_resolution import jobs_from_world, resolve_plan
+from hcsim.engine.loop import TrajectoryResult, simulate, values_per_share
+from hcsim.engine.replay import recorded_awards, replayed_requisitions
+from hcsim.engine.seed_equity import actual_sbc, offline_equity
+from hcsim.engine.seeding import (
+    range_table_from_world,
+    realized_price,
+    schema_from_world,
+    seed_for,
+)
+from hcsim.financial.expense import IDENTITY_TOLERANCE, ExpenseConfig, calculate, prepare
+from hcsim.financial.output import align
+from hcsim.financial.prices import AnnualGrowthPrice
+from hcsim.financial.routing import AnticipatedAwards
+from hcsim.financial.sizing import NewHireGapFill
+from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
+from hcsim.studies.inputs import fit_models
+from hcsim.synth.config import preset
+from hcsim.synth.world import generate_world, write_world
+
+pytestmark = pytest.mark.acceptance
+
+RUN = dt.date(2025, 1, 1)
+MONTHS = 12
+WORLD = preset("small", seed=6)
+
+
+@pytest.fixture(scope="module")
+def replayed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
+    path = tmp_path_factory.mktemp("world") / "w.duckdb"
+    write_world(generate_world(WORLD), path)
+    with duckdb.connect(str(path), read_only=True) as con:
+        schema = schema_from_world(con)
+        recorded = recorded_awards(con, RUN, MONTHS)
+        anticipated = AnticipatedAwards.from_frame(
+            pd.DataFrame(
+                [
+                    (employee, step, award_type)
+                    for (award_type, step), by_id in recorded.schedules.items()
+                    if award_type in ("retention", "off_cycle")
+                    for employee in by_id
+                ],
+                columns=["employee_id", "step", "award_type"],
+            )
+        )
+        (last_close,) = con.execute(
+            "SELECT close FROM stock_price ORDER BY month_end DESC LIMIT 1"
+        ).fetchone() or (None,)
+        awards = AwardSettings(
+            NewHireGapFill(range_table_from_world(con, schema)),
+            realized_price(con, RUN, AnnualGrowthPrice(float(last_close))),
+            replayed=recorded,
+            annual_month=WORLD.grants.annual_month,
+            anticipated=anticipated,
+            offline=offline_equity(con, schema, RUN).stream,
+        )
+        config = SimulationConfig(
+            run_date=RUN,
+            schema=schema,
+            models=fit_models(con, schema, RUN).models,
+            simulation_months=MONTHS,
+            num_trajectories=1,
+            seed=3,
+            forecast_scope=ForecastScope.HEADCOUNT_AND_SBC,
+            run_mode=RunMode.REPLAY,
+            awards=awards,
+        )
+        state, report = seed_for(con, config)
+        events = collect(RUN, MONTHS, [(Source.REPLAY, from_replay(con, RUN))])
+        employees = state.live_employees[:, EmployeeColumn.EMPLOYEE_ID].astype(int).tolist()
+        reqs = state.live_openings[:, OpeningColumn.REQ_ID].astype(int).tolist()
+        plan = resolve_plan(sanitize(events, employees, reqs), schema, jobs_from_world(con))
+        replay = replayed_requisitions(con, schema, RUN, MONTHS)
+        (trajectory,) = simulate(config, state, known=plan, replay=replay).trajectories
+        yield {
+            "trajectory": trajectory,
+            "actual": actual_sbc(con, schema, RUN, MONTHS),
+            "report": report,
+        }
+
+
+def test_the_replay_scores_against_the_reference_ledger(replayed: dict[str, Any]) -> None:
+    t: TrajectoryResult = replayed["trajectory"]
+    assert t.sbc is not None
+    joined = align(t.sbc, replayed["actual"])
+    monthly = joined.groupby("month")[["forecast", "actual"]].sum()
+    assert monthly.index.tolist() == list(range(MONTHS))
+    # 3.6% on the run that set it.
+    wape = (monthly["forecast"] - monthly["actual"]).abs().sum() / monthly["actual"].sum()
+    assert wape < 0.06
+    # The seed is history's own tranches and forfeits: 0.8% short on the run that set it.
+    parts = joined.groupby("part")[["forecast", "actual"]].sum()
+    seed = parts.loc["seed"]
+    assert abs(seed["forecast"] / seed["actual"] - 1) < 0.02
+    # Most of the run's own grants replay history's awards.
+    window = t.sbc[t.sbc["month"].between(0, MONTHS - 1) & (t.sbc["part"] == "sim")]
+    by_basis = window.groupby("basis")["recognized"].sum()
+    assert by_basis["replayed"] > 3 * by_basis["sized"]
+
+
+def test_every_tranche_holds_the_identity_and_chunks_change_nothing(
+    replayed: dict[str, Any],
+) -> None:
+    t: TrajectoryResult = replayed["trajectory"]
+    assert t.tranches is not None
+    assert t.expense is not None
+    assert len(t.tranches) > 100_000
+    assert np.abs(t.expense.residual).max() < IDENTITY_TOLERANCE
+    prepared = prepare(t.tranches, values_per_share(t.tranches, t.prices), pd.Period(RUN, "M"))
+    cohort = calculate(prepared, ExpenseConfig(forfeiture="cohort"), first_month=0)
+    assert cohort.rows["trueup_rate"].abs().sum() > 0  # the cohorts' rates moved
+    assert np.abs(cohort.residual).max() < IDENTITY_TOLERANCE
+    flat = ExpenseConfig()
+    whole = calculate(prepared, flat, first_month=0, chunk_size=len(t.tranches))
+    for size in (997, 20_000):
+        chunked = calculate(prepared, dataclasses.replace(flat, chunk_size=size), first_month=0)
+        pd.testing.assert_frame_equal(chunked.rows, whole.rows, check_exact=True)
+        assert np.array_equal(chunked.residual, whole.residual)
