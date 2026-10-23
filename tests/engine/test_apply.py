@@ -18,6 +18,7 @@ from hcsim.financial.prices import StaticPrice
 from hcsim.financial.ranges import RangeTable
 from hcsim.financial.routing import RECORDED_COLUMNS, RecordedAwards
 from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.streams import OfflineStream
 from hcsim.financial.timing import AnnualCutoff, AwardTiming, LagDistribution
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, EmployeeColumn, OpeningColumn
@@ -472,6 +473,45 @@ def test_a_recipient_granted_twice_in_the_window_takes_each_recorded_award_once(
     assert state.ledger is not None
     t = state.ledger.tranches()
     assert list(zip(t.award_month.tolist(), t.shares.tolist(), strict=True)) == [(3, 10), (4, 20)]
+
+
+def test_a_recipient_whose_award_the_offline_stream_holds_takes_it_from_there() -> None:
+    # The hires get ids 1000, 1001, and 1002. The first holds a primary-plan award, the second
+    # an offline plan's a month on, and the third neither.
+    stream = OfflineStream(
+        pd.DataFrame(
+            {
+                "award_id": [1],
+                "holder": [1001],
+                "award_type": [0],
+                "award_month": [3],
+                "vest_month": [15],
+                "shares": [30],
+                "value_per_share": [7.0],
+                "level": [0],
+                "cost_center": [0],
+            }
+        ),
+        recorded((1001, "new_hire", 3, 12, 30)),
+    )
+    settings = dataclasses.replace(
+        awards(),
+        replayed=recorded((1000, "new_hire", 2, 12, 40)),
+        replay_lag={"new_hire": 2},
+        offline=stream,
+    )
+    state = make_state(ledger=True)
+    state.price = StaticPrice(100.0)
+    change = RowChange(EMPLOYEE, append=employees([0, 0, 2], first_id=None))
+    grant = (Grant("new_hire"),)
+    applied = apply(state, result(employees=change, grants=grant), 2, SCHEMA, settings)
+    assert (applied.replayed_grants, applied.offline_grants, applied.unsized_grants) == (1, 1, 0)
+    assert state.replayed_awards == {("new_hire", 2, 1000), ("new_hire", 3, 1001)}
+    assert (state.employees[4:7, EmployeeColumn.BASE_SALARY] > 0).all()  # each base imputed
+    assert state.ledger is not None
+    # The stream carries the second hire's award, so the run's ledger holds nothing for them.
+    holders = set(state.ledger.tranches().holder.tolist())
+    assert holders == {4, 6}
 
 
 def test_an_eligibility_cutoff_leaves_out_recipients_hired_after_it() -> None:

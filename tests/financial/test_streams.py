@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from hcsim.financial.expense import SBC_KEYS, SBC_VALUES
+from hcsim.financial.routing import RECORDED_COLUMNS, RecordedAwards
 from hcsim.financial.streams import ManualAdjustments, OfflineStream, StreamError
 from hcsim.model.core.schema import (
     AWARD_TYPE,
@@ -50,6 +51,16 @@ def test_the_offline_stream_runs_through_the_calculator_from_the_runs_first_mont
     assert (stream.tranches().forfeit_month == -1).all()  # no attrition
 
 
+def test_a_replays_offline_tranche_forfeits_in_the_month_history_records() -> None:
+    # The same tranche, its holder leaving in month 1: the 27 recognized before it, 18 of them
+    # before the run, reverse.
+    stream = OfflineStream(offline(forfeit_month=[1]))
+    assert stream.tranches().forfeit_month.tolist() == [1]
+    sbc = stream.sbc()
+    assert sbc["month"].tolist() == [0, 1]
+    assert sbc["recognized"].tolist() == pytest.approx([9.0, -27.0])
+
+
 def test_an_empty_offline_stream_has_no_sbc() -> None:
     empty = OfflineStream(offline().iloc[:0])
     assert len(empty) == 0
@@ -64,6 +75,17 @@ def test_offline_tranches_are_checked() -> None:
     message = str(error.value)
     for part in ("still vests", "can't vest before its award month", "appraisal"):
         assert part in message
+    awarded = RecordedAwards.from_frame(
+        pd.DataFrame(
+            [(7, "annual", 0, 3, 12), (8, "annual", 0, 3, 12)],
+            columns=list(RECORDED_COLUMNS),
+        )
+    )
+    with pytest.raises(StreamError) as error:
+        OfflineStream(offline(award_month=[0], forfeit_month=[-2]), awarded)
+    message = str(error.value)
+    assert "forfeits during the run, or never" in message
+    assert "1 recorded awards have no tranche awarded to their holder in their month" in message
 
 
 def manual(**overrides: list[object]) -> pd.DataFrame:

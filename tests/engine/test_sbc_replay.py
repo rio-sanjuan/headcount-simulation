@@ -1,17 +1,22 @@
 """An SBC replay study: a year of history replayed with SBC, scored against the reference ledger.
 
-The run replays 2025 on a `small` world. Its seed is the workforce's unvested equity, the
-offline stream holds the offline plans' tranches outstanding at the start, and every grant a
-domain makes routes to the award history records for it. A recorded award may fall up to two
-months after the grant's month, as a new hire's lags their start, and it's awarded in its own
-month. The annual award runs in the world's annual month, and the retention and off-cycle
-awards history records are the run's anticipated awards. Grants with no recorded award in their
-window are sized, chiefly November and December hires, whose awards fall after the world ends.
+The run replays 2025 on a `small` world. Its seed is the workforce's unvested equity, and the
+offline stream is history's: the offline plans' tranches outstanding at the start and the awards
+they grant during the year, each forfeiting as history records. Every grant a domain makes
+routes to the award history records for it, of the primary plan or the offline stream. A
+recorded award may fall up to two months after the grant's month, as a new hire's lags their
+start, and it's awarded in its own month. The annual award runs in the world's annual month,
+and the retention and off-cycle awards history records are the run's anticipated awards.
+
+Grants with no recorded award in their window are sized, and a sized new hire's award falls one
+or two months after their start, as the world's do. So a December hire's falls after the world
+ends, and a hire who leaves first is never awarded. What's left sized is chiefly contingent
+workers converted in, whom the world grants no new-hire award.
 
 Each score is held to a tolerance set from this run, with room to spare: the recognized SBC per
-month against `equity_expense`, the seed's total, and the run's own grants' total. The run's
-tranches also hold the identity within 0.01 under both forfeiture modes, and their expense is
-the same, bit for bit, however it's chunked.
+month against `equity_expense`, and each part's total. The run's tranches also hold the identity
+within 0.01 under both forfeiture modes, and their expense is the same, bit for bit, however
+it's chunked.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from hcsim.financial.output import align
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.routing import AnticipatedAwards
 from hcsim.financial.sizing import NewHireGapFill
+from hcsim.financial.timing import AwardTiming, LagDistribution
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.studies.inputs import fit_models
 from hcsim.synth.config import preset
@@ -82,11 +88,13 @@ def replayed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any
             realized_price(con, RUN, AnnualGrowthPrice(float(last_close))),
             replayed=recorded,
             # In this world a new hire's award falls one or two months after their start's
-            # month, a promotion's in its month or the next, and a transfer's within two.
+            # month, about evenly, a promotion's in its month or the next, and a transfer's
+            # within two.
             replay_lag={"new_hire": 2, "promotion": 2, "transfer": 2},
+            timing={"new_hire": AwardTiming(LagDistribution((0.0, 0.5, 0.5)))},
             annual_month=WORLD.grants.annual_month,
             anticipated=anticipated,
-            offline=offline_equity(con, schema, RUN).stream,
+            offline=offline_equity(con, schema, RUN, replayed_months=MONTHS).stream,
         )
         config = SimulationConfig(
             run_date=RUN,
@@ -119,21 +127,25 @@ def test_the_replay_scores_against_the_reference_ledger(replayed: dict[str, Any]
     joined = align(t.sbc, replayed["actual"])
     monthly = joined.groupby("month")[["forecast", "actual"]].sum()
     assert monthly.index.tolist() == list(range(MONTHS))
-    # 3.0% on the run that set it.
+    # 2.2% on the run that set it.
     wape = (monthly["forecast"] - monthly["actual"]).abs().sum() / monthly["actual"].sum()
-    assert wape < 0.045
-    # The seed is history's own tranches and forfeits: 0.8% short on the run that set it.
+    assert wape < 0.035
     parts = joined.groupby("part")[["forecast", "actual"]].sum()
-    seed = parts.loc["seed"]
-    assert abs(seed["forecast"] / seed["actual"] - 1) < 0.02
-    # The run's own grants: 5.7% high on the run that set it. Their replayed SBC alone is 0.6%
-    # short, so the sized grants make up the excess.
-    sim = parts.loc["sim"]
-    assert abs(sim["forecast"] / sim["actual"] - 1) < 0.09
-    # Nearly all of them replay history's awards: 80.0M replayed, and 5.1M sized.
+    gap = parts["forecast"] / parts["actual"] - 1
+    # The seed is history's own tranches and forfeits: 0.8% short on the run that set it.
+    assert abs(gap["seed"]) < 0.02
+    # The run's own grants: 1.1% high on the run that set it. Their replayed SBC alone is 0.6%
+    # short, and the sized grants make up the rest.
+    assert abs(gap["sim"]) < 0.03
+    # The offline stream: 5.9% high on the run that set it, since a tranche outstanding at the
+    # start is valued at its latest appraisal, above its grant's.
+    assert abs(gap["offline"]) < 0.09
+    # Nearly all of the run's grants replay history's awards: 80.0M replayed, and 1.4M sized.
     window = t.sbc[t.sbc["month"].between(0, MONTHS - 1) & (t.sbc["part"] == "sim")]
     by_basis = window.groupby("basis")["recognized"].sum()
-    assert by_basis["replayed"] > 10 * by_basis["sized"]
+    assert by_basis["replayed"] > 40 * by_basis["sized"]
+    # Every promotion takes a recorded award, the offline stream's among them.
+    assert t.unsized_grants["promotion"] == 0
 
 
 def test_every_tranche_holds_the_identity_and_chunks_change_nothing(
