@@ -19,6 +19,11 @@ counted by cause.
 slot, so a simulated departure forfeits them and sizing counts their vests; an outside holder's
 and a future entrant's under new slots, in scratch from the run's first month, a future entrant
 joining at their start. A departed holder's tranches stay out.
+
+`offline_equity` reads the offline subsidiaries' plan the same way, for the offline stream (see
+`financial.streams`): its tranches outstanding at the run's start, each at its latest appraisal
+before the run, its grant's value when it has none, with no attrition, so a tranche whose holder
+history says leaves during the run stays in.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ import pandas as pd
 
 from hcsim.engine.state import SimulationState
 from hcsim.financial.seed import HolderStatus, SeedTranches, classify
+from hcsim.financial.streams import OFFLINE_COLUMNS, OfflineStream
 from hcsim.model.core.contract import role_column
 from hcsim.model.core.layouts import EmployeeColumn
 from hcsim.model.core.measures import REGULAR_ACCOUNTS
@@ -111,20 +117,9 @@ def seed_equity(
         (pd.Period(starts[h], "M") - run).n if s == HolderStatus.FUTURE.value else -1
         for h, s in zip(holders, frame["status"], strict=True)
     ]
-    pruned = {}
-    for name, vocabulary, column in (
-        ("unknown_cost_center", COST_CENTER, "cost_center"),
-        ("unknown_level", JOB_LEVEL, "level"),
-        ("unknown_award_type", AWARD_TYPE, "award_type"),
-    ):
-        codes = schema.encode(vocabulary, frame[column].astype(str), unknown="unattributed")
-        keep = codes >= 0
-        if (~keep).any():
-            pruned[name] = int((~keep).sum())
-        frame = frame[keep].copy()
-        frame[column] = codes[keep]
+    frame, pruned = _encoded(frame, schema)
     columns = [c for c in frame.columns if c != "employee_id"]
-    return SeedEquity(SeedTranches(frame[columns].reset_index(drop=True)), pruned)
+    return SeedEquity(SeedTranches(frame[columns]), pruned)
 
 
 def record_seed(state: SimulationState, seed: SeedTranches) -> dict[str, int]:
@@ -166,3 +161,73 @@ def record_seed(state: SimulationState, seed: SeedTranches) -> dict[str, int]:
             for slot, start in sorted(set(zip(slots.tolist(), rows["start_month"], strict=True))):
                 state.ledger.join(np.array([slot]), int(start))
     return recorded
+
+
+_OFFLINE = """
+WITH tranches AS (
+    SELECT a.award_id, a.employee_id, a.award_type, a.award_date, a.fair_value, a.job_level,
+           a.{award_cc} AS granted_in, v.vest_date, v.shares
+    FROM equity_award a JOIN equity_vest v USING (award_id)
+    WHERE a.plan = 'offline' AND a.award_date < $run AND v.vest_date >= $run AND v.shares > 0
+      AND (v.forfeit_date IS NULL OR v.forfeit_date >= $run)
+),
+appraised AS (
+    SELECT award_id, arg_max(value_per_share, valuation_date) AS appraisal
+    FROM equity_valuation
+    WHERE basis = 'appraisal' AND valuation_date < $run
+    GROUP BY award_id
+),
+holders AS (
+    SELECT award_id, any_value(employee_id) AS holder, any_value({holder_cc}) AS cost_center
+    FROM equity_holder
+    WHERE valid_from <= $run AND valid_to > $run
+    GROUP BY award_id
+)
+SELECT t.award_id, coalesce(h.holder, t.employee_id) AS holder, t.award_type,
+       datediff('month', date_trunc('month', $run::DATE), date_trunc('month', t.award_date))
+           AS award_month,
+       datediff('month', date_trunc('month', $run::DATE), date_trunc('month', t.vest_date))
+           AS vest_month,
+       t.shares, coalesce(p.appraisal, t.fair_value) AS value_per_share, t.job_level AS level,
+       coalesce(h.cost_center, t.granted_in) AS cost_center
+FROM tranches t LEFT JOIN appraised p USING (award_id) LEFT JOIN holders h USING (award_id)
+ORDER BY t.award_id, t.vest_date
+"""
+
+
+@dataclass(frozen=True)
+class OfflineEquity:
+    """The offline stream's tranches, and those left out because the schema couldn't encode
+    them."""
+
+    stream: OfflineStream
+    pruned: Mapping[str, int] = field(default_factory=dict)
+
+
+def offline_equity(
+    con: duckdb.DuckDBPyConnection, schema: SimulationSchema, run_date: dt.date
+) -> OfflineEquity:
+    """The offline subsidiaries' equity outstanding at `run_date`, at its latest appraisals."""
+    sql = _OFFLINE.format(
+        award_cc=role_column(con, "equity_award"), holder_cc=role_column(con, "equity_holder")
+    )
+    frame, pruned = _encoded(con.execute(sql, {"run": run_date}).df(), schema)
+    return OfflineEquity(OfflineStream(frame[list(OFFLINE_COLUMNS)]), pruned)
+
+
+def _encoded(frame: pd.DataFrame, schema: SimulationSchema) -> tuple[pd.DataFrame, dict[str, int]]:
+    """`frame` with its cost centers, levels, and award types as schema codes, the rows whose
+    label the schema can't encode left out and counted by cause."""
+    pruned = {}
+    for name, vocabulary, column in (
+        ("unknown_cost_center", COST_CENTER, "cost_center"),
+        ("unknown_level", JOB_LEVEL, "level"),
+        ("unknown_award_type", AWARD_TYPE, "award_type"),
+    ):
+        codes = schema.encode(vocabulary, frame[column].astype(str), unknown="unattributed")
+        keep = codes >= 0
+        if (~keep).any():
+            pruned[name] = int((~keep).sum())
+        frame = frame[keep].copy()
+        frame[column] = codes[keep]
+    return frame.reset_index(drop=True), pruned
