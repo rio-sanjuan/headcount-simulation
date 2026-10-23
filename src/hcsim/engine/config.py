@@ -396,6 +396,11 @@ class SimulationConfig:
         SupplyRule.STRENGTH,
         "how target-seeking growth sizes its gap: strength, expected_fill, or soft_bridge",
     )
+    requisitions_credit_lookahead: int = setting(
+        "requisitions",
+        0,
+        "L̂, the months of known events ahead the plan gap is credited with; 0 credits none",
+    )
     requisitions_fill_yield: float = setting(
         "requisitions",
         1.0,
@@ -629,6 +634,13 @@ class SimulationConfig:
                 ("transfers_level_band",),
                 lambda: _when(
                     self.transfers_level_band < 0, "transfers_level_band must be non-negative"
+                ),
+            ),
+            (
+                ("requisitions_credit_lookahead",),
+                lambda: _when(
+                    self.requisitions_credit_lookahead < 0,
+                    "requisitions_credit_lookahead must be non-negative",
                 ),
             ),
             (

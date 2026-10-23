@@ -20,6 +20,7 @@ from typing import Final, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from hcsim.engine.attainability import known_credit
 from hcsim.engine.campus import is_campus
 from hcsim.engine.config import BackfillSource, SimulationConfig
 from hcsim.engine.fills import FILLS, fills
@@ -49,6 +50,7 @@ from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabiliti
 from hcsim.model.ml.sampling import apportion, bernoulli, quota_select
 
 Ints = NDArray[np.int64]
+Floats = NDArray[np.float64]
 
 ATTRITION: Final = "attrition"
 BACKFILL: Final = "backfill"
@@ -150,6 +152,11 @@ class StepContext:
             return p
         result: Probabilities = np.where(self.known.plan.sampled(rows, self.step), p, 0.0)
         return result
+
+    def credit(self, state: SimulationState) -> Floats:
+        """The known-event credit over the run's lookahead, per cost center (see
+        `attainability`)."""
+        return known_credit(state, self.known, self.step, self.config.requisitions_credit_lookahead)
 
     def guided(self, category: GuidanceCategory) -> bool:
         return self.config.guidance is not None and self.config.guidance.covers(category)
@@ -295,7 +302,9 @@ def _backfill(
     ceiling = ctx.config.ceiling
     diagnostics: dict[str, Ints] = {}
     if ceiling.binds:
-        room = ceiling.room(ctx.config.run_date, ctx.step, state.headcount, state.open_openings)
+        room = ceiling.room(
+            ctx.config.run_date, ctx.step, state.headcount, state.open_openings, ctx.credit(state)
+        )
         quota = np.minimum(room, len(departed)).astype(np.int64)
         vetoed = quota_select(opened.astype(np.float64), cost_centers, quota, rng)
         withheld = opened & ~vetoed.mask
@@ -446,8 +455,9 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
         counts[:] = 0
     regime = regimes(state, ctx)
     seeking = regime == Regime.TARGET
+    credit = ctx.credit(state)
     if not ctx.pinned and seeking.any():
-        counts[seeking] = _supply(state, ctx)[seeking]
+        counts[seeking] = _supply(state, ctx, credit)[seeking]
     ledger: dict[str, Ints] = {}
     quotas: dict[str, QuotaRecord] = {}
     guided = regime == Regime.GUIDED
@@ -459,7 +469,9 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
         counts[guided] = np.maximum(0, quota - used)[group[guided]]
     ceiling = ctx.config.ceiling
     if ceiling.binds:
-        room = ceiling.room(ctx.config.run_date, ctx.step, state.headcount, state.open_openings)
+        room = ceiling.room(
+            ctx.config.run_date, ctx.step, state.headcount, state.open_openings, credit
+        )
         counts = np.minimum(counts, np.minimum(room, np.iinfo(np.int64).max)).astype(np.int64)
     if guided.any():
         mine = np.bincount(group[guided], weights=counts[guided], minlength=len(quota))
@@ -485,10 +497,11 @@ def growth(state: SimulationState, ctx: StepContext) -> DomainResult:
 ROUTES: Final = {Regime.TARGET: Route.SUPPLY, Regime.GUIDED: Route.GUIDED, Regime.RATE: Route.RATE}
 
 
-def _supply(state: SimulationState, ctx: StepContext) -> Ints:
-    """What the run's supply rule opens in each cost center this month."""
+def _supply(state: SimulationState, ctx: StepContext, credit: Floats) -> Ints:
+    """What the run's supply rule opens in each cost center this month, with the known-event
+    credit counted in its headcount."""
     config = ctx.config
-    h, o = state.headcount, state.open_openings
+    h, o = state.headcount + credit, state.open_openings
     rule, gain = config.requisitions_supply_rule, config.requisitions_supply_gain
     if rule is SupplyRule.SOFT_BRIDGE:
         upcoming, ahead = config.ceiling.next_targets(config.run_date, ctx.step)
