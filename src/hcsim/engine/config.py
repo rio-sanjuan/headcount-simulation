@@ -29,7 +29,9 @@ from typing import Any, Final, cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
+from hcsim.engine.alignment import AlignmentMethod, supplied
 from hcsim.engine.campus import CampusSchedule
 from hcsim.engine.ceiling import Ceiling, CeilingError
 from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityRule, resolve
@@ -97,6 +99,7 @@ GROUPS: Final[Mapping[str, str]] = MappingProxyType(
         "campus": "campus openings and starts",
         "cancellation": "requisitions that exit unfilled",
         "requisitions": "growth requisition generation",
+        "alignment": "which valve the plan's targets drive",
         "replay": "replaying realized history",
         "results": "what a run records",
     }
@@ -387,6 +390,12 @@ class SimulationConfig:
         1.0,
         "the share of the gap to the plan target that target-seeking growth closes each month",
     )
+    # alignment
+    alignment_method: AlignmentMethod = setting(
+        "alignment",
+        AlignmentMethod.SUPPLY,
+        "the valve the plan drives: none, supply, demand, hybrid, or rate_calibration",
+    )
     # replay
     replay_boundary_fill: bool = setting(
         "replay", True, "inject boundary fills for hires replay can't trace to a requisition"
@@ -434,7 +443,11 @@ class SimulationConfig:
             if self.models.campus_attributes is None:
                 problems.append("campus: a campus schedule needs a campus attribute generator")
         try:
-            ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan)
+            method = (
+                self.alignment_method if "alignment_method" in typed else AlignmentMethod.SUPPLY
+            )
+            supply = supplied(method, self._opened_coverage())
+            ceiling = Ceiling.build(self.schema, self.capacity_caps, self.plan, supply)
             object.__setattr__(self, "ceiling", ceiling)
         except CeilingError as error:
             problems += [f"ceiling: {p}" for p in error.problems]
@@ -723,6 +736,18 @@ class SimulationConfig:
         except SchemaError as error:
             problems.append(f"guidance doesn't fit the schema: {error}")
         return problems
+
+    def _opened_coverage(self) -> NDArray[np.bool_]:
+        """Per cost-center code, whether guidance covers its requisitions opened."""
+        n = len(self.schema.vocabulary(COST_CENTER))
+        guidance, aligner = self.guidance, self.aligner
+        opened = GuidanceCategory.REQUISITIONS_OPENED
+        if guidance is None or aligner is None or not guidance.covers(opened):
+            return np.zeros(n, dtype=bool)
+        groups = aligner.groups_of_codes(np.arange(n, dtype=np.int64))
+        cover = guidance.group_coverage(opened)
+        covered: NDArray[np.bool_] = (groups >= 0) & cover[np.maximum(groups, 0)]
+        return covered
 
     @property
     def computes_sbc(self) -> bool:
