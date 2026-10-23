@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -43,8 +45,9 @@ RECORDED = RecordedAwards.from_frame(
 
 def test_recorded_tranches_become_one_schedule_per_recipient_type_and_month() -> None:
     assert len(RECORDED) == 3
-    covered, schedules = RECORDED.lookup(np.array([8, 9, 7]), 2, "annual")
+    covered, schedules, steps = RECORDED.lookup(np.array([8, 9, 7]), 2, "annual")
     assert covered.tolist() == [True, False, True]
+    assert steps.tolist() == [2, -1, 2]
     assert {int(c) + 1: int(v) for c, v in enumerate(schedules[2]) if v} == {3: 10, 15: 25}
     assert schedules[0, 0] == 4
     assert not schedules[1].any()
@@ -78,6 +81,57 @@ def test_after_the_hybrid_window_every_grant_is_sized() -> None:
     assert routed is not None
     assert routed.replayed.tolist() == [False]
     assert routed.batch.shares_per_year[0, :2].tolist() == [500, 500]
+
+
+LAGGED = RecordedAwards.from_frame(
+    tranches(
+        (7, "new_hire", 3, 12, 40),  # a month after a start at step 2
+        (8, "new_hire", 5, 12, 50),  # three months after it
+        (9, "new_hire", 2, 12, 1),
+        (9, "new_hire", 4, 12, 2),  # a second award of the type in the window
+    )
+)
+HIRES = dataclasses.replace(STRATEGY, award_type="new_hire")
+
+
+def test_the_window_spans_each_types_lag_through_its_last_step() -> None:
+    window = HybridWindow(lag={"new_hire": 2})
+    assert window.steps(2, "new_hire") == range(2, 5)
+    assert window.steps(2, "annual") == range(2, 3)  # no lag: the dispatch step alone
+    assert HybridWindow(3, {"new_hire": 2}).steps(2, "new_hire") == range(2, 4)
+    assert not HybridWindow(1, {"new_hire": 2}).steps(2, "new_hire")
+    with pytest.raises(SizingError, match=r"which \['new_hire'\] isn't"):
+        HybridWindow(lag={"new_hire": -1, "annual": 0})
+
+
+def test_each_recipient_takes_their_earliest_award_in_the_window_not_yet_granted() -> None:
+    ids = np.array([7, 8, 9])
+    covered, schedules, steps = LAGGED.lookup(ids, range(2, 5), "new_hire")
+    assert covered.tolist() == [True, False, True]
+    assert steps.tolist() == [3, -1, 2]
+    assert schedules[:, 11].tolist() == [40, 0, 1]
+    granted = {("new_hire", 2, 9), ("annual", 3, 7)}  # another type's award takes nothing
+    covered, schedules, steps = LAGGED.lookup(ids, range(4, 1, -1), "new_hire", granted)
+    assert steps.tolist() == [3, -1, 4]
+    assert schedules[:, 11].tolist() == [40, 0, 2]
+    assert not LAGGED.lookup(ids, range(5, 5), "new_hire")[0].any()
+
+
+def test_a_lagged_award_routes_with_its_own_step_and_the_rest_are_sized() -> None:
+    window = HybridWindow(lag={"new_hire": 2})
+    context = SizingContext(2)
+    routed = route(HIRES, "new_hire", rows(7, 8), PRICE, context, LAGGED, window)
+    assert routed is not None
+    assert routed.replayed.tolist() == [True, False]
+    assert routed.award_steps.tolist() == [3, -1]
+    assert routed.batch.shares_per_year.tolist() == [[40, 0, 0, 0, 0, 0], [500, 500, 0, 0, 0, 0]]
+    granted = {("new_hire", 2, 9), ("new_hire", 4, 9)}
+    routed = route(HIRES, "new_hire", rows(9), PRICE, context, LAGGED, window, granted)
+    assert routed is not None
+    assert routed.sized.tolist() == [True]  # both of their awards are granted already
+    exact = route(HIRES, "new_hire", rows(7), PRICE, context, LAGGED)
+    assert exact is not None
+    assert exact.sized.tolist() == [True]  # without a lag, the award a month on is out of reach
 
 
 def test_without_a_strategy_only_recorded_recipients_are_granted() -> None:

@@ -15,6 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.financial.prices import StockPriceModel
+from hcsim.financial.routing import Claim
 from hcsim.financial.tracker import HolderLedger
 from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, EmployeeColumn, OpeningColumn
 
@@ -43,6 +44,8 @@ class SimulationState:
     price: StockPriceModel | None = None
     #: Per step: how much of each shared guidance quota the domains have used, by group.
     category_ledger: dict[str, Ints] = field(default_factory=dict)
+    #: The recorded awards this trajectory has granted, so none is granted twice.
+    replayed_awards: set[Claim] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.employees.shape[1] != EMPLOYEE.width or self.openings.shape[1] != OPENING.width:

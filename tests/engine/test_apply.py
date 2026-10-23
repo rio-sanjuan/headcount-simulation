@@ -16,6 +16,7 @@ from hcsim.engine.results import DomainResult, Grant, RowChange
 from hcsim.engine.state import BufferCapacityError, SimulationState
 from hcsim.financial.prices import StaticPrice
 from hcsim.financial.ranges import RangeTable
+from hcsim.financial.routing import RECORDED_COLUMNS, RecordedAwards
 from hcsim.financial.sizing import NewHireGapFill
 from hcsim.financial.timing import AnnualCutoff, AwardTiming, LagDistribution
 from hcsim.financial.tracker import NOT_FORFEITED, HolderLedger
@@ -37,7 +38,7 @@ SCHEMA = SimulationSchema.build(
         JOB_LEVEL: [1],
         LOCATION: ["L"],
         REQ_TYPE: ["backfill", "growth"],
-        AWARD_TYPE: ["new_hire"],
+        AWARD_TYPE: ["new_hire", "promotion"],
     }
 )
 N_CC = 3
@@ -419,6 +420,58 @@ def test_a_timed_grant_is_awarded_and_vests_from_its_award_month() -> None:
     assert later.shares.sum() == now.shares.sum()
     with pytest.raises(RuntimeError, match="are timed, so need a random stream"):
         hire(timed)
+
+
+def recorded(*awards_: tuple[int, str, int, int, int]) -> RecordedAwards:
+    return RecordedAwards.from_frame(pd.DataFrame(awards_, columns=list(RECORDED_COLUMNS)))
+
+
+def test_a_lagged_recorded_award_is_awarded_in_its_own_month() -> None:
+    # The hires get ids 1000 and 1001: the first's award is recorded a month after their start,
+    # and the second's three months after it, beyond the lag.
+    history = recorded((1000, "new_hire", 3, 12, 40), (1001, "new_hire", 5, 12, 50))
+    timing = {"new_hire": AwardTiming(LagDistribution.fixed(2))}
+    settings = dataclasses.replace(
+        awards(), replayed=history, replay_lag={"new_hire": 2}, timing=timing
+    )
+    state = make_state(ledger=True)
+    state.price = StaticPrice(100.0)
+    change = RowChange(EMPLOYEE, append=employees([0, 2], first_id=None))
+    rng = np.random.default_rng(0)
+    grant = (Grant("new_hire"),)
+    applied = apply(state, result(employees=change, grants=grant), 2, SCHEMA, settings, 3, rng)
+    assert applied.replayed_grants == 1
+    assert state.replayed_awards == {("new_hire", 3, 1000)}
+    assert state.ledger is not None
+    t = state.ledger.tranches()
+    first = t.holder == 4
+    # The recorded award vests from the month it was recorded in, whatever the timing draws.
+    assert (t.award_month[first].tolist(), t.vest_month[first].tolist()) == ([3], [15])
+    assert t.shares[first].tolist() == [40]
+    assert t.recorded[first].all()
+    # The second hire's is sized, and awarded after the timing's lag.
+    assert set(t.award_month[~first].tolist()) == {4}
+    assert not t.recorded[~first].any()
+
+
+def test_a_recipient_granted_twice_in_the_window_takes_each_recorded_award_once() -> None:
+    # Employee 100 is promoted at steps 2, 3, and 4, with awards recorded at steps 3 and 4.
+    history = recorded((100, "promotion", 3, 6, 10), (100, "promotion", 4, 6, 20))
+    settings = dataclasses.replace(awards(), replayed=history, replay_lag={"promotion": 2})
+    state = make_state(ledger=True)
+    state.price = StaticPrice(100.0)
+    unsized = []
+    for step in (2, 3, 4):
+        rows = state.employees[:1].copy()
+        change = RowChange(EMPLOYEE, write_index=np.array([0]), write_rows=rows)
+        grant = (Grant("promotion", rows="written"),)
+        applied = apply(state, result(employees=change, grants=grant), step, SCHEMA, settings)
+        unsized.append(applied.unsized_grants)
+    assert unsized == [0, 0, 1]  # the third finds none left, and no sizer for promotions
+    assert state.replayed_awards == {("promotion", 3, 100), ("promotion", 4, 100)}
+    assert state.ledger is not None
+    t = state.ledger.tranches()
+    assert list(zip(t.award_month.tolist(), t.shares.tolist(), strict=True)) == [(3, 10), (4, 20)]
 
 
 def test_an_eligibility_cutoff_leaves_out_recipients_hired_after_it() -> None:

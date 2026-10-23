@@ -1,11 +1,15 @@
 """Routing grants between recorded awards and sizing, and overriding what sizing gives.
 
 - **Replay routing** (`route`): a grant's recipients who hold a recorded award of its type in
-  its month take that award as recorded; the rest are sized by the strategy. Every recipient's
-  base is the strategy's imputation, since a recorded award carries no salary.
+  its month, or within its type's lag after it, take that award as recorded, in the award's own
+  month; the rest are sized by the strategy. Each takes their earliest recorded award not yet
+  granted, so none is granted twice. Every recipient's base is the strategy's imputation, since
+  a recorded award carries no salary.
 - **Hybrid windows** (`HybridWindow`): recorded awards route only through a last step, and
   every grant after it is sized, as when a run starts before its data ends: its first months
-  replay what was granted, and the rest forecast it.
+  replay what was granted, and the rest forecast it. The window also holds each award type's
+  lag: how many months after a grant's dispatch its recorded award may fall, as a new hire's
+  award follows their start.
 - **Overrides** (`Overridden`): an aggregate override scales every grant a strategy sizes by
   one factor, as for a budget change. Individual overrides set named employees' shares per
   forward year outright, and aren't scaled.
@@ -19,7 +23,7 @@ A routed batch's shares per year are its schedule's, in twelve-month buckets ove
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
@@ -41,6 +45,8 @@ ANTICIPATED_COLUMNS: Final = ("employee_id", "step", "award_type")
 #: many months after it the tranche vests, and its shares.
 RECORDED_COLUMNS: Final = ("employee_id", "award_type", "step", "after", "shares")
 YEARS: Final = CANONICAL_VEST_MONTHS // 12
+#: A recorded award, as a trajectory marks it granted: its award type, step, and employee.
+Claim = tuple[str, int, int]
 
 
 def per_year(schedule: Ints) -> Ints:
@@ -100,15 +106,31 @@ class RecordedAwards:
             schedule[months - 1] += shares
         return cls(schedules)
 
-    def lookup(self, ids: Ints, step: int, award_type: str) -> tuple[NDArray[np.bool_], Ints]:
-        """Which of `ids` hold a recorded award of `award_type` at `step`, and their schedules
-        (zeros where they hold none)."""
-        by_id = self.schedules.get((award_type, step), {})
-        covered = np.array([int(i) in by_id for i in ids], dtype=bool)
-        schedules = np.zeros((len(ids), CANONICAL_VEST_MONTHS), dtype=np.int64)
-        for row in np.flatnonzero(covered):
-            schedules[row] = by_id[int(ids[row])]
-        return covered, schedules
+    def lookup(
+        self,
+        ids: Ints,
+        steps: int | Iterable[int],
+        award_type: str,
+        granted: Container[Claim] = frozenset(),
+    ) -> tuple[NDArray[np.bool_], Ints, Ints]:
+        """Which of `ids` hold a recorded award of `award_type` at `steps`, one step or several,
+        their schedules (zeros where they hold none), and each award's step (-1 where they hold
+        none). Each takes their earliest award that isn't among those already `granted`."""
+        n = len(ids)
+        covered = np.zeros(n, dtype=bool)
+        schedules = np.zeros((n, CANONICAL_VEST_MONTHS), dtype=np.int64)
+        award_steps = np.full(n, -1, dtype=np.int64)
+        for step in sorted([steps] if isinstance(steps, int) else steps):
+            by_id = self.schedules.get((award_type, step))
+            if not by_id:
+                continue
+            for row in np.flatnonzero(~covered):
+                employee = int(ids[row])
+                if employee in by_id and (award_type, step, employee) not in granted:
+                    covered[row] = True
+                    schedules[row] = by_id[employee]
+                    award_steps[row] = step
+        return covered, schedules, award_steps
 
     def __len__(self) -> int:
         return sum(len(v) for v in self.schedules.values())
@@ -174,21 +196,40 @@ class AnticipatedAwards:
 @dataclass(frozen=True)
 class HybridWindow:
     """Recorded awards route through step `through`, and grants after it are sized. With no
-    last step, they route at every step."""
+    last step, they route at every step. A grant routes to a recorded award of its type from its
+    dispatch step through `lag` months after it, by award type, and in its dispatch step alone
+    for a type without one."""
 
     through: int | None = None
+    lag: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        negative = sorted(t for t, months in self.lag.items() if months < 0)
+        if negative:
+            raise SizingError(f"a replay lag is a number of months from 0, which {negative} isn't")
+        object.__setattr__(self, "lag", MappingProxyType(dict(self.lag)))
 
     def covers(self, step: int) -> bool:
         return self.through is None or step <= self.through
 
+    def steps(self, step: int, award_type: str) -> range:
+        """The steps whose recorded awards of `award_type` a grant dispatched at `step` may
+        take: from it through its lag, and none after the last step."""
+        last = step + self.lag.get(award_type, 0)
+        if self.through is not None:
+            last = min(last, self.through)
+        return range(step, last + 1)
+
 
 @dataclass(frozen=True)
 class Routed:
-    """A routed grant: its batch, which rows took a recorded award, and which were sized."""
+    """A routed grant: its batch, which rows took a recorded award, and which were sized. Each
+    recorded award's step is the one it was recorded at, and -1 for rows that took none."""
 
     batch: AwardBatch
     replayed: NDArray[np.bool_]
     sized: NDArray[np.bool_]
+    award_steps: Ints
 
 
 def route(
@@ -199,16 +240,20 @@ def route(
     context: SizingContext,
     recorded: RecordedAwards | None = None,
     window: HybridWindow | None = None,
+    granted: Container[Claim] = frozenset(),
 ) -> Routed | None:
-    """Route one grant's recipients: a recorded award where they hold one and the window covers
-    the step, sizing by `strategy` otherwise. None when no recipient is covered either way.
-    Without a strategy, recorded recipients keep the base they have."""
+    """Route one grant's recipients: the earliest recorded award they hold among the window's
+    steps for this one and haven't been `granted`, sizing by `strategy` otherwise. None when no
+    recipient is covered either way. Without a strategy, recorded recipients keep the base they
+    have."""
     ids = np.asarray(rows[:, EmployeeColumn.EMPLOYEE_ID], dtype=np.int64)
     n = len(rows)
     covered = np.zeros(n, dtype=bool)
     schedule = np.zeros((n, CANONICAL_VEST_MONTHS), dtype=np.int64)
-    if recorded is not None and (window or HybridWindow()).covers(context.step):
-        covered, schedule = recorded.lookup(ids, context.step, award_type)
+    award_steps = np.full(n, -1, dtype=np.int64)
+    if recorded is not None:
+        steps = (window or HybridWindow()).steps(context.step, award_type)
+        covered, schedule, award_steps = recorded.lookup(ids, steps, award_type, granted)
     if strategy is None and not covered.any():
         return None
     base = rows[:, EmployeeColumn.BASE_SALARY].astype(np.float64)
@@ -220,7 +265,9 @@ def route(
         schedule = np.where(covered[:, None], schedule, batch.vest_schedule)
     else:
         schedule = np.where(covered[:, None], schedule, 0)
-    return Routed(AwardBatch(award_type, base, per_year(schedule), schedule), covered, sized)
+    return Routed(
+        AwardBatch(award_type, base, per_year(schedule), schedule), covered, sized, award_steps
+    )
 
 
 @dataclass(frozen=True)

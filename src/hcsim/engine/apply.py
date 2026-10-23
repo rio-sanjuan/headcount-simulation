@@ -189,7 +189,8 @@ def apply(
         state.open_rows += per_cost_center(appended_reqs, occ, n)
 
     # 7. Route, size, and record grants, for the appended employees, the written ones, or the
-    # listed ones: a recorded award where the recipient holds one, sizing otherwise.
+    # listed ones: a recorded award where the recipient holds one in the grant's window, sizing
+    # otherwise.
     recorded = unsized = replayed = ineligible = 0
     if result.grants and awards is not None and state.ledger is not None:
         first = state.n_employees - len(appended)
@@ -220,6 +221,7 @@ def apply(
                 SizingContext(step, calendar_month, state.ledger),
                 awards.replayed,
                 awards.window,
+                state.replayed_awards,
             )
             if routed is None:
                 unsized += len(positions)
@@ -238,6 +240,13 @@ def apply(
                 raise RuntimeError(f"{grant.award_type} awards are timed, so need a random stream")
             else:
                 award_steps = timing.award_steps(step, calendar_month, len(rows), rng)
+            # A recorded award is awarded in the month it was recorded, and only once.
+            award_steps = np.where(routed.replayed, routed.award_steps, award_steps)
+            ids = rows[routed.replayed, EmployeeColumn.EMPLOYEE_ID].astype(np.int64).tolist()
+            awarded = routed.award_steps[routed.replayed].tolist()
+            state.replayed_awards.update(
+                (grant.award_type, s, i) for s, i in zip(awarded, ids, strict=True)
+            )
             for award_step in np.unique(award_steps):
                 at = award_steps == award_step
                 recorded += state.ledger.record(
