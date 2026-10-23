@@ -19,7 +19,7 @@ from hcsim.guidance.framework import PipelineError
 from hcsim.guidance.pipeline import run
 from hcsim.model.core.alignment import AlignmentTarget, marginal
 from hcsim.model.core.categories import GuidanceCategory
-from hcsim.model.core.guidance import GuidanceForecast
+from hcsim.model.core.guidance import GuidanceForecast, movements_digest
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
 
@@ -178,6 +178,13 @@ def test_an_aligned_artifact_is_stamped_with_its_target(
     assert GuidanceForecast.load(tmp_path / "g").aligned_to == target.digest()
     plain = run(con, GuidanceConfig(horizon=6, grouping="TOPLINE")).artifact
     assert plain.aligned_to is None
+    # It records the declared movements it counted, none here, and so does its reloaded copy.
+    assert aligned.movements == movements_digest(None)
+    assert GuidanceForecast.load(tmp_path / "g").movements == aligned.movements
+    assert plain.movements is None
+    moved = {"ALL": [0.0, -3.0, 0.0, 0.0, 0.0, 0.0]}
+    shifted = run(con, GuidanceConfig.from_mapping(CONFIG), target, moved).artifact
+    assert shifted.movements == movements_digest(moved) != aligned.movements
 
 
 def test_alignment_takes_precedence_over_reconciliation(con: duckdb.DuckDBPyConnection) -> None:

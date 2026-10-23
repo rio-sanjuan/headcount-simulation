@@ -65,6 +65,7 @@ def _stamps(result: PipelineResult) -> list[list[object]]:
         ["step offsets", f"0 = {offsets[0][1]} … {offsets[-1][0]} = {offsets[-1][1]}"],
         ["population", artifact.population or "—"],
         ["aligned_to", artifact.aligned_to or "—"],
+        ["movements", artifact.movements or "—"],
         ["configuration", report.get("configuration", "—")],
         ["source", report.get("source", "—")],
         ["hcsim", version("hcsim")],

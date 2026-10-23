@@ -15,8 +15,10 @@ what they know: the pipeline never fabricates it.
 - **Sample paths**: an array of shape (series, paths, horizon), saved beside the frame, with
   an index giving each series' group and category.
 
-An artifact records the population it was built for, as a stamp (`name@digest`), and the
-alignment target it was aligned to, if any. Wherever it carries a fill-tree parent and all of
+An artifact records the population it was built for, as a stamp (`name@digest`), the
+alignment target it was aligned to, if any, and the declared movements that alignment counted
+(`movements_digest`), so a run can refuse guidance aligned under other movements than it
+declares. Wherever it carries a fill-tree parent and all of
 the parent's parts, they must agree cell by cell: a load that finds them apart is refused,
 naming the worst cells, since domains reading the parts and the parent would realize different
 counts. `combine` joins artifacts that share their identity and cover different cells.
@@ -93,6 +95,8 @@ class GuidanceForecast:
     path_index: tuple[tuple[str, str], ...] = ()
     #: The digest of the alignment target the forecast was aligned to.
     aligned_to: str | None = None
+    #: The digest of the declared movements alignment counted, `ε_H` (see `movements_digest`).
+    movements: str | None = None
     groups: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -135,6 +139,10 @@ class GuidanceForecast:
             not self.aligned_to or self.aligned_to.split() != [self.aligned_to]
         ):
             raise GuidanceArtifactError(f"aligned_to must be a digest, not {self.aligned_to!r}")
+        if self.movements is not None and not MOVEMENTS_DIGEST.fullmatch(self.movements):
+            raise GuidanceArtifactError(f"movements must be a dm1- digest, not {self.movements!r}")
+        if self.movements is not None and self.aligned_to is None:
+            raise GuidanceArtifactError("only an aligned forecast records its declared movements")
         self._check_coherence()
 
     def _check_coherence(self) -> None:
@@ -202,6 +210,7 @@ class GuidanceForecast:
             first.horizon,
             first.population,
             first.aligned_to,
+            first.movements,
         )
         problems = []
         for k, other in enumerate(artifacts[1:], start=1):
@@ -211,6 +220,7 @@ class GuidanceForecast:
                 other.horizon,
                 other.population,
                 other.aligned_to,
+                other.movements,
             )
             if theirs != identity:
                 problems.append(
@@ -249,6 +259,7 @@ class GuidanceForecast:
             paths,
             tuple(pair for a in artifacts for pair in a.path_index),
             first.aligned_to,
+            first.movements,
         )
 
     def _check_quantiles(self, frame: pd.DataFrame) -> list[str]:
@@ -432,6 +443,8 @@ class GuidanceForecast:
             data["population"] = self.population
         if self.aligned_to is not None:
             data["aligned_to"] = self.aligned_to
+        if self.movements is not None:
+            data["movements"] = self.movements
         return data
 
     def fingerprint(self) -> str:
@@ -476,10 +489,28 @@ class GuidanceForecast:
             paths,
             tuple((str(g), str(c)) for g, c in index),
             meta.get("aligned_to"),
+            meta.get("movements"),
         )
         if artifact.fingerprint() != meta["fingerprint"]:
             raise GuidanceArtifactError("the frame doesn't match its recorded fingerprint")
         return artifact
+
+
+#: A declared-movement digest: `dm1-` and 16 hex characters.
+MOVEMENTS_DIGEST: Final = re.compile(r"dm1-[0-9a-f]{16}")
+
+
+def movements_digest(movements: Mapping[str, Sequence[float]] | None) -> str:
+    """The digest of declared movements, each group's net change in heads, `ε_H`, per forecast
+    month: `dm1-` and 16 hex characters of a SHA-256 over the groups that move, in order, with
+    their changes to six places. No movements, or only zeros, share one digest."""
+    canonical = {
+        str(group): [round(float(v), 6) for v in values]
+        for group, values in sorted((movements or {}).items())
+        if any(round(float(v), 6) for v in values)
+    }
+    text = json.dumps(canonical, sort_keys=True)
+    return "dm1-" + hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _stamp_text(value: str | None) -> str | None:
