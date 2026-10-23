@@ -39,6 +39,7 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
+from hcsim.engine.planner import FillShares, FillShareTarget, PlannerError, resolve_fill_shares
 from hcsim.engine.supply import SupplyRule
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
@@ -434,8 +435,10 @@ class SimulationConfig:
     capacity_caps: Mapping[str, int] = field(default_factory=dict)
     #: The plan whose cost-center targets bound committed strength, `H*(c, t)`.
     plan: AlignmentTarget | None = None
-    #: A planner's reshaping of the fill channels' hazards.
+    #: A planner's reshaping of the fill channels' hazards, in code.
     fill_mix: FillMix | None = None
+    #: The planner's fill-share targets, each over its scope (see `planner`).
+    fill_shares: tuple[FillShareTarget, ...] = ()
     #: Campus requisitions by month and cost center, and the months campus hires start.
     campus: CampusSchedule | None = None
     aligner: GroupAligner | None = field(init=False, default=None)
@@ -443,6 +446,8 @@ class SimulationConfig:
     resolved_eligibility: Eligibility = field(init=False, default_factory=Eligibility)
     #: `Cap_eff(c, t)`, from the caps and the plan.
     ceiling: Ceiling = field(init=False, default_factory=lambda: Ceiling(np.zeros(0)))
+    #: The fill-share targets, resolved; None for none.
+    resolved_fill_shares: FillShares | None = field(init=False, default=None)
     #: Which valve the plan drives, and where.
     alignment: ResolvedAlignment = field(
         init=False, default_factory=lambda: ResolvedAlignment(AlignmentMethod.SUPPLY)
@@ -478,6 +483,13 @@ class SimulationConfig:
                 method, self.schema, self.plan, self.guidance, opened, self._grouped()
             )
             object.__setattr__(self, "alignment", resolved)
+        object.__setattr__(self, "fill_shares", tuple(self.fill_shares))
+        try:
+            object.__setattr__(
+                self, "resolved_fill_shares", resolve_fill_shares(self.fill_shares, self.schema)
+            )
+        except PlannerError as error:
+            problems += [f"fill_shares: {p}" for p in error.problems]
         try:
             rules = (*self.eligibility, *self._executive_rule())
             object.__setattr__(self, "resolved_eligibility", resolve(rules, self.schema))

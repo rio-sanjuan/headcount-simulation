@@ -57,6 +57,7 @@ from hcsim.engine.config import (
 )
 from hcsim.engine.eligibility import EligibilityError, EligibilityRule
 from hcsim.engine.gates import GateError, gate_from_dict
+from hcsim.engine.planner import FillShareTarget, PlannerError
 from hcsim.financial.prices import digest as price_digest
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.guidance import GuidanceForecast
@@ -354,6 +355,7 @@ def to_record(config: SimulationConfig) -> dict[str, Any]:
         "gates": [gate.to_dict() for gate in config.gates],
         "capacity_caps": dict(sorted(config.capacity_caps.items())),
         "plan": None if config.plan is None else config.plan.digest(),
+        "fill_shares": [t.to_dict() for t in config.fill_shares],
         "alignment": config.alignment.to_dict(),
         "campus": None
         if config.campus is None
@@ -442,6 +444,12 @@ def from_record(
             rules.append(EligibilityRule.from_dict(entry))
         except EligibilityError as error:
             problems += error.problems
+    fill_shares = []
+    for entry in record.get("fill_shares", []):
+        try:
+            fill_shares.append(FillShareTarget.from_dict(entry))
+        except PlannerError as error:
+            problems += error.problems
     gates = []
     for entry in record.get("gates", []):
         try:
@@ -460,6 +468,7 @@ def from_record(
         gates=tuple(gates),
         capacity_caps=dict(record.get("capacity_caps", {})),
         plan=plan,
+        fill_shares=tuple(fill_shares),
         campus=_campus(record.get("campus")),
         **layered.values,
     )
