@@ -38,7 +38,7 @@ from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityR
 from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
-from hcsim.engine.modes import RunMode
+from hcsim.engine.modes import RunMode, rung
 from hcsim.engine.planner import (
     FillShares,
     FillShareTarget,
@@ -540,7 +540,7 @@ class SimulationConfig:
 
     def _check_settings(self, typed: set[str]) -> list[str]:
         mode = cast(RunMode, self.run_mode)
-        guided = mode in {RunMode.GUIDED_ACTUALS, RunMode.GUIDED_FORECAST}
+        guided = rung(mode).reads_guidance
         sbc = self.forecast_scope is ForecastScope.HEADCOUNT_AND_SBC
         checks: list[tuple[tuple[str, ...], Callable[[], list[str]]]] = [
             (

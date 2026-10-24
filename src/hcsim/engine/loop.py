@@ -72,7 +72,7 @@ from hcsim.engine.known_domains import (
 )
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedPlan, check_fired
-from hcsim.engine.modes import RunMode
+from hcsim.engine.modes import LADDER, RunMode, rung
 from hcsim.engine.pending import PENDING_STARTS, pending_starts
 from hcsim.engine.performance import PERFORMANCE, performance
 from hcsim.engine.promotion import PROMOTION, promotion
@@ -176,10 +176,12 @@ FIRES: Final[Mapping[str, EventKind]] = {
     PENDING_STARTS: EventKind.PENDING_START,
     TRANSFERS: EventKind.TRANSFER,
 }
+#: The modes that replay history, as the ladder's rungs say.
+REPLAYING: Final = tuple(r.mode for r in LADDER if r.replays_history)
 #: Gates every run has: other movement comes only from replayed history.
 DEFAULT_GATES: Final = (
-    RegistrationGate(OTHER_MOVEMENT, modes=(RunMode.REPLAY,), reason="replay only"),
-    RegistrationGate(REPLAY_REQUISITIONS, modes=(RunMode.REPLAY,), reason="replay only"),
+    RegistrationGate(OTHER_MOVEMENT, modes=REPLAYING, reason="replay only"),
+    RegistrationGate(REPLAY_REQUISITIONS, modes=REPLAYING, reason="replay only"),
 )
 
 
@@ -702,7 +704,7 @@ def _register(config: SimulationConfig) -> Registered:
     mode = config.run_mode or RunMode.UNGUIDED
     names = [name for name, _ in STEP_ORDER]
     defaults = [g for g in DEFAULT_GATES if g.domain in names]
-    replaying = config.run_mode is RunMode.REPLAY
+    replaying = rung(mode).replays_history
     if (config.campus is None or replaying) and CAMPUS in names:
         defaults.append(RegistrationGate(CAMPUS, enabled=False, reason="no campus schedule"))
     if config.models.performance is None and PERFORMANCE in names:
