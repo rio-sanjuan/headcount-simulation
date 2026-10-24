@@ -170,3 +170,26 @@ def test_a_file_without_bands_reads_as_exact(tmp_path: Path) -> None:
     loaded = AlignmentTarget.load(tmp_path / "x")
     assert loaded.marginal("org_level1").bands is None
     assert loaded.marginal("org_level1").band_at(M("2026-02", "M")).tolist() == [0.0]
+
+
+def test_a_saved_target_loads_back_bit_for_bit(tmp_path: Path) -> None:
+    # 12 x 1.05 isn't 12.6 in binary; the CSV parser's default would read it back an ulp off,
+    # and the digest would no longer match.
+    from hcsim.model.core.alignment_builders import synthetic
+
+    target = synthetic(
+        "relative",
+        "cost_center",
+        {"CC-01": 37.0, "CC-02": 12.0},
+        start="2026-01",
+        months=6,
+        dates=["2026-06"],
+        factors=[1.05],
+    )
+    target.save(tmp_path / "plan")
+    loaded = AlignmentTarget.load(tmp_path / "plan")
+    assert loaded.digest() == target.digest()
+    assert (
+        loaded.marginal("cost_center").values.tolist()
+        == target.marginal("cost_center").values.tolist()
+    )

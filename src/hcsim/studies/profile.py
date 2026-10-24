@@ -1,8 +1,15 @@
 """Study profiles: what a study runs, read from YAML.
 
-A profile declares a study's forecast scope, run mode, seed, size, and window, the planner's
-capacity caps and fill-share targets, the evaluators that score it, and its **arms**: the
-alternatives it compares. Unknown keys are
+A profile declares a study's forecast scope, run mode, seed, size, and window, any settings it
+overrides for the whole study, the plan it aligns to and the alignment method that says which
+valve the plan drives, with overrides per arm, the planner's capacity caps, fill-share targets,
+and probability tilts, the evaluators that score it, and its **arms**: the alternatives it
+compares.
+
+**The plan** is a saved alignment target, by `path`, or a `synthetic` one: the synthetic
+builder's shape and arguments (see `model.core.alignment_builders`), its base the seed's own
+headcount per cost center, starting the run's first month and lasting the run's months unless
+it says otherwise. Unknown keys are
 refused everywhere, so a misspelled field fails loudly instead of running the default.
 
 **Arms.** An arm is a name and the settings it overrides, by their `group.key` paths (see
@@ -28,11 +35,13 @@ import datetime as dt
 import hashlib
 import itertools
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
+import pandas as pd
 import yaml
 from pydantic import (
     BaseModel,
@@ -43,13 +52,28 @@ from pydantic import (
     model_validator,
 )
 
+from hcsim.engine.alignment import AlignmentMethod, MethodChoice
 from hcsim.engine.config import ForecastScope
-from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope
+from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope, ProbabilityTilt
 from hcsim.engine.settings import settings
+from hcsim.model.core.alignment import AlignmentTarget
+from hcsim.model.core.alignment_builders import Shape, synthetic
+from hcsim.model.core.schema import COST_CENTER
 from hcsim.studies.evaluators import EVALUATORS
 
 #: Every setting path an arm may override.
 SETTING_PATHS: Final = frozenset(settings())
+#: The alignment method's setting path.
+METHOD: Final = "alignment.method"
+#: The settings a profile sets in its own fields, never under `settings`.
+MANAGED: Final = {
+    "run.run_date": "run_date",
+    "run.simulation_months": "months",
+    "run.num_trajectories": "trajectories",
+    "run.seed": "seed",
+    "run.forecast_scope": "scope",
+    "run.run_mode": "mode",
+}
 
 
 class ProfileError(ValueError):
@@ -153,6 +177,83 @@ class FillShare(BaseModel):
         return FillShareTarget(PlannerScope.from_dict(self.scope), dict(self.shares))
 
 
+#: The synthetic builder's arguments a profile may give; its base is the seed's headcount.
+SYNTHETIC_KEYS: Final = frozenset(
+    {"shape", "months", "planned_depth", "final", "at", "jump", "values", "factors", "dates"}
+)
+
+
+class PlanSource(BaseModel):
+    """Where a study's plan comes from: a saved alignment target, or a synthetic one."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str | None = None
+    synthetic: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> PlanSource:
+        if (self.path is None) == (self.synthetic is None):
+            raise ValueError("a plan is a saved target's path or a synthetic one, exactly one")
+        if self.synthetic is not None:
+            unknown = sorted(set(self.synthetic) - SYNTHETIC_KEYS)
+            if unknown:
+                raise ValueError(f"a synthetic plan takes {sorted(SYNTHETIC_KEYS)}, not {unknown}")
+            shape = self.synthetic.get("shape")
+            if shape not in {s.value for s in Shape}:
+                raise ValueError(f"a synthetic plan's shape is one of {[s.value for s in Shape]}")
+        return self
+
+    def build(
+        self, headcount: Mapping[str, float], run_date: dt.date, months: int
+    ) -> AlignmentTarget:
+        """The plan: loaded from its path, or built over `headcount` per cost center from the
+        run's first month."""
+        if self.path is not None:
+            return AlignmentTarget.load(Path(self.path))
+        args = dict(self.synthetic or {})
+        shape = args.pop("shape")
+        args.setdefault("months", months)
+        return synthetic(shape, COST_CENTER, headcount, start=pd.Period(run_date, freq="M"), **args)
+
+
+class Alignment(BaseModel):
+    """The alignment method, and the arms that run under another (see `engine.alignment`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    method: AlignmentMethod = AlignmentMethod.SUPPLY
+    overrides: dict[str, AlignmentMethod] = Field(default_factory=dict)
+
+    def choice(self) -> MethodChoice:
+        return MethodChoice(self.method, dict(self.overrides))
+
+
+class Tilt(BaseModel):
+    """A probability tilt, as a profile declares it (see `engine.planner.ProbabilityTilt`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    domain: str
+    scope: dict[str, list[str]] = Field(default_factory=dict)
+    multiplier: float
+    start: str | None = None
+    end: str | None = None
+    cap: float = 1.0
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _tilt(self) -> Tilt:
+        try:
+            self.tilt()
+        except PlannerError as error:
+            raise ValueError("; ".join(error.problems)) from None
+        return self
+
+    def tilt(self) -> ProbabilityTilt:
+        return ProbabilityTilt.from_dict(self.model_dump() | {"scope": self.scope})
+
+
 class StudyProfile(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -165,6 +266,13 @@ class StudyProfile(BaseModel):
     months: int = Field(default=12, ge=1)
     #: The first simulated month. Defaults to the month after the world's last snapshot.
     run_date: dt.date | None = None
+    #: Settings the whole study overrides, by `group.key` path, as the supply rule.
+    settings: dict[str, Any] = Field(default_factory=dict)
+    #: The plan the study aligns to, and which valve it drives.
+    plan: PlanSource | None = None
+    alignment: Alignment = Field(default_factory=Alignment)
+    #: Probability tilts, each on one domain over a scope and window.
+    tilts: list[Tilt] = Field(default_factory=list)
     #: Capacity caps, `Cap(c)`, by cost-center label: heads of committed strength each may hold.
     capacity_caps: dict[str, int] = Field(default_factory=dict)
     #: Fill-share targets, each a scope and its channels' shares of the scope's fills.
@@ -174,6 +282,15 @@ class StudyProfile(BaseModel):
     #: The alternatives the study compares, declared and in groups.
     arms: list[Arm] = Field(default_factory=list)
     arm_groups: list[ArmGroup] = Field(default_factory=list)
+
+    @field_validator("settings")
+    @classmethod
+    def _settings(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _known_paths(value)
+        managed = sorted(f"{MANAGED[k]} for {k}" for k in value if k in MANAGED)
+        if managed:
+            raise ValueError(f"set the profile's own fields, {managed}, not settings")
+        return value
 
     @field_validator("evaluators")
     @classmethod
@@ -195,6 +312,16 @@ class StudyProfile(BaseModel):
             raise ValueError(
                 f"a study with arms scores them against exactly one null arm, not {len(nulls)}"
             )
+        strangers = sorted(set(self.alignment.overrides) - set(names))
+        if strangers:
+            raise ValueError(f"alignment overrides name no arms {strangers}")
+        twice = sorted(
+            a.name for a in arms if a.name in self.alignment.overrides and METHOD in a.overrides
+        )
+        if twice:
+            raise ValueError(f"arms {twice} set {METHOD} and an alignment override both")
+        if METHOD in self.settings:
+            raise ValueError(f"the study's method is alignment.method, not settings.{METHOD}")
         return self
 
     @field_validator("capacity_caps")
@@ -215,6 +342,9 @@ class StudyProfile(BaseModel):
     @property
     def guided(self) -> bool:
         return self.mode is Mode.GUIDED_FORECAST
+
+    def probability_tilts(self) -> tuple[ProbabilityTilt, ...]:
+        return tuple(t.tilt() for t in self.tilts)
 
     def fill_share_targets(self) -> tuple[FillShareTarget, ...]:
         return tuple(f.target() for f in self.fill_shares)

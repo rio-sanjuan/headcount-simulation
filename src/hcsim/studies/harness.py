@@ -10,6 +10,7 @@ Arms, preflight, subsets, and persistence arrive in M8.4.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import duckdb
 
+from hcsim.engine.alignment import AlignmentMethod
 from hcsim.engine.config import AwardSettings, ForecastScope, SimulationConfig
 from hcsim.engine.loop import SimulationResult, simulate
 from hcsim.engine.modes import cell
@@ -29,10 +31,12 @@ from hcsim.engine.seeding import (
     seed_for,
     snapshot_before,
 )
+from hcsim.engine.settings import settings
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.sizing import NewHireGapFill
 from hcsim.model.core.guidance import GuidanceForecast
-from hcsim.studies.evaluators import Metric, invariants, plan_alignment, summary
+from hcsim.model.core.schema import COST_CENTER
+from hcsim.studies.evaluators import EVALUATORS, Metric
 from hcsim.studies.inputs import FittedModels, fit_models
 from hcsim.studies.profile import StudyProfile
 
@@ -68,6 +72,10 @@ def _world_identity(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
     }
 
 
+#: Every setting, by its `group.key` path.
+SETTINGS = settings()
+
+
 def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) -> StudyRun:
     if profile.guided and guidance is None:
         raise StudyError(f"mode {profile.mode.value!r} needs a guidance artifact")
@@ -95,6 +103,8 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             if sbc
             else None
         )
+        # The plan may be built from the seed, so the run is configured without it, seeded,
+        # and then given the plan and the method that drives it.
         config = SimulationConfig(
             run_date=run_date,
             schema=schema,
@@ -107,8 +117,19 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             awards=awards,
             capacity_caps=profile.capacity_caps,
             fill_shares=profile.fill_share_targets(),
+            tilts=profile.probability_tilts(),
+            alignment_method=AlignmentMethod.NONE,
+            **{SETTINGS[path].name: value for path, value in profile.settings.items()},
         )
         state, seed = seed_for(con, config)
+        plan = None
+        if profile.plan is not None:
+            labels = schema.vocabulary(COST_CENTER).labels
+            heads = {labels[c]: float(n) for c, n in enumerate(state.headcount) if n > 0}
+            plan = profile.plan.build(heads, run_date, profile.months)
+        config = dataclasses.replace(
+            config, plan=plan, alignment_method=profile.alignment.choice().resolve()
+        )
         provenance = _world_identity(con)
     result = simulate(config, state)
     provenance |= {
@@ -122,5 +143,5 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         "schema_fingerprint": schema.fingerprint(),
         "guidance_fingerprint": artifact.fingerprint() if artifact is not None else "",
     }
-    metrics = (*invariants(result), *summary(result), *plan_alignment(result))
+    metrics = tuple(m for name in profile.evaluators for m in EVALUATORS[name](result))
     return StudyRun(profile, config, seed, fitted, result, metrics, provenance)

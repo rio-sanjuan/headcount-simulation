@@ -267,7 +267,11 @@ class AlignmentTarget:
             raise AlignmentError(f"unsupported format_version {manifest.get('format_version')}")
         marginals = []
         for entry in manifest["marginals"]:
-            frame = pd.read_csv(directory / entry["file"], dtype={"group": str, "month": str})
+            frame = pd.read_csv(
+                directory / entry["file"],
+                dtype={"group": str, "month": str},
+                float_precision="round_trip",  # the parser's default can miss by an ulp
+            )
             marginals.append(_from_rows(entry["grouping"], frame))
         target = cls(
             tuple(marginals),
