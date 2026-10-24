@@ -560,6 +560,8 @@ def run_trajectory(
             elif domain in FLOWS:
                 flows[FLOWS[domain]][step] += _flow(domain, applied, n)
             quotas += [QuotaRow(step, domain, c, r) for c, r in result.quotas.items()]
+        for name, counts in ctx.tilt_records.items():
+            diagnostics.setdefault(name, np.zeros((months, n), dtype=np.int64))[step] += counts
         headcount[step + 1], open_openings[step + 1] = state.headcount, state.open_openings
     if months in keep:
         snapshots[months] = Snapshot.of(state)

@@ -39,7 +39,15 @@ from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
 from hcsim.engine.modes import RunMode
-from hcsim.engine.planner import FillShares, FillShareTarget, PlannerError, resolve_fill_shares
+from hcsim.engine.planner import (
+    FillShares,
+    FillShareTarget,
+    PlannerError,
+    ProbabilityTilt,
+    Tilts,
+    resolve_fill_shares,
+    resolve_tilts,
+)
 from hcsim.engine.supply import SupplyRule
 from hcsim.engine.transfers import ShortfallPolicy
 from hcsim.financial.expense import ExpenseConfig
@@ -439,6 +447,8 @@ class SimulationConfig:
     fill_mix: FillMix | None = None
     #: The planner's fill-share targets, each over its scope (see `planner`).
     fill_shares: tuple[FillShareTarget, ...] = ()
+    #: The planner's probability tilts, each on one domain over a scope and window.
+    tilts: tuple[ProbabilityTilt, ...] = ()
     #: Campus requisitions by month and cost center, and the months campus hires start.
     campus: CampusSchedule | None = None
     aligner: GroupAligner | None = field(init=False, default=None)
@@ -448,6 +458,8 @@ class SimulationConfig:
     ceiling: Ceiling = field(init=False, default_factory=lambda: Ceiling(np.zeros(0)))
     #: The fill-share targets, resolved; None for none.
     resolved_fill_shares: FillShares | None = field(init=False, default=None)
+    #: The tilts, resolved to the run's steps; None for none.
+    resolved_tilts: Tilts | None = field(init=False, default=None)
     #: Which valve the plan drives, and where.
     alignment: ResolvedAlignment = field(
         init=False, default_factory=lambda: ResolvedAlignment(AlignmentMethod.SUPPLY)
@@ -490,6 +502,15 @@ class SimulationConfig:
             )
         except PlannerError as error:
             problems += [f"fill_shares: {p}" for p in error.problems]
+        object.__setattr__(self, "tilts", tuple(self.tilts))
+        if {"run_date", "simulation_months"} <= typed:
+            try:
+                tilting = resolve_tilts(
+                    self.tilts, self.schema, self.run_date, self.simulation_months
+                )
+                object.__setattr__(self, "resolved_tilts", tilting)
+            except PlannerError as error:
+                problems += [f"tilts: {p}" for p in error.problems]
         try:
             rules = (*self.eligibility, *self._executive_rule())
             object.__setattr__(self, "resolved_eligibility", resolve(rules, self.schema))
