@@ -59,7 +59,7 @@ from pydantic import (
 
 from hcsim.engine.alignment import AlignmentMethod, MethodChoice
 from hcsim.engine.config import ForecastScope
-from hcsim.engine.modes import rung
+from hcsim.engine.modes import RunMode, rung
 from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope, ProbabilityTilt
 from hcsim.engine.seeding import AWARD_TYPES
 from hcsim.engine.settings import settings
@@ -68,6 +68,7 @@ from hcsim.model.core.alignment_builders import Shape, synthetic
 from hcsim.model.core.schema import COST_CENTER
 from hcsim.model.data.subset import SubsetError, SubsetSpec
 from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS
+from hcsim.studies.gates import BUILTIN_BY_NAME, Action, Gate, GateError
 
 #: Every setting path an arm may override.
 SETTING_PATHS: Final = frozenset(settings())
@@ -282,6 +283,43 @@ class Screen(BaseModel):
     rank_by: str = Field(pattern=r"^[a-z_]+\.[A-Za-z0-9_\-]+$")
 
 
+class GateSpec(BaseModel):
+    """A profile's own gate: a bound on one metric, and what failing it does (see `gates`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    #: The metric it bounds, as `evaluator.metric`.
+    metric: str = Field(pattern=r"^[a-z_]+\.[A-Za-z0-9_\-]+$")
+    action: Action = Action.PROVISIONAL
+    max: float | None = None
+    min: float | None = None
+    absolute: bool = False
+    #: The modes and window closures it applies in; none applies in every one.
+    modes: list[Mode] = Field(default_factory=list)
+    closures: list[str] = Field(default_factory=list)
+
+    def gate(self) -> Gate:
+        try:
+            return Gate(
+                self.name,
+                self.metric,
+                self.action,
+                self.max,
+                self.min,
+                self.absolute,
+                frozenset(RunMode(m.value) for m in self.modes),
+                frozenset(self.closures),
+            )
+        except GateError as error:
+            raise ValueError(str(error)) from None
+
+    @model_validator(mode="after")
+    def _valid(self) -> GateSpec:
+        self.gate()
+        return self
+
+
 class StudyProfile(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -319,6 +357,9 @@ class StudyProfile(BaseModel):
     arm_groups: list[ArmGroup] = Field(default_factory=list)
     #: Pass A's screen of the compared arms; none runs every arm once.
     screen: Screen | None = None
+    #: The study's own gates, and whether it also holds the built-in ones (see `gates`).
+    gates: list[GateSpec] = Field(default_factory=list)
+    builtin_gates: bool = True
 
     @field_validator("subset")
     @classmethod
@@ -400,7 +441,25 @@ class StudyProfile(BaseModel):
                 raise ValueError("a screen needs compared arms to rank")
             if self.screen.trajectories >= self.trajectories:
                 raise ValueError("a screen runs fewer trajectories than the study")
+        names = [g.name for g in self.gates]
+        clashing = sorted(
+            {
+                n
+                for n in names
+                if names.count(n) > 1 or (self.builtin_gates and n in BUILTIN_BY_NAME)
+            }
+        )
+        if clashing:
+            raise ValueError(f"gate names repeat: {clashing}")
+        unread = sorted(
+            {g.name for g in self.gates if g.metric.split(".")[0] not in self.evaluators}
+        )
+        if unread:
+            raise ValueError(f"gates {unread} bound metrics of evaluators the study doesn't run")
         return self
+
+    def own_gates(self) -> tuple[Gate, ...]:
+        return tuple(g.gate() for g in self.gates)
 
     @field_validator("replay_lag")
     @classmethod

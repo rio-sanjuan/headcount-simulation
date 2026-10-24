@@ -41,6 +41,11 @@ trajectories and ranks them by its metric, lower first; the arms it doesn't keep
 each with its rank. Pass B runs the null arm, the kept arms, and the reference arms at the
 study's full size. Without a screen, pass B runs every arm.
 
+**Gates.** In pass B, the gates the study holds for its mode and closure (`gates.gate_set`)
+apply to every arm but the reference arms, each as it finishes. A failed stop gate stops the
+study, the arms after it skipped, and the run's verdict says whether it passed, is provisional,
+or stopped.
+
 **Metadata, persistence, and the timing ledger.** A study's run records its specification's
 digest, closure, passes, skips, deferrals, and provenance (`StudyRun.metadata`), and a timing
 ledger of how long preflight and each arm's simulation and evaluation took. `save` writes the
@@ -90,9 +95,10 @@ from hcsim.model.data.subset import LoweredSubset, SubsetError, SubsetSpec
 from hcsim.studies.actuals import Actuals, resolve
 from hcsim.studies.backends import ModeInputs, mode_inputs, offline_metrics, simulate_arm
 from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS, Evaluator, Metric, Scoring
+from hcsim.studies.gates import Action, GateResult, Verdict, apply, gate_set, verdict
 from hcsim.studies.inputs import FittedModels, InputError, fit_models
 from hcsim.studies.profile import Arm, Backend, StudyProfile
-from hcsim.studies.resolve import probe, required_kinds
+from hcsim.studies.resolve import probe, provisional, required_kinds
 
 #: Every setting, by its `group.key` path.
 SETTINGS = settings()
@@ -268,6 +274,9 @@ class StudyRun:
     skips: tuple[Skip, ...] = ()
     deferred: tuple[Deferred, ...] = ()
     timing: tuple[Timing, ...] = ()
+    #: Every gate on every gated arm, in the order they ran, and the study's verdict.
+    gates: tuple[GateResult, ...] = ()
+    verdict: Verdict = Verdict.PASSED
 
     @property
     def passed(self) -> bool:
@@ -287,6 +296,7 @@ class StudyRun:
             "spec": self.profile.spec().digest(),
             "closure": self.closure.value,
             "passed": self.passed,
+            "verdict": self.verdict.value,
             "arms": [
                 {"arm": a.arm.name, "pass": a.pass_name, "passed": a.passed}
                 for a in (*self.screened, *self.arms)
@@ -294,6 +304,7 @@ class StudyRun:
             "skips": [dataclasses.asdict(s) for s in self.skips],
             "deferred": [dataclasses.asdict(d) for d in self.deferred],
             "timing": [dataclasses.asdict(t) for t in self.timing],
+            "gates": [dataclasses.asdict(g) for g in self.gates],
             "provenance": dict(self.provenance),
         }
 
@@ -561,7 +572,21 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
                 out = f"screened out in pass A: ranked {rank} of {n} by {screen.rank_by}"
                 skips.append(Skip("arm", r.arm.name, out))
         keep = [a for a in runnable if a.null or a.reference or a.name in kept]
-    runs = [run(arm, "B") for arm in keep]
+    gates = gate_set(
+        profile.mode.value, closure.value, profile.own_gates(), builtin=profile.builtin_gates
+    )
+    runs: list[ArmRun] = []
+    checks: list[GateResult] = []
+    for k, arm in enumerate(keep):
+        runs.append(run(arm, "B"))
+        if arm.reference:
+            continue  # a reference arm is never gated
+        checks += apply(gates, arm.name, runs[-1].metrics)
+        stops = [g for g in checks if g.failed and g.action is Action.STOP]
+        if stops:
+            why = f"the study stopped: gate {stops[0].gate} failed on arm {stops[0].arm}"
+            skips += [Skip("arm", a.name, why) for a in keep[k + 1 :]]
+            break
     first = runs[0]
     provenance = dict(inputs.world) | {
         "hcsim_version": version("hcsim"),
@@ -592,6 +617,8 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         tuple(skips),
         checked.deferred,
         tuple(timing),
+        tuple(checks),
+        verdict(checks, provisional(provenance["source"])),
     )
 
 
