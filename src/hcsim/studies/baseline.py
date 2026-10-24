@@ -12,15 +12,16 @@ verdict, or changed provenance. An intentional change regenerates the baseline i
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 import pandas as pd
 
 from hcsim.studies import scorecard
 
-KEY: Final = ["evaluator", "metric"]
+KEY: Final = ["pass", "arm", "evaluator", "metric"]
 METRIC_COLUMNS: Final = ["value", "threshold", "passed"]
 PROVENANCE_COLUMNS: Final = [
     "world_generator",
@@ -49,7 +50,8 @@ def write(card: pd.DataFrame, path: Path) -> None:
 
 
 def load(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, dtype=dict.fromkeys(PROVENANCE_COLUMNS, str))
+    strings: dict[Hashable, Any] = dict.fromkeys([*PROVENANCE_COLUMNS, "pass", "arm"], str)
+    return pd.read_csv(path, dtype=strings, keep_default_na=False, na_values=[""])
 
 
 def compare(card: pd.DataFrame, baseline: pd.DataFrame) -> list[str]:
@@ -57,7 +59,7 @@ def compare(card: pd.DataFrame, baseline: pd.DataFrame) -> list[str]:
     left = baseline_frame(card).set_index(KEY)
     right = baseline.set_index(KEY)
 
-    def name(key: tuple[str, str]) -> str:
+    def name(key: tuple[str, ...]) -> str:
         return "/".join(key)
 
     differences = [f"{name(k)}: not in the baseline" for k in left.index.difference(right.index)]
