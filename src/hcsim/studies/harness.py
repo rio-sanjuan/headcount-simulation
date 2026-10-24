@@ -31,7 +31,7 @@ from hcsim.engine.seeding import (
 from hcsim.financial.prices import AnnualGrowthPrice
 from hcsim.financial.sizing import NewHireGapFill
 from hcsim.model.core.guidance import GuidanceForecast
-from hcsim.studies.evaluators import Metric, invariants, summary
+from hcsim.studies.evaluators import Metric, invariants, plan_alignment, summary
 from hcsim.studies.inputs import FittedModels, fit_models
 from hcsim.studies.profile import StudyProfile
 
@@ -119,5 +119,5 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         "schema_fingerprint": schema.fingerprint(),
         "guidance_fingerprint": artifact.fingerprint() if artifact is not None else "",
     }
-    metrics = (*invariants(result), *summary(result))
+    metrics = (*invariants(result), *summary(result), *plan_alignment(result))
     return StudyRun(profile, config, seed, fitted, result, metrics, provenance)
