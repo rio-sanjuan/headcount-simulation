@@ -69,6 +69,7 @@ from hcsim.model.core.schema import COST_CENTER
 from hcsim.model.data.subset import SubsetError, SubsetSpec
 from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS
 from hcsim.studies.gates import BUILTIN_BY_NAME, Action, Gate, GateError
+from hcsim.studies.kinds import KINDS, Family
 
 #: Every setting path an arm may override.
 SETTING_PATHS: Final = frozenset(settings())
@@ -376,6 +377,8 @@ class StudyProfile(BaseModel):
     builtin_gates: bool = True
     #: The metrics the scorecard ranks arms by; none ranks by the screen's, if it has one.
     rankings: list[Ranking] = Field(default_factory=list)
+    #: Extract kinds the study reads over its fit window, through the extract cache.
+    extracts: list[str] = Field(default_factory=list)
 
     @field_validator("subset")
     @classmethod
@@ -490,6 +493,14 @@ class StudyProfile(BaseModel):
     def own_gates(self) -> tuple[Gate, ...]:
         return tuple(g.gate() for g in self.gates)
 
+    @field_validator("extracts")
+    @classmethod
+    def _extracts(cls, value: list[str]) -> list[str]:
+        named = sorted(set(value) - {k.name for k in KINDS.values() if k.family is Family.EXTRACT})
+        if named:
+            raise ValueError(f"no extracts {named}; a study reads extract kinds by name")
+        return list(dict.fromkeys(value))
+
     @field_validator("replay_lag")
     @classmethod
     def _replay_lag(cls, value: dict[str, int]) -> dict[str, int]:
@@ -552,11 +563,15 @@ class StudyProfile(BaseModel):
             raise ProfileError("invalid study profile:\n  - " + "\n  - ".join(problems)) from None
 
     @classmethod
-    def load(cls, path: Path) -> StudyProfile:
+    def load(cls, path: Path, **overrides: Any) -> StudyProfile:
+        """The profile saved at `path`, with any of its fields `overrides` replaces, validated
+        as one."""
         try:
             data = yaml.safe_load(path.read_text())
         except (OSError, yaml.YAMLError) as error:
             raise ProfileError(f"can't read the profile at {path}: {error}") from None
+        if overrides and isinstance(data, dict):
+            data = data | overrides
         return cls.from_mapping(data)
 
 

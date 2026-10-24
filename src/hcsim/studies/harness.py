@@ -57,6 +57,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -97,8 +98,9 @@ from hcsim.studies.backends import ModeInputs, mode_inputs, offline_metrics, sim
 from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS, Evaluator, Metric, Scoring
 from hcsim.studies.gates import Action, GateResult, Verdict, apply, gate_set, verdict
 from hcsim.studies.inputs import FittedModels, InputError, fit_models
+from hcsim.studies.kinds import KINDS
 from hcsim.studies.profile import Arm, Backend, StudyProfile
-from hcsim.studies.resolve import probe, provisional, required_kinds
+from hcsim.studies.resolve import CacheRead, ExtractCache, probe, provisional, required_kinds
 
 #: Every setting, by its `group.key` path.
 SETTINGS = settings()
@@ -107,10 +109,12 @@ ITSELF = Arm(name="study")
 
 
 class StudyError(ValueError):
-    """A study whose inputs don't fit its profile, every problem listed."""
+    """A study whose inputs don't fit its profile, every problem listed. `waiting` marks one
+    that can't run only because its window hasn't closed yet."""
 
-    def __init__(self, problems: list[str] | str) -> None:
+    def __init__(self, problems: list[str] | str, *, waiting: bool = False) -> None:
         self.problems = [problems] if isinstance(problems, str) else list(problems)
+        self.waiting = waiting
         super().__init__("; ".join(self.problems))
 
 
@@ -135,6 +139,8 @@ class Inputs:
     modes: Mapping[str, ModeInputs] = dataclasses.field(default_factory=dict)
     #: The window's actuals, the parts the study's evaluators read; none for an open window.
     actuals: Actuals | None = None
+    #: The extracts the profile reads, over the fit window, each as the cache read it.
+    extracts: Mapping[str, CacheRead] = dataclasses.field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,8 @@ class Preflight:
     #: The evaluators the study runs, and those it skips.
     evaluators: tuple[str, ...] = ()
     skips: tuple[Skip, ...] = ()
+    #: Whether the study's only problem is that its own mode waits for its window to close.
+    waiting: bool = False
 
     @property
     def ok(self) -> bool:
@@ -277,6 +285,8 @@ class StudyRun:
     #: Every gate on every gated arm, in the order they ran, and the study's verdict.
     gates: tuple[GateResult, ...] = ()
     verdict: Verdict = Verdict.PASSED
+    #: Each extract the study read: its rows, and how many of its pieces the cache held.
+    extracts: Mapping[str, Mapping[str, int]] = dataclasses.field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -357,15 +367,59 @@ def _guidance(profile: StudyProfile, guidance: Path | None, problems: list[str])
         return None
 
 
-def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) -> Preflight:
+def schema_problems(given: SimulationSchema, world: SimulationSchema) -> list[str]:
+    """Every way a schema a study is given can't encode its world: a vocabulary it lacks, or
+    labels the world holds that it doesn't."""
+    problems = []
+    for name, vocabulary in sorted(world.vocabularies.items()):
+        if name not in given.vocabularies:
+            problems.append(f"the schema has no vocabulary {name!r}")
+            continue
+        theirs = given.vocabularies[name]
+        missing = [label for label in vocabulary.labels if label not in theirs]
+        if missing:
+            shown = ", ".join(map(str, missing[:5])) + (", ..." if len(missing) > 5 else "")
+            problems.append(f"the schema's {name} lacks {len(missing)} of the world's: {shown}")
+    return problems
+
+
+def _schema(
+    con: duckdb.DuckDBPyConnection, path: Path | None, problems: list[str]
+) -> SimulationSchema:
+    world = schema_from_world(con)
+    if path is None:
+        return world
+    try:
+        given = SimulationSchema.load(path)
+    except (OSError, ValueError) as error:
+        problems.append(f"can't load the schema at {path}: {error}")
+        return world
+    problems += schema_problems(given, world)
+    return given
+
+
+def _source(identity: Mapping[str, str]) -> str:
+    keys = ("source", "world_generator", "world_preset", "world_seed")
+    return ":".join(identity.get(k, "") for k in keys)
+
+
+def preflight(
+    profile: StudyProfile,
+    world: Path,
+    guidance: Path | None = None,
+    *,
+    schema_path: Path | None = None,
+    cache_dir: Path | None = None,
+) -> Preflight:
     """Everything the study needs, checked before anything simulates: every problem found, or
-    the inputs every arm reads and each arm's configuration."""
+    the inputs every arm reads and each arm's configuration. A study encodes with the schema at
+    `schema_path`, where it's given one, and caches its extracts under `cache_dir`."""
     problems: list[str] = []
     artifact = _guidance(profile, guidance, problems)
     if not world.is_file():
         return Preflight((*problems, f"no world at {world}"))
     with duckdb.connect(str(world), read_only=True) as con:
-        schema = schema_from_world(con)
+        schema = _schema(con, schema_path, problems)
         if profile.run_date is not None:
             run_date = profile.run_date
         elif artifact is not None:
@@ -375,8 +429,8 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         actuals_through = snapshot_before(con, dt.date.max)
         closure = window_closure(run_date, profile.months, actuals_through)
         own = deferral(ITSELF, profile.mode.value, closure)
-        if own is not None:
-            problems.append(f"nothing can run yet: {own.reason}")
+        unclosed = [] if own is None else [f"nothing can run yet: {own.reason}"]
+        problems += unclosed
         deferred = [
             d
             for a in _arms(profile)
@@ -388,7 +442,7 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             profile.mode.value,
             profile.scope,
             plan_path=profile.plan is not None and profile.plan.path is not None,
-            evaluator_kinds=[k for e in chosen for k in e.kinds],
+            evaluator_kinds=[*(k for e in chosen for k in e.kinds), *profile.extracts],
         )
         problems += probe(con, kinds, REGULAR, role_column(con, "req_interval"))
         subset, lowered = None, None
@@ -399,7 +453,8 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             except SubsetError as error:
                 problems.append(f"subset: {error}")
         if problems:
-            return Preflight(tuple(problems))
+            # A study that only waits for its window to close isn't wrong, just early.
+            return Preflight(tuple(problems), waiting=bool(unclosed) and problems == unclosed)
         try:
             fitted = fit_models(con, schema, run_date)
         except InputError as error:
@@ -465,6 +520,18 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
                 actuals = resolve(con, schema, run_date, profile.months, parts)
             except (ValueError, duckdb.Error) as error:
                 problems.append(f"can't resolve the window's actuals: {error}")
+        extracts = {}
+        if profile.extracts:
+            with tempfile.TemporaryDirectory() as scratch:
+                cache = ExtractCache(cache_dir or Path(scratch), _source(world_identity))
+                cost_center = role_column(con, "req_interval")
+                for name in profile.extracts:
+                    try:
+                        extracts[name] = cache.read(
+                            con, KINDS[name], REGULAR, cost_center, *fitted.window
+                        )
+                    except (ValueError, duckdb.Error) as error:
+                        problems.append(f"can't read the extract {name}: {error}")
     if problems:
         return Preflight(tuple(problems))
     configs = {}
@@ -489,6 +556,7 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         actuals_through,
         MappingProxyType(modes),
         actuals,
+        MappingProxyType(extracts),
     )
     return Preflight(
         (),
@@ -526,13 +594,20 @@ def _arm_config(
     return dataclasses.replace(base, **fields)
 
 
-def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) -> StudyRun:
+def run_study(
+    profile: StudyProfile,
+    world: Path,
+    guidance: Path | None = None,
+    *,
+    schema_path: Path | None = None,
+    cache_dir: Path | None = None,
+) -> StudyRun:
     timing: list[Timing] = []
     started = time.perf_counter()
-    checked = preflight(profile, world, guidance)
+    checked = preflight(profile, world, guidance, schema_path=schema_path, cache_dir=cache_dir)
     timing.append(Timing("preflight", "", time.perf_counter() - started))
     if not checked.ok or checked.inputs is None:
-        raise StudyError(list(checked.problems))
+        raise StudyError(list(checked.problems), waiting=checked.waiting)
     inputs = checked.inputs
     closure = checked.closure or Closure.OPEN
     runnable = [a for a in _arms(profile) if a.name in checked.configs]
@@ -620,6 +695,10 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         tuple(timing),
         tuple(checks),
         verdict(checks, provisional(provenance["source"])),
+        {
+            name: {"rows": len(read.frame), "pieces": read.pieces, "hits": read.hits}
+            for name, read in inputs.extracts.items()
+        },
     )
 
 

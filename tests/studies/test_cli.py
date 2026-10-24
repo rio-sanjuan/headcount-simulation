@@ -126,8 +126,8 @@ def test_a_failed_metric_exits_3(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def failing(*args: object) -> StudyRun:
-        run = run_study(*args)  # type: ignore[arg-type]
+    def failing(*args: object, **options: object) -> StudyRun:
+        run = run_study(*args, **options)  # type: ignore[arg-type]
         broken = Metric("invariants", "quota_violations", 2, 0)
         return dataclasses.replace(run, metrics=(broken, *run.metrics[1:]))
 
