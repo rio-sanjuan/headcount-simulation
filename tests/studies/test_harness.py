@@ -56,7 +56,10 @@ def test_a_profile_loads_from_yaml_with_defaults(tmp_path: Path) -> None:
     ("fields", "message"),
     [
         ({"trajectoris": 5}, "trajectoris: Extra inputs are not permitted"),
-        ({"mode": "replay"}, "mode: Input should be 'guided_forecast' or 'unguided'"),
+        (
+            {"mode": "replayed"},
+            "mode: Input should be 'replay', 'guided_actuals', 'guided_forecast' or 'unguided'",
+        ),
         ({"seed": -1}, "seed: Input should be greater than or equal to 0"),
         ({"run_date": "2026-01-15"}, "run_date must be the first of a month"),
         ({"scope": "sbc"}, "scope: Input should be 'hcf' or 'hcf+sbc'"),
@@ -121,7 +124,7 @@ def test_a_guided_study_passes_its_invariants(guided: StudyRun) -> None:
     assert metrics["accounting_identity_max_residual"].value <= 0.01
     assert metrics["quota_shortfall"].threshold is None
     assert guided.config.run_date == RUN
-    assert guided.result.headcount.shape == (3, 5, 10)
+    assert guided.simulated.headcount.shape == (3, 5, 10)
 
 
 def test_the_provenance_names_every_input(guided: StudyRun, inputs: tuple[Path, Path]) -> None:
@@ -187,8 +190,8 @@ def test_a_profile_can_start_the_run_earlier(inputs: tuple[Path, Path]) -> None:
 
 def test_a_study_is_reproducible(inputs: tuple[Path, Path], guided: StudyRun) -> None:
     again = run_study(profile(), *inputs)
-    assert np.array_equal(again.result.headcount, guided.result.headcount)
-    for a, b in zip(again.result.trajectories, guided.result.trajectories, strict=True):
+    assert np.array_equal(again.simulated.headcount, guided.simulated.headcount)
+    for a, b in zip(again.simulated.trajectories, guided.simulated.trajectories, strict=True):
         assert a.sbc is not None
         assert b.sbc is not None
         pd.testing.assert_frame_equal(a.sbc, b.sbc)
@@ -209,24 +212,26 @@ def test_inputs_must_fit_the_mode(inputs: tuple[Path, Path], tmp_path: Path) -> 
 
 def _with_trajectory(run: StudyRun, **changes: object) -> list[str]:
     """The names of the failing metrics after changing trajectory 0."""
-    first = dataclasses.replace(run.result.trajectories[0], **changes)  # type: ignore[arg-type]
-    result = dataclasses.replace(run.result, trajectories=(first, *run.result.trajectories[1:]))
+    first = dataclasses.replace(run.simulated.trajectories[0], **changes)  # type: ignore[arg-type]
+    result = dataclasses.replace(
+        run.simulated, trajectories=(first, *run.simulated.trajectories[1:])
+    )
     return [m.name for m in invariants(result) if not m.passed]
 
 
 def test_invariants_catch_a_broken_quota(guided: StudyRun) -> None:
-    row = guided.result.trajectories[0].quotas[0]
+    row = guided.simulated.trajectories[0].quotas[0]
     record = row.record
     broken = QuotaRecord(record.quota, record.eligible, record.realized + 1)
-    quotas = (dataclasses.replace(row, record=broken), *guided.result.trajectories[0].quotas[1:])
+    quotas = (dataclasses.replace(row, record=broken), *guided.simulated.trajectories[0].quotas[1:])
     assert _with_trajectory(guided, quotas=quotas) == ["quota_violations"]
 
 
 def test_invariants_catch_a_broken_stock_identity(guided: StudyRun) -> None:
-    headcount = guided.result.trajectories[0].headcount.copy()
+    headcount = guided.simulated.trajectories[0].headcount.copy()
     headcount[2, 0] += 1
     assert _with_trajectory(guided, headcount=headcount) == ["headcount_identity_max_gap"]
-    openings = guided.result.trajectories[0].open_openings.copy()
+    openings = guided.simulated.trajectories[0].open_openings.copy()
     openings[-1, 3] -= 2
     assert _with_trajectory(guided, open_openings=openings) == ["opening_identity_max_gap"]
 

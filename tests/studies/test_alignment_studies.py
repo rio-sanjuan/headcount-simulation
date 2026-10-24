@@ -89,4 +89,4 @@ def test_a_study_under_each_alignment_method_scores_against_its_plan(
     assert valves["supply"] == {"bias_mean_supply"}
     assert valves["rate_calibration"] == {"bias_mean_rate"}
     assert valves["demand"] <= {"bias_mean_flow", "bias_mean_undriven"}
-    assert runs["rate_calibration"].result.calibration is not None
+    assert runs["rate_calibration"].simulated.calibration is not None

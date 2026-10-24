@@ -69,13 +69,13 @@ def test_added_dropped_and_relabelled_rows_are_differences(
 
 
 def test_the_results_digest_tracks_every_bit(run: StudyRun) -> None:
-    digest = results_digest(run.result)
+    digest = results_digest(run.simulated)
     assert digest.startswith("rd1-")
-    assert results_digest(run.result) == digest
-    first = run.result.trajectories[0]
+    assert results_digest(run.simulated) == digest
+    first = run.simulated.trajectories[0]
     first.headcount[1, 0] += 1  # the run is module-scoped: restore it afterwards
     try:
-        assert results_digest(run.result) != digest
+        assert results_digest(run.simulated) != digest
     finally:
         first.headcount[1, 0] -= 1
 
@@ -83,11 +83,11 @@ def test_the_results_digest_tracks_every_bit(run: StudyRun) -> None:
 def test_the_summary_reports_outcomes_without_gating(run: StudyRun) -> None:
     summary = {m.name: m for m in run.metrics if m.evaluator == "summary"}
     assert all(m.threshold is None for m in summary.values())
-    headcount = run.result.headcount.sum(axis=2)
+    headcount = run.simulated.headcount.sum(axis=2)
     assert summary["headcount_start"].value == headcount[0, 0]
     assert summary["headcount_end_mean"].value == pytest.approx(headcount[:, -1].mean())
     assert summary["attrition_mean"].value == pytest.approx(
-        run.result.flow("A").sum(axis=(1, 2)).mean()
+        run.simulated.flow("A").sum(axis=(1, 2)).mean()
     )
     assert summary["tranches_mean"].value > 0
 

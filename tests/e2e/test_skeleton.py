@@ -117,7 +117,7 @@ def test_another_seed_moves_the_results(world: tuple[Path, Path], tmp_path: Path
     assert a.passed
     assert b.passed
     # Guided counts can match across seeds by construction, so compare every raw result.
-    assert results_digest(a.result) != results_digest(b.result)
+    assert results_digest(a.simulated) != results_digest(b.simulated)
 
 
 # 60 MiB on the Linux runner, where the memory job runs, at M1, and 99 MiB by M5 (16 and 32 MiB
