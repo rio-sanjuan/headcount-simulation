@@ -144,3 +144,63 @@ def test_a_profile_declares_fill_share_targets() -> None:
     with pytest.raises(ProfileError, match="no fill channels"):
         profile(fill_shares=[{"shares": {"referral": 1.0}}])
     assert profile().fill_share_targets() == ()
+
+
+# --- the plan, the alignment method, tilts, and settings ------------------------------------------
+
+
+def test_a_profile_declares_a_plan_a_method_tilts_and_settings() -> None:
+    import datetime as dt
+
+    from hcsim.engine.alignment import AlignmentMethod
+    from hcsim.engine.planner import PlannerScope, ProbabilityTilt
+
+    declared = profile(
+        plan={"synthetic": {"shape": "relative", "dates": ["2026-06"], "factors": [1.1]}},
+        alignment={"method": "hybrid", "overrides": {"rate": "none"}},
+        tilts=[{"domain": "attrition", "scope": {"cost_center": ["CC-01"]}, "multiplier": 2.0}],
+        settings={"requisitions.supply_rule": "soft_bridge"},
+        arms=[{"name": "rate", "null": True}],
+    )
+    assert declared.alignment.choice().resolve() is AlignmentMethod.HYBRID
+    assert declared.alignment.choice().resolve("rate") is AlignmentMethod.NONE
+    assert declared.probability_tilts() == (
+        ProbabilityTilt("attrition", PlannerScope.of(cost_center=["CC-01"]), 2.0),
+    )
+    assert declared.plan is not None
+    built = declared.plan.build({"CC-01": 100.0, "CC-02": 50.0}, dt.date(2026, 1, 1), 6)
+    assert built.target("cost_center", built.evaluation_month).tolist() == pytest.approx(
+        [110.0, 55.0]
+    )
+    assert StudyProfile.from_mapping(declared.to_mapping()) == declared
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"plan": {}}, "a saved target's path or a synthetic one, exactly one"),
+        ({"plan": {"path": "p", "synthetic": {"shape": "constant"}}}, "exactly one"),
+        ({"plan": {"synthetic": {"shape": "zigzag"}}}, "a synthetic plan's shape is one of"),
+        ({"plan": {"synthetic": {"shape": "constant", "base": 3}}}, "not ['base']"),
+        ({"alignment": {"method": "both"}}, "alignment.method"),
+        (
+            {"alignment": {"overrides": {"ghost": "none"}}, "arms": [{"name": "a", "null": True}]},
+            "alignment overrides name no arms ['ghost']",
+        ),
+        (
+            {
+                "alignment": {"overrides": {"a": "none"}},
+                "arms": [{"name": "a", "null": True, "overrides": {"alignment.method": "supply"}}],
+            },
+            "arms ['a'] set alignment.method and an alignment override both",
+        ),
+        ({"settings": {"alignment.method": "demand"}}, "not settings.alignment.method"),
+        ({"settings": {"run.seed": 4}}, "set the profile's own fields, ['seed for run.seed']"),
+        ({"settings": {"supply.rule": "x"}}, "no settings ['supply.rule']"),
+        ({"tilts": [{"domain": "weather", "multiplier": 2.0}]}, "no domain 'weather' to tilt"),
+    ],
+)
+def test_a_bad_plan_method_tilt_or_setting_is_refused(fields: dict[str, Any], message: str) -> None:
+    with pytest.raises(ProfileError) as caught:
+        profile(**fields)
+    assert message in str(caught.value)
