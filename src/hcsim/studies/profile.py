@@ -1,7 +1,8 @@
 """Study profiles: what a study runs, read from YAML.
 
-A profile declares a study's forecast scope, run mode, seed, size, and window, its capacity caps,
-the evaluators that score it, and its **arms**: the alternatives it compares. Unknown keys are
+A profile declares a study's forecast scope, run mode, seed, size, and window, the planner's
+capacity caps and fill-share targets, the evaluators that score it, and its **arms**: the
+alternatives it compares. Unknown keys are
 refused everywhere, so a misspelled field fails loudly instead of running the default.
 
 **Arms.** An arm is a name and the settings it overrides, by their `group.key` paths (see
@@ -43,6 +44,7 @@ from pydantic import (
 )
 
 from hcsim.engine.config import ForecastScope
+from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope
 from hcsim.engine.settings import settings
 from hcsim.studies.evaluators import EVALUATORS
 
@@ -130,6 +132,27 @@ class ArmGroup(BaseModel):
         return arms
 
 
+class FillShare(BaseModel):
+    """A fill-share target, as a profile declares it: a scope in raw labels, and each channel's
+    share of the scope's fills (see `engine.planner.FillShareTarget`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: dict[str, list[str]] = Field(default_factory=dict)
+    shares: dict[str, float]
+
+    @model_validator(mode="after")
+    def _target(self) -> FillShare:
+        try:
+            self.target()
+        except PlannerError as error:
+            raise ValueError("; ".join(error.problems)) from None
+        return self
+
+    def target(self) -> FillShareTarget:
+        return FillShareTarget(PlannerScope.from_dict(self.scope), dict(self.shares))
+
+
 class StudyProfile(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -144,6 +167,8 @@ class StudyProfile(BaseModel):
     run_date: dt.date | None = None
     #: Capacity caps, `Cap(c)`, by cost-center label: heads of committed strength each may hold.
     capacity_caps: dict[str, int] = Field(default_factory=dict)
+    #: Fill-share targets, each a scope and its channels' shares of the scope's fills.
+    fill_shares: list[FillShare] = Field(default_factory=list)
     #: The evaluators that score the study, by name.
     evaluators: list[str] = Field(default_factory=lambda: ["invariants", "summary"])
     #: The alternatives the study compares, declared and in groups.
@@ -190,6 +215,9 @@ class StudyProfile(BaseModel):
     @property
     def guided(self) -> bool:
         return self.mode is Mode.GUIDED_FORECAST
+
+    def fill_share_targets(self) -> tuple[FillShareTarget, ...]:
+        return tuple(f.target() for f in self.fill_shares)
 
     def expanded_arms(self) -> tuple[Arm, ...]:
         """The declared arms, then each group's, expanded."""

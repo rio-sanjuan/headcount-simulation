@@ -127,3 +127,20 @@ def test_a_profile_without_arms_runs_as_itself() -> None:
     assert plain.spec().null_arm is None
     assert plain.evaluators == ["invariants", "summary"]
     assert Arm(name="x").overrides == {}
+
+
+def test_a_profile_declares_fill_share_targets() -> None:
+    from hcsim.engine.planner import FillShareTarget, PlannerScope
+
+    shares = [{"scope": {"cost_center": ["CC-01"]}, "shares": {"external": 0.4, "conversion": 0.6}}]
+    declared = profile(fill_shares=shares)
+    (target,) = declared.fill_share_targets()
+    assert target == FillShareTarget(
+        PlannerScope.of(cost_center=["CC-01"]), {"external": 0.4, "conversion": 0.6}
+    )
+    assert StudyProfile.from_mapping(declared.to_mapping()) == declared
+    with pytest.raises(ProfileError, match=r"shares sum to one, not 0\.5"):
+        profile(fill_shares=[{"shares": {"external": 0.5}}])
+    with pytest.raises(ProfileError, match="no fill channels"):
+        profile(fill_shares=[{"shares": {"referral": 1.0}}])
+    assert profile().fill_share_targets() == ()
