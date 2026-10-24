@@ -58,8 +58,7 @@ def promotion(state: SimulationState, ctx: StepContext) -> DomainResult:
     )
     if model is not None and cycle.opens(ctx.month, ctx.rng(f"gate:{PROMOTION}")):
         top = len(ctx.config.schema.vocabulary(JOB_LEVEL)) - 1
-        p = ctx.tilt(PROMOTION, rows, model.compute_probability(rows))
-        p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(PROMOTION, rows, p))
+        p = ctx.probabilities(PROMOTION, rows, model.compute_probability(rows))
         p = np.where(known | (rows[:, EmployeeColumn.LEVEL] >= top), 0.0, p)
         sampled, quotas = draw(
             p, rows, EMPLOYEE, GuidanceCategory.PROMOTIONS, ctx, ctx.rng(PROMOTION), known

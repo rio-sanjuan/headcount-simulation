@@ -122,15 +122,18 @@ class Hazards:
         from hcsim.engine.fills import channel_hazards
 
         n, models = state.n_cost_centers, ctx.config.models
-        eligibility = ctx.config.resolved_eligibility
         people = state.live_employees
-        p = eligibility.restrict(ATTRITION, people, models.attrition.compute_probability(people))
+        p = ctx.probabilities(
+            ATTRITION, people, models.attrition.compute_probability(people), record=False
+        )
         attrition = _mean(people[:, EmployeeColumn.COST_CENTER], p, np.ones(len(people)), n)
         reqs = state.live_openings
         weights = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.float64)
         cost_centers = reqs[:, OpeningColumn.COST_CENTER]
         fill = _mean(cost_centers, channel_hazards(reqs, ctx, record=False).sum(axis=1), weights, n)
-        q = eligibility.restrict(CANCELLATION, reqs, models.cancellation.compute_probability(reqs))
+        q = ctx.probabilities(
+            CANCELLATION, reqs, models.cancellation.compute_probability(reqs), record=False
+        )
         q = np.where((ctx.reserved(reqs) > 0) | is_campus(reqs, ctx), 0.0, q)
         return cls(attrition, fill, _mean(cost_centers, q, weights, n))
 

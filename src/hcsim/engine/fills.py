@@ -30,7 +30,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from hcsim.engine.campus import is_campus
-from hcsim.engine.logit import logit_shift
 from hcsim.engine.results import DomainResult, Grant, QuotaRecord, RowChange
 from hcsim.engine.state import SimulationState
 from hcsim.model.core.categories import GuidanceCategory
@@ -83,18 +82,13 @@ def model_hazards(openings: Buffer, ctx: StepContext) -> Floats:
 
 
 def channel_hazards(openings: Buffer, ctx: StepContext, *, record: bool = True) -> Floats:
-    """(rows, channels): each requisition row's monthly hazard of filling by each channel. Each
-    channel's score takes the planner's tilts, then under rate calibration its cost center's fill
-    shift, before the eligibility rules (see `planner` and `calibration`). `record` off leaves
+    """(rows, channels): each requisition row's monthly hazard of filling by each channel, each
+    channel's score through the fixed probability pipeline (`StepContext.probabilities`): the
+    planner's tilts, the rate-calibration shift, and the eligibility rules. `record` off leaves
     the tilts unrecorded, for a call that only scores the openings."""
     hazards = model_hazards(openings, ctx)
     for k, domain in enumerate(CHANNEL_DOMAINS):
-        hazards[:, k] = ctx.tilt(domain, openings, hazards[:, k], record=record)
-    if ctx.calibration is not None and len(openings):
-        cost_centers = openings[:, OpeningColumn.COST_CENTER].astype(np.int64)
-        hazards = logit_shift(hazards, ctx.calibration.fill[cost_centers][:, None])
-    for k, domain in enumerate(CHANNEL_DOMAINS):
-        hazards[:, k] = ctx.config.resolved_eligibility.restrict(domain, openings, hazards[:, k])
+        hazards[:, k] = ctx.probabilities(domain, openings, hazards[:, k], record=record)
     hazards[is_campus(openings, ctx)] = 0.0  # campus requisitions fill on their schedule
     if ctx.pinned:  # replay fills only what history filled
         hazards[:] = 0.0
