@@ -98,6 +98,7 @@ RUN_RECORD_KEYS: Final = (
     "deferred",
     "gates",
     "rankings",
+    "extracts",
     "results_digest",
     "seed",
     "fitted_rates",
@@ -250,6 +251,7 @@ def run_record(run: StudyRun, seconds: float) -> dict[str, Any]:
         "deferred": meta["deferred"],
         "gates": [dataclasses.asdict(g) for g in run.gates],
         "rankings": rankings(run),
+        "extracts": {name: dict(read) for name, read in run.extracts.items()},
         "results_digest": results_digest(run.result) if run.result is not None else "",
         "seed": {
             "snapshot_date": seed.snapshot_date.isoformat(),
