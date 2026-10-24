@@ -148,6 +148,22 @@ def test_a_profile_can_declare_capacity_caps(inputs: tuple[Path, Path]) -> None:
         profile(mode="unguided", scope="hcf", trajectories=1, capacity_caps={label: 0}), inputs[0]
     )
     assert dict(capped.config.capacity_caps) == {label: 0}
+    shaped = run_study(
+        profile(
+            mode="unguided",
+            scope="hcf",
+            trajectories=1,
+            fill_shares=[{"scope": {"cost_center": [label]}, "shares": {"external": 1.0}}],
+        ),
+        inputs[0],
+    )
+    assert shaped.config.resolved_fill_shares is not None
+    assert [t.to_dict() for t in shaped.config.fill_shares] == [
+        {
+            "scope": {"cost_center": [label]},
+            "shares": {"external": 1.0, "conversion": 0.0, "transfer": 0.0},
+        }
+    ]
     assert capped.config.ceiling.caps[0] == 0.0
     assert dict(run.config.capacity_caps) == {}
 

@@ -106,6 +106,7 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             guidance=artifact,
             awards=awards,
             capacity_caps=profile.capacity_caps,
+            fill_shares=profile.fill_share_targets(),
         )
         state, seed = seed_for(con, config)
         provenance = _world_identity(con)
