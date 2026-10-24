@@ -79,6 +79,24 @@ def bernoulli(p: ArrayLike, rng: np.random.Generator) -> Mask:
     return rng.random(len(probabilities)) < probabilities
 
 
+def scaled_bernoulli(
+    p: ArrayLike, groups: ArrayLike, quota: ArrayLike, rng: np.random.Generator
+) -> Mask:
+    """Independent draws at the quota's expected count: the baseline quota sampling replaces.
+    Each row in a group (`groups >= 0`) draws on its own, its probability scaled so the group's
+    expected count is its quota, and capped at 1, so a group whose rows can't reach its quota
+    expects less. A row in no group draws at its own probability. The count is an output."""
+    probabilities = _probabilities(p)
+    codes = np.asarray(groups, dtype=np.int64)
+    target = np.asarray(quota, dtype=np.float64)
+    inside = codes >= 0
+    mass = np.bincount(codes[inside], weights=probabilities[inside], minlength=len(target))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = np.where(mass > 0, target / mass, 0.0)
+    scaled = np.where(inside, probabilities * scale[np.maximum(codes, 0)], probabilities)
+    return rng.random(len(scaled)) < np.minimum(scaled, 1.0)
+
+
 @dataclass(frozen=True)
 class QuotaSelection:
     """A quota draw and its accounting, per group."""

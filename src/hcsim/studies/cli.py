@@ -34,7 +34,8 @@ from typing import Final
 from hcsim.engine.config import ConfigError
 from hcsim.engine.seeding import SeedingError
 from hcsim.model.core.guidance import GuidanceArtifactError
-from hcsim.studies import scorecard
+from hcsim.studies import catalog, scorecard
+from hcsim.studies import checkpoint as checkpoints
 from hcsim.studies.gates import Verdict
 from hcsim.studies.harness import Preflight, StudyError, StudyRun, preflight, run_study
 from hcsim.studies.inputs import InputError
@@ -85,6 +86,31 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--offline", action="store_true", help="run on the offline backend")
     run.add_argument("--schema-path", type=Path, help="encode with the schema saved here")
     run.add_argument("--cache-dir", type=Path, help="keep the study's extracts here")
+
+    catalog = commands.add_parser("catalog", help="list, write, or run the study catalog")
+    actions = catalog.add_subparsers(dest="action", required=True)
+    actions.add_parser("list", help="list the catalog's studies")
+    write = actions.add_parser("write", help="write the catalog's studies for a world")
+    run_all = actions.add_parser("run", help="run every written study and check its exit code")
+    for action in (write, run_all):
+        action.add_argument("--world", type=Path, required=True, help="the world's DuckDB file")
+    write.add_argument("--out", type=Path, required=True, help="the directory to write")
+    write.add_argument("--study", action="append", default=[], help="write only this study")
+    run_all.add_argument("--catalog", type=Path, required=True, help="where it was written")
+    run_all.add_argument("--out", type=Path, required=True, help="where the runs are written")
+
+    checkpoint = commands.add_parser("checkpoint", help="record or check a run's accuracy")
+    steps = checkpoint.add_subparsers(dest="action", required=True)
+    save = steps.add_parser("save", help="record a run's accuracy as a checkpoint")
+    against = steps.add_parser("check", help="check a run against a checkpoint")
+    for step in (save, against):
+        step.add_argument("--run", type=Path, required=True, help="a study run's output")
+    save.add_argument("--out", type=Path, required=True, help="the checkpoint file to write")
+    save.add_argument("--evaluator", action="append", default=[], help="an evaluator to keep")
+    against.add_argument("--against", type=Path, required=True, help="the checkpoint")
+    against.add_argument(
+        "--tolerance", type=float, default=checkpoints.TOLERANCE, help="how far an error may grow"
+    )
     return parser
 
 
@@ -111,6 +137,10 @@ def _report(profile: StudyProfile, checked: Preflight) -> int:
 def main(argv: Sequence[str]) -> int:
     parser = _parser()
     args = parser.parse_args(list(argv))
+    if args.command == "catalog":
+        return _catalog(args)
+    if args.command == "checkpoint":
+        return _checkpoint(args)
     if not args.preflight_only and args.out is None:
         parser.error("--out is required unless --preflight-only")
 
@@ -146,3 +176,42 @@ def main(argv: Sequence[str]) -> int:
     )
     print(f"{profile.name}: {verdict}; wrote {path}")
     return code
+
+
+def _catalog(args: argparse.Namespace) -> int:
+    if args.action == "list":
+        width = max(len(e.name) for e in catalog.ENTRIES)
+        for e in catalog.ENTRIES:
+            print(f"  {e.name:{width}}  exits {e.expect}  {e.doc}")
+        return EXIT_PASSED
+    try:
+        if args.action == "write":
+            written = catalog.write(args.world, args.out, args.study)
+            print(f"wrote {len(written)} studies and {catalog.MANIFEST} to {args.out}")
+            return EXIT_PASSED
+        written = catalog.load(args.catalog)
+    except (OSError, ValueError) as error:
+        print(f"hcsim study: {error}", file=sys.stderr)
+        return EXIT_ERROR
+    outcomes = catalog.run(written, args.world, args.out, lambda a: main(a[1:]))
+    for o in outcomes:
+        status = "ok" if o.matched else "MISMATCH"
+        print(f"  {status:8}  {o.name}: exited {o.got}, documented {o.expect}")
+    return EXIT_PASSED if all(o.matched for o in outcomes) else EXIT_STOPPED
+
+
+def _checkpoint(args: argparse.Namespace) -> int:
+    try:
+        if args.action == "save":
+            saved = checkpoints.save(args.run, args.out, args.evaluator or ("sbc",))
+            print(f"saved {len(saved['metrics'])} metrics to {args.out}")
+            return EXIT_PASSED
+        result = checkpoints.check(args.run, args.against, args.tolerance)
+    except checkpoints.CheckpointError as error:
+        print(f"hcsim study: {error}", file=sys.stderr)
+        return EXIT_ERROR
+    for regression in result.regressions:
+        print(f"  regressed  {regression}")
+    same = "bit-identical results" if result.identical else "results differ"
+    print(f"{'passed' if result.passed else 'regressed'}: {same}")
+    return EXIT_PASSED if result.passed else EXIT_STOPPED

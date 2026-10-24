@@ -80,6 +80,15 @@ class ConfigError(ValueError):
         super().__init__("invalid simulation configuration:\n  - " + "\n  - ".join(problems))
 
 
+class SamplingMethod(StrEnum):
+    """How a guided draw realizes its group's quota: exactly, by quota sampling, or, as the
+    baseline quota sampling replaces, by independent draws scaled to the quota's expected
+    count."""
+
+    QUOTA = "quota"
+    INDEPENDENT = "independent"
+
+
 class BackfillSource(StrEnum):
     """Where backfill's probability per departure comes from."""
 
@@ -105,6 +114,7 @@ GROUPS: Final[Mapping[str, str]] = MappingProxyType(
         "cancellation": "requisitions that exit unfilled",
         "requisitions": "growth requisition generation",
         "alignment": "which valve the plan's targets drive",
+        "sampling": "how guided draws realize their quotas",
         "replay": "replaying realized history",
         "results": "what a run records",
     }
@@ -415,6 +425,12 @@ class SimulationConfig:
         "alignment",
         AlignmentMethod.SUPPLY,
         "the valve the plan drives: none, supply, demand, hybrid, or rate_calibration",
+    )
+    # sampling
+    sampling_method: SamplingMethod = setting(
+        "sampling",
+        SamplingMethod.QUOTA,
+        "quota sampling, or independent draws at the quota's expected count, as a baseline",
     )
     # replay
     replay_boundary_fill: bool = setting(
