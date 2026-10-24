@@ -61,6 +61,7 @@ from hcsim.engine.alignment import AlignmentMethod, MethodChoice
 from hcsim.engine.config import ForecastScope
 from hcsim.engine.modes import rung
 from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope, ProbabilityTilt
+from hcsim.engine.seeding import AWARD_TYPES
 from hcsim.engine.settings import settings
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.alignment_builders import Shape, synthetic
@@ -306,6 +307,9 @@ class StudyProfile(BaseModel):
     tilts: list[Tilt] = Field(default_factory=list)
     #: Capacity caps, `Cap(c)`, by cost-center label: heads of committed strength each may hold.
     capacity_caps: dict[str, int] = Field(default_factory=dict)
+    #: Per award type, the months after its event in which a replay routes a recorded award,
+    #: as a new hire's follows their start (see `engine.config.AwardSettings.replay_lag`).
+    replay_lag: dict[str, int] = Field(default_factory=dict)
     #: Fill-share targets, each a scope and its channels' shares of the scope's fills.
     fill_shares: list[FillShare] = Field(default_factory=list)
     #: The evaluators that score the study, by name.
@@ -371,6 +375,13 @@ class StudyProfile(BaseModel):
                 "or screen"
             )
         modes = [self.mode.value, *(a.mode.value for a in arms if a.mode is not None)]
+        replays_awards = (
+            Mode.REPLAY.value in modes and self.scope is ForecastScope.HEADCOUNT_AND_SBC
+        )
+        if self.replay_lag and not replays_awards:
+            raise ValueError(
+                "a replay lag routes recorded awards, which only a replay at hcf+sbc reads"
+            )
         whole = sorted({m for m in modes if rung(m).needs_actuals})
         if self.subset and whole:
             raise ValueError(f"modes {whole} read the whole world's actuals, so take no subset")
@@ -390,6 +401,17 @@ class StudyProfile(BaseModel):
             if self.screen.trajectories >= self.trajectories:
                 raise ValueError("a screen runs fewer trajectories than the study")
         return self
+
+    @field_validator("replay_lag")
+    @classmethod
+    def _replay_lag(cls, value: dict[str, int]) -> dict[str, int]:
+        unknown = sorted(set(value) - set(AWARD_TYPES))
+        if unknown:
+            raise ValueError(f"no award types {unknown}; known: {', '.join(AWARD_TYPES)}")
+        negative = sorted(t for t, months in value.items() if months < 0)
+        if negative:
+            raise ValueError(f"a replay lag is a number of months from 0, which {negative} isn't")
+        return value
 
     @field_validator("capacity_caps")
     @classmethod

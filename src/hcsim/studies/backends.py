@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -42,8 +42,7 @@ from hcsim.model.core.categories import GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
-from hcsim.studies.evaluators import OFFLINE_EVALUATORS, Metric
-from hcsim.studies.inputs import FittedModels
+from hcsim.studies.evaluators import OFFLINE_EVALUATORS, Metric, Scoring
 
 _C = GuidanceCategory
 #: The categories a guided-actuals run is guided on, at their realized counts.
@@ -105,9 +104,11 @@ def mode_inputs(
     run_date: dt.date,
     months: int,
     awards: AwardSettings | None = None,
+    replay_lag: Mapping[str, int] | None = None,
 ) -> ModeInputs:
     """The inputs `mode` reads for a run of `months` from `run_date`, from the seeded `state`,
-    with the study's `awards` as the mode reads them."""
+    with the study's `awards` as the mode reads them: a replay's route recorded awards within
+    `replay_lag` of their events."""
     mode = RunMode(mode)
     if mode is RunMode.REPLAY:
         events = collect(run_date, months, [(Source.REPLAY, from_replay(con, run_date))])
@@ -116,6 +117,7 @@ def mode_inputs(
                 awards,
                 price_model=_realized_price(con, run_date, awards.price_model),
                 replayed=recorded_awards(con, run_date, months),
+                replay_lag=dict(replay_lag or {}),
             )
         return ModeInputs(
             known=_plan(con, schema, state, events),
@@ -140,6 +142,6 @@ def simulate_arm(
     return simulate(config, state, known=inputs.known, replay=inputs.replay)
 
 
-def offline_metrics(names: Sequence[str], fitted: FittedModels) -> tuple[Metric, ...]:
+def offline_metrics(names: Sequence[str], scoring: Scoring) -> tuple[Metric, ...]:
     """The offline backend: the named offline evaluators' metrics, from the study's inputs."""
-    return tuple(m for name in names for m in OFFLINE_EVALUATORS[name](fitted))
+    return tuple(m for name in names for m in OFFLINE_EVALUATORS[name].score(scoring))
