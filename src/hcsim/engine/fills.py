@@ -82,11 +82,14 @@ def model_hazards(openings: Buffer, ctx: StepContext) -> Floats:
     return hazards
 
 
-def channel_hazards(openings: Buffer, ctx: StepContext) -> Floats:
-    """(rows, channels): each requisition row's monthly hazard of filling by each channel. Under
-    rate calibration, each channel's score takes its cost center's fill shift before the
-    eligibility rules (see `calibration`)."""
+def channel_hazards(openings: Buffer, ctx: StepContext, *, record: bool = True) -> Floats:
+    """(rows, channels): each requisition row's monthly hazard of filling by each channel. Each
+    channel's score takes the planner's tilts, then under rate calibration its cost center's fill
+    shift, before the eligibility rules (see `planner` and `calibration`). `record` off leaves
+    the tilts unrecorded, for a call that only scores the openings."""
     hazards = model_hazards(openings, ctx)
+    for k, domain in enumerate(CHANNEL_DOMAINS):
+        hazards[:, k] = ctx.tilt(domain, openings, hazards[:, k], record=record)
     if ctx.calibration is not None and len(openings):
         cost_centers = openings[:, OpeningColumn.COST_CENTER].astype(np.int64)
         hazards = logit_shift(hazards, ctx.calibration.fill[cost_centers][:, None])

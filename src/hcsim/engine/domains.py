@@ -29,6 +29,7 @@ from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.logit import logit_shift
 from hcsim.engine.modes import RunMode
+from hcsim.engine.planner import TILTED
 from hcsim.engine.replay import ReplayedRequisitions
 from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
 from hcsim.engine.roles import DEGENERATE_ROWS, fill_roles
@@ -47,7 +48,7 @@ from hcsim.model.core.layouts import (
     EmployeeColumn,
     OpeningColumn,
 )
-from hcsim.model.core.schema import REQ_TYPE, UNATTRIBUTED
+from hcsim.model.core.schema import COST_CENTER, REQ_TYPE, UNATTRIBUTED
 from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabilities
 from hcsim.model.ml.sampling import apportion, bernoulli, quota_select
 
@@ -94,6 +95,9 @@ class StepContext:
     replay: ReplayedRequisitions | None = None
     #: The rate-calibration shifts, under `rate_calibration` (see `calibration`).
     calibration: Calibration | None = None
+    #: This step's tilt records, per cost center, by name: the rows each domain's tilts moved
+    #: (`tilted_<domain>`) and capped (`tilt_capped_<domain>`).
+    tilt_records: dict[str, Ints] = field(default_factory=dict)
     _quotas: dict[GuidanceCategory, Ints] = field(default_factory=dict)
 
     def rng(self, domain: str) -> np.random.Generator:
@@ -156,6 +160,25 @@ class StepContext:
             return p
         result: Probabilities = np.where(self.known.plan.sampled(rows, self.step), p, 0.0)
         return result
+
+    def tilt(self, domain: str, rows: Buffer, p: Floats, *, record: bool = True) -> Floats:
+        """`p` for `rows` of `domain` after the planner's tilts in force this step (see
+        `planner`), recording the rows they moved and capped unless `record` is off."""
+        tilts = self.config.resolved_tilts
+        if tilts is None:
+            return np.asarray(p, dtype=np.float64)
+        out = tilts.apply(domain, rows, self.step, p)
+        if record and out.tilted.any():
+            employees = TILTED[domain] is EMPLOYEE
+            column = EmployeeColumn.COST_CENTER if employees else OpeningColumn.COST_CENTER
+            cost_centers = rows[:, column].astype(np.int64)
+            n = len(self.config.schema.vocabulary(COST_CENTER))
+            moved = ((f"tilted_{domain}", out.tilted), (f"tilt_capped_{domain}", out.capped))
+            for name, mask in moved:
+                counts = np.bincount(cost_centers[mask], minlength=n).astype(np.int64)
+                held = self.tilt_records.get(name, np.zeros(n, dtype=np.int64))
+                self.tilt_records[name] = held + counts
+        return out.p
 
     def credit(self, state: SimulationState) -> Floats:
         """The known-event credit over the run's lookahead, per cost center (see
@@ -244,7 +267,7 @@ def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     group's quota, and sampling realizes what's left."""
     rows = state.live_employees
     known = ctx.fire_known(rows, EventKind.TERMINATION)
-    p = ctx.config.models.attrition.compute_probability(rows)
+    p = ctx.tilt(ATTRITION, rows, ctx.config.models.attrition.compute_probability(rows))
     if ctx.calibration is not None:
         shift = ctx.calibration.attrition[rows[:, EmployeeColumn.COST_CENTER].astype(np.int64)]
         p = logit_shift(np.asarray(p, dtype=np.float64), shift)
@@ -291,7 +314,8 @@ def _backfill(
     if not len(departed):
         return DomainResult(domain)
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
-    p = _backfill_probability(departed, ctx, model, state.n_cost_centers)
+    scored = _backfill_probability(departed, ctx, model, state.n_cost_centers)
+    p = ctx.tilt(BACKFILL, departed, scored)
     p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, p)
     if ctx.pinned:  # replay opens its realized backfills itself
         p = np.zeros(len(departed))
@@ -365,7 +389,7 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     requisitions allow without passing it. Elsewhere each requisition draws on its own.
     """
     reqs = state.live_openings
-    p = ctx.config.models.cancellation.compute_probability(reqs)
+    p = ctx.tilt(CANCELLATION, reqs, ctx.config.models.cancellation.compute_probability(reqs))
     p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
     p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
     p = np.where(is_campus(reqs, ctx), 0.0, p)  # a campus requisition fills on its schedule

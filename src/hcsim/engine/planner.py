@@ -20,10 +20,20 @@ multiplier per channel at which its openings' expected fills split as the target
 many expected fills as before: the target moves the mix, not the count. A target the scope's
 openings can't meet is reported with its reason (`Unattainable`): a channel it needs that has
 no hazard, or capped rows that can't carry the mix.
+
+**Probability tilts** (`ProbabilityTilt`) multiply one domain's event probabilities for the
+rows in a scope, in a window of calendar months. The window resolves to the run's steps, and
+one the run doesn't reach never applies. A tilted probability is capped at the tilt's cap, one
+at most, and where several of a domain's tilts select a row, the most specific decides it. A
+run records, per cost center and month, the rows each domain's tilts moved and capped. Under
+guidance, a domain realizes its quota whatever the probabilities, so a tilt moves who
+experiences the event, not how many: only where nothing fixes the count does it move the
+count too.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -31,10 +41,11 @@ from types import MappingProxyType
 from typing import Any, Final
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from hcsim.engine.fills import CHANNELS, rescale
-from hcsim.model.core.layouts import OPENING, Buffer, BufferLayout
+from hcsim.model.core.layouts import EMPLOYEE, OPENING, Buffer, BufferLayout
 from hcsim.model.core.schema import SimulationSchema
 from hcsim.model.data.subset import LoweredSubset, SubsetError, SubsetSpec
 
@@ -292,3 +303,167 @@ def resolve_fill_shares(
     if not targets:
         return None
     return FillShares(tuple(targets), tuple(resolve_scopes([t.scope for t in targets], schema)))
+
+
+# --- probability tilts ------------------------------------------------------------------------
+
+#: The domains a tilt may name, and the buffer whose rows each one scores.
+TILTED: Final[Mapping[str, BufferLayout]] = MappingProxyType(
+    {
+        "attrition": EMPLOYEE,
+        "promotion": EMPLOYEE,
+        "backfill": EMPLOYEE,  # the departures, as employee rows
+        "external_fill": OPENING,
+        "conversion_fill": OPENING,
+        "transfer_fill": OPENING,
+        "cancellation": OPENING,
+    }
+)
+
+
+@dataclass(frozen=True)
+class ProbabilityTilt:
+    """A planner's multiplier on one domain's event probabilities, for the rows in `scope`, in
+    the calendar months from `start` through `end` (`YYYY-MM`, either open-ended), capped at
+    `cap`."""
+
+    domain: str
+    scope: PlannerScope
+    multiplier: float
+    start: str | None = None
+    end: str | None = None
+    cap: float = 1.0
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        problems = []
+        if self.domain not in TILTED:
+            problems.append(f"no domain {self.domain!r} to tilt; known: {', '.join(TILTED)}")
+        if not (np.isfinite(self.multiplier) and self.multiplier >= 0):
+            problems.append(f"a multiplier is finite and non-negative, not {self.multiplier}")
+        if not 0.0 < self.cap <= 1.0:
+            problems.append(f"a cap lies in (0, 1], not {self.cap}")
+        try:
+            first, last = self.window
+        except ValueError as error:
+            problems.append(f"the window's months are YYYY-MM: {error}")
+        else:
+            if first is not None and last is not None and first > last:
+                problems.append(f"the window starts in {first}, after it ends in {last}")
+        if problems:
+            raise PlannerError([f"tilt on {self.domain} for {self.scope}: {p}" for p in problems])
+
+    @property
+    def window(self) -> tuple[pd.Period | None, pd.Period | None]:
+        def month(text: str | None) -> pd.Period | None:
+            return None if text is None else pd.Period(str(text), freq="M")
+
+        return month(self.start), month(self.end)
+
+    def steps(self, run_date: dt.date, months: int) -> range:
+        """The run's steps inside the window: none for a window the run doesn't reach."""
+        first, last = self.window
+        origin = pd.Period(run_date, freq="M")
+        lo = 0 if first is None else max(0, (first - origin).n)
+        hi = months - 1 if last is None else min(months - 1, (last - origin).n)
+        return range(lo, hi + 1)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "domain": self.domain,
+            "scope": self.scope.to_dict(),
+            "multiplier": self.multiplier,
+            "start": self.start,
+            "end": self.end,
+            "cap": self.cap,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ProbabilityTilt:
+        try:
+            return cls(
+                str(data["domain"]),
+                PlannerScope.from_dict(data["scope"]),
+                float(data["multiplier"]),
+                data.get("start"),
+                data.get("end"),
+                float(data.get("cap", 1.0)),
+                str(data.get("reason", "")),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            if isinstance(error, PlannerError):
+                raise
+            raise PlannerError([f"can't read tilt {dict(data)!r}: {error}"]) from None
+
+
+@dataclass(frozen=True)
+class Tilted:
+    """A domain's probabilities after its tilts, and which rows a tilt moved or capped."""
+
+    p: Floats
+    tilted: NDArray[np.bool_]
+    capped: NDArray[np.bool_]
+
+
+@dataclass(frozen=True)
+class _DomainTilts:
+    tilts: tuple[ProbabilityTilt, ...]
+    scopes: tuple[ResolvedScope, ...]
+    steps: tuple[frozenset[int], ...]
+
+
+@dataclass(frozen=True)
+class Tilts:
+    """Probability tilts resolved against one schema and run: per domain, its tilts, their
+    scopes, and the steps each applies in."""
+
+    by_domain: Mapping[str, _DomainTilts]
+
+    def apply(self, domain: str, rows: Buffer, step: int, p: Floats) -> Tilted:
+        """`p` for `rows` of `domain` at `step`, each row multiplied by the most specific tilt
+        in force that selects it, and capped at its cap."""
+        p = np.asarray(p, dtype=np.float64)
+        none = np.zeros(len(p), dtype=bool)
+        found = self.by_domain.get(domain)
+        if found is None or not len(rows):
+            return Tilted(p, none, none)
+        tilts, scopes, steps = found.tilts, found.scopes, found.steps
+        live = [k for k in range(len(tilts)) if step in steps[k]]
+        if not live:
+            return Tilted(p, none, none)
+        winner = most_specific([scopes[k] for k in live], rows, TILTED[domain])
+        multiplier = np.ones(len(p))
+        cap = np.ones(len(p))
+        for j, k in enumerate(live):
+            mine = winner == j
+            multiplier[mine], cap[mine] = tilts[k].multiplier, tilts[k].cap
+        raised = p * multiplier
+        tilted = winner >= 0
+        capped = tilted & (raised > cap)
+        return Tilted(np.where(tilted, np.minimum(raised, cap), p), tilted, capped)
+
+
+def resolve_tilts(
+    tilts: Sequence[ProbabilityTilt], schema: SimulationSchema, run_date: dt.date, months: int
+) -> Tilts | None:
+    """The tilts resolved, or None for none: each domain's scopes lowered, ambiguous ones
+    refused, and each window resolved to the run's steps."""
+    if not tilts:
+        return None
+    problems: list[str] = []
+    by_domain = {}
+    for domain in TILTED:
+        mine = tuple(t for t in tilts if t.domain == domain)
+        if not mine:
+            continue
+        try:
+            scopes = tuple(resolve_scopes([t.scope for t in mine], schema))
+        except PlannerError as error:
+            problems += [f"tilts on {domain}: {p}" for p in error.problems]
+            continue
+        steps = tuple(frozenset(t.steps(run_date, months)) for t in mine)
+        by_domain[domain] = _DomainTilts(mine, scopes, steps)
+    if problems:
+        raise PlannerError(problems)
+    return Tilts(MappingProxyType(by_domain))

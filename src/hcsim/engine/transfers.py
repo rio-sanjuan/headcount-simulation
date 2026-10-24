@@ -290,7 +290,7 @@ def _spill(reqs: Buffer, unmatched: Ints, ctx: StepContext) -> tuple[Ints, tuple
     nothing = (np.zeros(0, dtype=np.int64), (EMPLOYEE.empty(0), np.zeros(0, dtype=np.int64)))
     if ctx.config.transfers_shortfall_policy is not ShortfallPolicy.SPILL or not len(unmatched):
         return nothing
-    hazards = channel_hazards(reqs[unmatched], ctx)[:, [EXTERNAL, CONVERSION]]
+    hazards = channel_hazards(reqs[unmatched], ctx, record=False)[:, [EXTERNAL, CONVERSION]]
     total = hazards.sum(axis=1, keepdims=True)
     weights = np.where(total > 0, hazards / np.where(total > 0, total, 1), [1.0, 0.0])
     rng = ctx.rng(f"{TRANSFERS_DOMAIN}:spill")

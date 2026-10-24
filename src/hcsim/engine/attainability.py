@@ -129,7 +129,7 @@ class Hazards:
         reqs = state.live_openings
         weights = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.float64)
         cost_centers = reqs[:, OpeningColumn.COST_CENTER]
-        fill = _mean(cost_centers, channel_hazards(reqs, ctx).sum(axis=1), weights, n)
+        fill = _mean(cost_centers, channel_hazards(reqs, ctx, record=False).sum(axis=1), weights, n)
         q = eligibility.restrict(CANCELLATION, reqs, models.cancellation.compute_probability(reqs))
         q = np.where((ctx.reserved(reqs) > 0) | is_campus(reqs, ctx), 0.0, q)
         return cls(attrition, fill, _mean(cost_centers, q, weights, n))
