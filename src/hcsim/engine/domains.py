@@ -4,6 +4,9 @@ and growth.
 Each handler is pure: it reads settled state and the step's context, and returns a
 `DomainResult`. Entity models score buffer rows as they are. Where the guidance forecast covers
 a group, a domain realizes the group's quota exactly; elsewhere every row draws independently.
+Under the independent-sampling baseline (`sampling.method: independent`), attrition and
+promotion draw every row independently even where guidance covers it, each group's rows scaled
+to the quota's expected count, so the count is an output and no quota is recorded.
 
 Growth and backfill share the `requisitions_opened` quota through the category ledger. Backfill
 runs first and is capped at the quota's headroom, and growth opens exactly the residual. So
@@ -23,7 +26,7 @@ from numpy.typing import NDArray
 from hcsim.engine.attainability import known_credit
 from hcsim.engine.calibration import Calibration
 from hcsim.engine.campus import is_campus
-from hcsim.engine.config import BackfillSource, SimulationConfig
+from hcsim.engine.config import BackfillSource, SamplingMethod, SimulationConfig
 from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
@@ -50,7 +53,7 @@ from hcsim.model.core.layouts import (
 )
 from hcsim.model.core.schema import COST_CENTER, REQ_TYPE, UNATTRIBUTED
 from hcsim.model.interface import EntityModel, GroupRateModel, Mask, Probabilities
-from hcsim.model.ml.sampling import apportion, bernoulli, quota_select
+from hcsim.model.ml.sampling import apportion, bernoulli, quota_select, scaled_bernoulli
 
 Ints = NDArray[np.int64]
 Floats = NDArray[np.float64]
@@ -254,6 +257,8 @@ def draw(
     quota = ctx.quota(category)
     covered = known & (groups >= 0)
     taken = np.bincount(groups[covered], minlength=len(quota)).astype(np.int64)
+    if ctx.config.sampling_method is SamplingMethod.INDEPENDENT:
+        return scaled_bernoulli(p, groups, np.maximum(quota - taken, 0), rng), {}
     selection = quota_select(p, groups, np.maximum(quota - taken, 0), rng)
     mask = np.where(groups >= 0, selection.mask, independent)
     record = QuotaRecord(quota, selection.eligible + taken, selection.realized + taken, taken)

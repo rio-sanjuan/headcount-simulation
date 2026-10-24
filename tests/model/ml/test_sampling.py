@@ -17,6 +17,7 @@ from hcsim.model.ml.sampling import (
     bernoulli,
     quota_select,
     rake_quota,
+    scaled_bernoulli,
     seed_base,
     sequential,
 )
@@ -65,6 +66,30 @@ def test_bernoulli_counts_match_their_expectation() -> None:
     p = np.linspace(0.01, 0.5, 4_000)
     count = int(bernoulli(p, rng(11)).sum())
     stat_check(count, float(p.sum()), bernoulli_sum_se(p), label="Bernoulli count")
+
+
+def test_scaled_draws_expect_each_groups_quota() -> None:
+    """The independent-sampling baseline: each group's count is random, its mean the quota."""
+    p = np.linspace(0.01, 0.2, 6_000)
+    groups = np.repeat([0, 1, -1], 2_000)
+    quota = np.array([150.0, 40.0])
+    drawn = scaled_bernoulli(p, groups, quota, rng(3))
+    for g in (0, 1):
+        mine = groups == g
+        scaled = p[mine] * quota[g] / p[mine].sum()
+        stat_check(int(drawn[mine].sum()), quota[g], bernoulli_sum_se(scaled), label=f"group {g}")
+    outside = groups < 0
+    stat_check(int(drawn[outside].sum()), float(p[outside].sum()), bernoulli_sum_se(p[outside]))
+
+
+def test_scaled_draws_cap_at_certainty_and_skip_empty_groups() -> None:
+    p = np.array([0.1, 0.1, 0.0, 0.5])
+    groups = np.array([0, 0, 1, 1])
+    drawn = scaled_bernoulli(p, groups, np.array([5.0, 2.0]), rng(1))
+    assert drawn[:2].all()  # scaled past 1, so certain: a group can't reach a quota it lacks
+    assert not drawn[2]  # a zero probability stays zero
+    assert drawn[3]
+    assert not scaled_bernoulli(p, groups, np.array([0.0, 0.0]), rng(1)).any()
 
 
 # --- quota sampling -----------------------------------------------------------------------------
