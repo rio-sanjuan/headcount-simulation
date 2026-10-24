@@ -20,6 +20,7 @@ import duckdb
 
 from hcsim.engine.config import AwardSettings, ForecastScope, SimulationConfig
 from hcsim.engine.loop import SimulationResult, simulate
+from hcsim.engine.modes import cell
 from hcsim.engine.seeding import (
     SeedReport,
     opening_price,
@@ -114,6 +115,7 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         "profile": profile.name,
         "mode": profile.mode.value,
         "scope": profile.scope.value,
+        "isolates": cell(profile.mode.value, profile.scope).isolates,
         "seed": str(profile.seed),
         "run_date": run_date.isoformat(),
         "schema_fingerprint": schema.fingerprint(),
