@@ -591,6 +591,7 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
     provenance = dict(inputs.world) | {
         "hcsim_version": version("hcsim"),
         "profile": profile.name,
+        "spec": profile.spec().digest(),
         "mode": profile.mode.value,
         "scope": profile.scope.value,
         "isolates": cell(profile.mode.value, profile.scope).isolates,

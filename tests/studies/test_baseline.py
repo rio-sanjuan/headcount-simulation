@@ -48,7 +48,7 @@ def test_last_bit_noise_is_tolerated_but_a_real_move_is_not(
     moved = card.copy()
     moved.loc[metric, "value"] += 1.0
     (line,) = baseline.compare(moved, reference)
-    assert line.startswith("summary/sbc_recognized_mean: value is ")
+    assert line.startswith("B/study/summary/sbc_recognized_mean: value is ")
 
 
 def test_added_dropped_and_relabelled_rows_are_differences(
@@ -56,15 +56,19 @@ def test_added_dropped_and_relabelled_rows_are_differences(
 ) -> None:
     reference = saved(card, tmp_path)
     dropped = card[card["metric"] != "tranches_mean"]
-    assert baseline.compare(dropped, reference) == ["summary/tranches_mean: missing from the run"]
+    assert baseline.compare(dropped, reference) == [
+        "B/study/summary/tranches_mean: missing from the run"
+    ]
     added = pd.concat([card, card.iloc[[0]].assign(metric="new_metric")], ignore_index=True)
-    assert baseline.compare(added, reference) == ["invariants/new_metric: not in the baseline"]
+    assert baseline.compare(added, reference) == [
+        "B/study/invariants/new_metric: not in the baseline"
+    ]
     reseeded = card.assign(seed="99")
     assert len(baseline.compare(reseeded, reference)) == len(card)
     flipped = card.copy()
     flipped.loc[flipped["metric"] == "quota_violations", "passed"] = False
     assert baseline.compare(flipped, reference) == [
-        "invariants/quota_violations: passed is False, baseline True"
+        "B/study/invariants/quota_violations: passed is False, baseline True"
     ]
 
 

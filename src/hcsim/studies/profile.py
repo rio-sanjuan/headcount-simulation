@@ -44,7 +44,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import pandas as pd
 import yaml
@@ -283,6 +283,20 @@ class Screen(BaseModel):
     rank_by: str = Field(pattern=r"^[a-z_]+\.[A-Za-z0-9_\-]+$")
 
 
+class Ranking(BaseModel):
+    """A metric the scorecard ranks the null and compared arms by, and which values rank first:
+    the lowest, the highest, or the nearest zero."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    metric: str = Field(pattern=r"^[a-z_]+\.[A-Za-z0-9_\-]+$")
+    better: Literal["lower", "higher", "nearer_zero"] = "lower"
+
+    def key(self, value: float) -> float:
+        """The value as it sorts, first first."""
+        return {"lower": value, "higher": -value, "nearer_zero": abs(value)}[self.better]
+
+
 class GateSpec(BaseModel):
     """A profile's own gate: a bound on one metric, and what failing it does (see `gates`)."""
 
@@ -360,6 +374,8 @@ class StudyProfile(BaseModel):
     #: The study's own gates, and whether it also holds the built-in ones (see `gates`).
     gates: list[GateSpec] = Field(default_factory=list)
     builtin_gates: bool = True
+    #: The metrics the scorecard ranks arms by; none ranks by the screen's, if it has one.
+    rankings: list[Ranking] = Field(default_factory=list)
 
     @field_validator("subset")
     @classmethod
@@ -456,7 +472,20 @@ class StudyProfile(BaseModel):
         )
         if unread:
             raise ValueError(f"gates {unread} bound metrics of evaluators the study doesn't run")
+        unranked = sorted(
+            {r.metric for r in self.rankings if r.metric.split(".")[0] not in self.evaluators}
+        )
+        if unranked:
+            raise ValueError(f"rankings {unranked} read evaluators the study doesn't run")
+        if self.rankings and not arms:
+            raise ValueError("rankings rank a study's arms, and it has none")
         return self
+
+    def ranked_by(self) -> tuple[Ranking, ...]:
+        """The rankings the scorecard holds: the profile's, or else the screen's metric."""
+        if self.rankings:
+            return tuple(self.rankings)
+        return (Ranking(metric=self.screen.rank_by),) if self.screen is not None else ()
 
     def own_gates(self) -> tuple[Gate, ...]:
         return tuple(g.gate() for g in self.gates)
