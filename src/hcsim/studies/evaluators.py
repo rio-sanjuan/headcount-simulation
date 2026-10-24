@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 import numpy as np
@@ -255,3 +256,9 @@ def plan_alignment(result: SimulationResult) -> list[Metric]:
 def _valves_in_order(column: pd.Series) -> list[str]:
     present = set(column)
     return [v for v in VALVE_LABELS if v in present]
+
+
+#: Every evaluator a profile can name.
+EVALUATORS: Final = MappingProxyType(
+    {"invariants": invariants, "summary": summary, "plan_alignment": plan_alignment}
+)
