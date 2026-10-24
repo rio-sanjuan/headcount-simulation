@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -44,6 +44,9 @@ if TYPE_CHECKING:
 
 Ints = NDArray[np.int64]
 TRANSFERS_DOMAIN = "transfers"
+#: The diagnostics a month's transfer shortfall counts, per cost center of the opening.
+TRANSFER_UNMATCHED: Final = "transfer_unmatched"
+TRANSFER_SPILLED: Final = "transfer_spilled"
 
 
 @dataclass(frozen=True)
@@ -115,8 +118,8 @@ def match(openings: Buffer, slots: Ints, employees: Buffer, ctx: StepContext) ->
 class ShortfallPolicy(StrEnum):
     """What becomes of a transfer opening no one could be matched to."""
 
-    #: The opening stays open, for a later month's fills.
-    KEEP_OPEN = "keep_open"
+    #: The opening is left open, for a later month's fills.
+    LEAVE_OPEN = "leave_open"
     #: The opening spills to another free fill channel, external or conversion, by their
     #: hazards, and fills now.
     SPILL = "spill"
@@ -133,7 +136,11 @@ def transfers(state: SimulationState, ctx: StepContext) -> DomainResult:
     A matched employee keeps their identity (id, tenure, rating, equity slot, and salary) and
     takes the opening's role, with a transfer grant; their old row is recorded as a departure
     from `transfers`, for the transfer backfill to read. Under internal-starts guidance, no
-    group places more than its quota. An unmatched opening follows the shortfall policy.
+    group places more than its quota. An unmatched opening follows the shortfall policy: it's
+    left open, or spilled to an external or conversion hire now. Whenever the fills assigned
+    openings to transfer, the result counts, per cost center of the opening, the slots no one
+    was matched to (`transfer_unmatched`) and those spilled (`transfer_spilled`); the rest were
+    left open.
     """
     reqs = state.live_openings
     employees = state.live_employees
@@ -147,6 +154,12 @@ def transfers(state: SimulationState, ctx: StepContext) -> DomainResult:
     copy_role(reqs[found.openings[matched]], moved)
     unmatched = found.openings[~matched]
     spilled, hires = _spill(reqs, unmatched, ctx)
+    diagnostics = {}
+    if len(found.openings):
+        diagnostics = {
+            TRANSFER_UNMATCHED: _count(reqs[unmatched], n, OpeningColumn.COST_CENTER),
+            TRANSFER_SPILLED: _count(reqs[spilled], n, OpeningColumn.COST_CENTER),
+        }
     filled_known = known_reqs >= 0
     used = np.bincount(
         np.concatenate([found.openings[matched], spilled, known_reqs[filled_known]]),
@@ -179,13 +192,12 @@ def transfers(state: SimulationState, ctx: StepContext) -> DomainResult:
         departures=employees[write_index].copy(),
         quotas=_record(reqs, found, matched, ctx),
         flows=flows,
+        diagnostics=diagnostics,
     )
 
 
-def _count(rows: Buffer, n: int) -> Ints:
-    result: Ints = np.bincount(
-        rows[:, EmployeeColumn.COST_CENTER].astype(np.int64), minlength=n
-    ).astype(np.int64)
+def _count(rows: Buffer, n: int, column: int = EmployeeColumn.COST_CENTER) -> Ints:
+    result: Ints = np.bincount(rows[:, column].astype(np.int64), minlength=n).astype(np.int64)
     return result
 
 

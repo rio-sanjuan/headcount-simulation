@@ -383,8 +383,8 @@ class SimulationConfig:
     )
     transfers_shortfall_policy: ShortfallPolicy = setting(
         "transfers",
-        ShortfallPolicy.KEEP_OPEN,
-        "keep an unmatched transfer opening open, or spill it to another fill channel",
+        ShortfallPolicy.LEAVE_OPEN,
+        "leave an unmatched transfer opening open, or spill it to another fill channel",
     )
     # requisitions
     requisitions_supply_gain: float = setting(

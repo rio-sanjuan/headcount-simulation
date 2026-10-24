@@ -11,7 +11,12 @@ from hcsim.engine.domains import StepContext
 from hcsim.engine.loop import FLOW_SYMBOLS, HEADCOUNT_IDENTITY, OPENING_IDENTITY, simulate
 from hcsim.engine.results import DomainResult, Grant
 from hcsim.engine.seeds import SeedManager
-from hcsim.engine.transfers import ShortfallPolicy, transfers
+from hcsim.engine.transfers import (
+    TRANSFER_SPILLED,
+    TRANSFER_UNMATCHED,
+    ShortfallPolicy,
+    transfers,
+)
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.ml.entity import ConstantModel
 from hcsim.model.ml.group import BackfillRateModel
@@ -53,11 +58,19 @@ def test_a_transfer_takes_the_role_and_keeps_its_identity() -> None:
     assert Grant("transfer", rows="written") in result.grants
 
 
-def test_an_unmatched_opening_stays_open_by_default() -> None:
+def test_an_unmatched_opening_is_left_open_by_default() -> None:
     result, _ = place({501: 2}, transfers_availability_factor=0.0)
     assert result.employees.is_empty
     assert result.openings.is_empty
     assert int(result.flows["F_tr"].sum()) == 0
+    assert config().transfers_shortfall_policy is ShortfallPolicy.LEAVE_OPEN
+    # Both slots went unmatched in CC-01, and neither spilled: they were left open.
+    assert result.diagnostics[TRANSFER_UNMATCHED].tolist() == [2, 0, 0]
+    assert result.diagnostics[TRANSFER_SPILLED].tolist() == [0, 0, 0]
+    matched, _ = place({501: 1})
+    assert matched.diagnostics[TRANSFER_UNMATCHED].tolist() == [0, 0, 0]
+    idle, _ = place({})
+    assert idle.diagnostics == {}  # no transfer slots this month, so nothing to count
 
 
 def test_an_unmatched_opening_can_spill_to_another_channel() -> None:
@@ -72,6 +85,8 @@ def test_an_unmatched_opening_can_spill_to_another_channel() -> None:
     assert (hires[:, EmployeeColumn.COST_CENTER] == 0).all()
     assert result.flows["F_ext"].tolist() == [2, 0, 0]
     assert result.openings.write_rows[0, OpeningColumn.NUM_OPENINGS] == 1
+    assert result.diagnostics[TRANSFER_UNMATCHED].tolist() == [2, 0, 0]
+    assert result.diagnostics[TRANSFER_SPILLED].tolist() == [2, 0, 0]
 
 
 def test_guidance_caps_placements_and_records_matching_shortfalls() -> None:
@@ -114,3 +129,20 @@ def test_transfers_run_through_the_loop_and_keep_the_identities() -> None:
 def test_a_group_guidance_doesn_t_cover_isn_t_capped() -> None:
     result, _ = place({501: 2}, guidance=guidance({"internal_starts": {"CC-02": 0.0}}))
     assert len(result.employees.write_index) == 2
+
+
+def test_a_run_counts_each_months_transfer_shortfall() -> None:
+    transferring = dataclasses.replace(models(), transfer_fill=ConstantModel(0.4))
+    for policy, spills in ((ShortfallPolicy.LEAVE_OPEN, False), (ShortfallPolicy.SPILL, True)):
+        run = config(
+            models=transferring,
+            transfers_availability_factor=0.0,
+            transfers_shortfall_policy=policy,
+            num_trajectories=1,
+        )
+        (t,) = simulate(run, initial_state(), validate=True).trajectories
+        unmatched = t.diagnostics[TRANSFER_UNMATCHED]
+        assert unmatched.shape == (run.simulation_months, 3)
+        assert unmatched.sum() > 0
+        spilled = t.diagnostics[TRANSFER_SPILLED]
+        assert np.array_equal(spilled, unmatched) if spills else spilled.sum() == 0
