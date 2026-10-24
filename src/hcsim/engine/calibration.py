@@ -42,7 +42,7 @@ from hcsim.engine.ceiling import Ceiling
 from hcsim.engine.config import BackfillSource
 from hcsim.engine.logit import logit_shift
 from hcsim.engine.state import SimulationState
-from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
+from hcsim.model.core.layouts import Buffer, EmployeeColumn, OpeningColumn
 from hcsim.model.interface import EntityModel, GroupRateModel
 
 if TYPE_CHECKING:
@@ -70,6 +70,15 @@ class Calibration:
     #: The evaluation step `t*`, and the fixed point's iterations.
     step: int
     iterations: int
+
+    def shift(self, domain: str, rows: Buffer) -> Floats:
+        """Each row's shift for `domain`: attrition's for an employee, the fill shift for an
+        opening of a fill channel."""
+        if domain == "attrition":
+            out: Floats = self.attrition[rows[:, EmployeeColumn.COST_CENTER].astype(np.int64)]
+            return out
+        filled: Floats = self.fill[rows[:, OpeningColumn.COST_CENTER].astype(np.int64)]
+        return filled
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -151,8 +160,9 @@ def _seed(state: SimulationState, ctx: StepContext) -> _Seed:
     config, models, n = ctx.config, ctx.config.models, state.n_cost_centers
     eligibility = config.resolved_eligibility
     people = state.live_employees
-    p = models.attrition.compute_probability(people)
-    p = eligibility.restrict(ATTRITION, people, np.asarray(p, dtype=np.float64))
+    p = ctx.probabilities(
+        ATTRITION, people, models.attrition.compute_probability(people), record=False, shift=False
+    )
     reqs = state.live_openings
     open_rows = ~is_campus(reqs, ctx)
     eligible = (
@@ -163,17 +173,22 @@ def _seed(state: SimulationState, ctx: StepContext) -> _Seed:
     )
     weights = reqs[:, OpeningColumn.NUM_OPENINGS].astype(np.float64)
     reqs_cc = reqs[:, OpeningColumn.COST_CENTER].astype(np.int64)
-    q = eligibility.restrict(CANCELLATION, reqs, models.cancellation.compute_probability(reqs))
+    q = ctx.probabilities(
+        CANCELLATION, reqs, models.cancellation.compute_probability(reqs), record=False
+    )
     q = np.where((ctx.reserved(reqs) > 0) | ~open_rows, 0.0, q)
     if config.backfill_source is BackfillSource.CLASSIFIER:
         scores = cast(EntityModel, models.backfill).compute_probability(people)
         backfill = _mean(people[:, EmployeeColumn.COST_CENTER], scores, np.ones(len(people)), n)
     else:
         backfill = _rates(cast(GroupRateModel, models.backfill), n)
+    tilted = model_hazards(reqs, ctx)
+    for k, domain in enumerate(CHANNEL_DOMAINS):
+        tilted[:, k] = ctx.tilt(domain, reqs, tilted[:, k], record=False)
     return _Seed(
         p,
         people[:, EmployeeColumn.COST_CENTER].astype(np.int64),
-        model_hazards(reqs, ctx),
+        tilted,
         eligible,
         weights,
         reqs_cc,

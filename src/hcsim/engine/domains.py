@@ -161,6 +161,24 @@ class StepContext:
         result: Probabilities = np.where(self.known.plan.sampled(rows, self.step), p, 0.0)
         return result
 
+    def probabilities(
+        self, domain: str, rows: Buffer, p: Floats, *, record: bool = True, shift: bool = True
+    ) -> Floats:
+        """`domain`'s probabilities for `rows` from its model's `p`, through the fixed pipeline
+        every domain uses, in this order: the planner's tilts (see `planner`), then the
+        rate-calibration logit shift (see `calibration`), then the eligibility rules, then the
+        known-event exclusions, which always win. The sampler draws from what comes out.
+        `record` off leaves the tilts unrecorded, and `shift` off skips the shift, for the
+        calibration that solves it."""
+        p = self.tilt(domain, rows, p, record=record)
+        if shift and self.calibration is not None and domain in CALIBRATED_DOMAINS:
+            p = logit_shift(p, self.calibration.shift(domain, rows))
+        p = self.config.resolved_eligibility.restrict(domain, rows, p)
+        if domain in KNOWN_EXCLUDED:
+            p = self.sampled(rows, p)
+        result: Floats = np.asarray(p, dtype=np.float64)
+        return result
+
     def tilt(self, domain: str, rows: Buffer, p: Floats, *, record: bool = True) -> Floats:
         """`p` for `rows` of `domain` after the planner's tilts in force this step (see
         `planner`), recording the rows they moved and capped unless `record` is off."""
@@ -262,16 +280,12 @@ def _requisitions(n: int, cost_centers: Ints, req_type: int, step: int) -> Buffe
 
 def attrition(state: SimulationState, ctx: StepContext) -> DomainResult:
     """The month's known terminations leave first. Then everyone else draws from the model,
-    shifted by rate calibration where the run calibrates, except those excluded by eligibility
-    or waiting on a known event; under guidance, the known terminations count against their
-    group's quota, and sampling realizes what's left."""
+    through the fixed probability pipeline, so tilts and the rate-calibration shift apply and
+    eligibility and known events always win; under guidance, the known terminations count
+    against their group's quota, and sampling realizes what's left."""
     rows = state.live_employees
     known = ctx.fire_known(rows, EventKind.TERMINATION)
-    p = ctx.tilt(ATTRITION, rows, ctx.config.models.attrition.compute_probability(rows))
-    if ctx.calibration is not None:
-        shift = ctx.calibration.attrition[rows[:, EmployeeColumn.COST_CENTER].astype(np.int64)]
-        p = logit_shift(np.asarray(p, dtype=np.float64), shift)
-    p = ctx.sampled(rows, ctx.config.resolved_eligibility.restrict(ATTRITION, rows, p))
+    p = ctx.probabilities(ATTRITION, rows, ctx.config.models.attrition.compute_probability(rows))
     p = np.where(known, 0.0, p)
     sampled, quotas = draw(
         p, rows, EMPLOYEE, GuidanceCategory.ATTRITION, ctx, ctx.rng(ATTRITION), known
@@ -315,8 +329,7 @@ def _backfill(
         return DomainResult(domain)
     cost_centers = departed[:, EmployeeColumn.COST_CENTER].astype(np.int64)
     scored = _backfill_probability(departed, ctx, model, state.n_cost_centers)
-    p = ctx.tilt(BACKFILL, departed, scored)
-    p = ctx.config.resolved_eligibility.restrict(BACKFILL, departed, p)
+    p = ctx.probabilities(BACKFILL, departed, scored)
     if ctx.pinned:  # replay opens its realized backfills itself
         p = np.zeros(len(departed))
     if not ctx.config.backfill_anticipated_terminations:
@@ -389,8 +402,9 @@ def cancellation(state: SimulationState, ctx: StepContext) -> DomainResult:
     requisitions allow without passing it. Elsewhere each requisition draws on its own.
     """
     reqs = state.live_openings
-    p = ctx.tilt(CANCELLATION, reqs, ctx.config.models.cancellation.compute_probability(reqs))
-    p = ctx.config.resolved_eligibility.restrict(CANCELLATION, reqs, p)
+    p = ctx.probabilities(
+        CANCELLATION, reqs, ctx.config.models.cancellation.compute_probability(reqs)
+    )
     p = np.where(ctx.reserved(reqs) > 0, 0.0, p)  # a reserved requisition waits for its start
     p = np.where(is_campus(reqs, ctx), 0.0, p)  # a campus requisition fills on its schedule
     if ctx.pinned:  # replay closes its realized exits itself
@@ -440,6 +454,12 @@ def weighted_top_k(
 # --- growth -----------------------------------------------------------------------------------
 
 
+#: The domains whose rate calibration shifts, and those whose known events exclude a row from
+#: sampled draws.
+CALIBRATED_DOMAINS: Final = frozenset(
+    {"attrition", "external_fill", "conversion_fill", "transfer_fill"}
+)
+KNOWN_EXCLUDED: Final = frozenset({"attrition", "promotion"})
 #: Backfills the effective ceiling withheld, per cost center: the diagnostic's name.
 BACKFILL_WITHHELD: Final = "backfill_withheld"
 
