@@ -38,7 +38,7 @@ from hcsim.engine.eligibility import Eligibility, EligibilityError, EligibilityR
 from hcsim.engine.fills import FillMix
 from hcsim.engine.gates import Gate
 from hcsim.engine.gates import check as check_gates
-from hcsim.engine.modes import RunMode, rung
+from hcsim.engine.modes import ForecastScope, RunMode, rung
 from hcsim.engine.planner import (
     FillShares,
     FillShareTarget,
@@ -78,11 +78,6 @@ class ConfigError(ValueError):
     def __init__(self, problems: list[str]) -> None:
         self.problems = problems
         super().__init__("invalid simulation configuration:\n  - " + "\n  - ".join(problems))
-
-
-class ForecastScope(StrEnum):
-    HEADCOUNT = "hcf"
-    HEADCOUNT_AND_SBC = "hcf+sbc"
 
 
 class BackfillSource(StrEnum):

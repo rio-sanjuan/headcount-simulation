@@ -6,7 +6,7 @@ so a regression can be traced to the input that caused it:
 
 | Mode | Pinned | Isolates |
 |---|---|---|
-| `replay` | movements, volumes, and quota | orchestration, data fidelity, and the Financial Layer |
+| `replay` | movements, volumes, and quota | orchestration and data fidelity |
 | `guided_actuals` | volumes and quota | quota sampling, given correct volumes |
 | `guided_forecast` | quota | the guidance forecast |
 | `unguided` | nothing | the domain models' own rates |
@@ -25,6 +25,13 @@ so a regression can be traced to the input that caused it:
 - it **replays history** when movements are pinned;
 - it **needs actuals**, and so a closed window, when volumes are pinned;
 - it **releases** the one pin the rung above holds and it doesn't.
+
+**The forecast-scope axis.** A run also has a forecast scope, `hcf` for headcount alone or
+`hcf+sbc` for headcount and SBC, so a study sits in one cell of rung by scope (`Cell`). A cell
+computes SBC at `hcf+sbc` alone. Its SBC can be scored against the ledger only where the rung
+needs actuals, so the window is closed. It isolates its rung's inputs, and replay at `hcf+sbc`
+isolates the Financial Layer too, since with every upstream input pinned, any gap in SBC is
+the layer's own.
 
 **Import-time checks.** The ladder is checked when this module is imported (`check_ladder`):
 every mode appears once, the top rung pins everything and the bottom nothing, and each rung pins
@@ -51,6 +58,13 @@ class RunMode(StrEnum):
     UNGUIDED = "unguided"
 
 
+class ForecastScope(StrEnum):
+    """Whether a run computes headcount alone, or headcount and SBC."""
+
+    HEADCOUNT = "hcf"
+    HEADCOUNT_AND_SBC = "hcf+sbc"
+
+
 class Pin(StrEnum):
     """An input a run mode holds at its realized value."""
 
@@ -69,7 +83,8 @@ class Rung:
 
     mode: RunMode
     pins: frozenset[Pin]
-    isolates: str
+    #: What a regression at this rung can be traced to.
+    isolates: tuple[str, ...]
 
     @property
     def reads_guidance(self) -> bool:
@@ -96,15 +111,15 @@ LADDER: Final[tuple[Rung, ...]] = (
     Rung(
         RunMode.REPLAY,
         frozenset({Pin.MOVEMENTS, Pin.VOLUMES, Pin.QUOTA}),
-        "orchestration, data fidelity, and the Financial Layer",
+        ("orchestration", "data fidelity"),
     ),
     Rung(
         RunMode.GUIDED_ACTUALS,
         frozenset({Pin.VOLUMES, Pin.QUOTA}),
-        "quota sampling, given correct volumes",
+        ("quota sampling, given correct volumes",),
     ),
-    Rung(RunMode.GUIDED_FORECAST, frozenset({Pin.QUOTA}), "the guidance forecast"),
-    Rung(RunMode.UNGUIDED, frozenset(), "the domain models' own rates"),
+    Rung(RunMode.GUIDED_FORECAST, frozenset({Pin.QUOTA}), ("the guidance forecast",)),
+    Rung(RunMode.UNGUIDED, frozenset(), ("the domain models' own rates",)),
 )
 
 
@@ -137,6 +152,47 @@ def releases(mode: RunMode) -> Pin | None:
         return None
     (released,) = LADDER[k - 1].pins - LADDER[k].pins
     return released
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One rung at one forecast scope."""
+
+    rung: Rung
+    scope: ForecastScope
+
+    @property
+    def computes_sbc(self) -> bool:
+        return self.scope is ForecastScope.HEADCOUNT_AND_SBC
+
+    @property
+    def scores_sbc(self) -> bool:
+        """Whether its SBC can be scored against the reference ledger: computed, over a window
+        with actuals."""
+        return self.computes_sbc and self.rung.needs_actuals
+
+    @property
+    def isolates(self) -> str:
+        parts = self.rung.isolates
+        if self.computes_sbc and self.rung.replays_history:
+            parts = (*parts, "the Financial Layer")
+        return listed(parts)
+
+
+def listed(parts: Sequence[str]) -> str:
+    """`a`, `a and b`, or `a, b, and c`."""
+    if len(parts) < 3:
+        return " and ".join(parts)
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
+
+
+def cell(mode: RunMode | str, scope: ForecastScope | str) -> Cell:
+    """The cell of `mode`'s rung at `scope`."""
+    return Cell(rung(mode), ForecastScope(scope))
+
+
+#: Every cell, rung by rung, headcount alone first.
+CELLS: Final = tuple(Cell(r, s) for r in LADDER for s in ForecastScope)
 
 
 def rung(mode: RunMode | str) -> Rung:

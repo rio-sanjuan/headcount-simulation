@@ -136,6 +136,7 @@ def test_the_provenance_names_every_input(guided: StudyRun, inputs: tuple[Path, 
         "11",
         "2026-01-01",
     )
+    assert p["isolates"] == "the guidance forecast"  # its cell of rung by scope
 
 
 def test_a_profile_can_declare_capacity_caps(inputs: tuple[Path, Path]) -> None:

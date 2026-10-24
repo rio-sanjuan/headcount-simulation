@@ -21,7 +21,7 @@ def test_each_rung_pins_one_input_fewer_than_the_one_above() -> None:
         (M.UNGUIDED, set()),
     ]
     assert [releases(m) for m in M] == [None, P.MOVEMENTS, P.VOLUMES, P.QUOTA]
-    assert rung("guided_forecast").isolates == "the guidance forecast"
+    assert rung("guided_forecast").isolates == ("the guidance forecast",)
 
 
 def test_each_rungs_other_properties_follow_from_its_pins() -> None:
@@ -40,9 +40,9 @@ def test_a_ladder_that_doesnt_hold_together_is_refused() -> None:
     assert check_ladder(LADDER) == []
     everything = frozenset(Pin)
     broken = (
-        Rung(M.REPLAY, frozenset({P.MOVEMENTS}), ""),
-        Rung(M.GUIDED_ACTUALS, everything, ""),
-        Rung(M.GUIDED_ACTUALS, frozenset({P.QUOTA}), ""),
+        Rung(M.REPLAY, frozenset({P.MOVEMENTS}), ()),
+        Rung(M.GUIDED_ACTUALS, everything, ()),
+        Rung(M.GUIDED_ACTUALS, frozenset({P.QUOTA}), ()),
     )
     assert check_ladder(broken) == [
         "the ladder is missing ['guided_forecast', 'unguided']",
@@ -53,10 +53,10 @@ def test_a_ladder_that_doesnt_hold_together_is_refused() -> None:
         "guided_actuals must pin guided_actuals's pins less exactly one",
     ]
     skipping = (
-        Rung(M.REPLAY, everything, ""),
-        Rung(M.GUIDED_ACTUALS, frozenset({P.QUOTA}), ""),  # releases two at once
-        Rung(M.GUIDED_FORECAST, frozenset({P.QUOTA}), ""),
-        Rung(M.UNGUIDED, frozenset(), ""),
+        Rung(M.REPLAY, everything, ()),
+        Rung(M.GUIDED_ACTUALS, frozenset({P.QUOTA}), ()),  # releases two at once
+        Rung(M.GUIDED_FORECAST, frozenset({P.QUOTA}), ()),
+        Rung(M.UNGUIDED, frozenset(), ()),
     )
     assert check_ladder(skipping) == [
         "guided_actuals must pin replay's pins less exactly one",
@@ -72,3 +72,23 @@ def test_the_configuration_reads_the_ladder() -> None:
         config(run_mode="unguided", guidance=guidance({"attrition": {"CC-01": 1.0}}))
     assert config(guidance=guidance({"attrition": {"CC-01": 1.0}})).run_mode is M.GUIDED_FORECAST
     assert config().run_mode is M.UNGUIDED
+
+
+def test_each_cell_of_rung_by_scope_says_what_it_computes_and_isolates() -> None:
+    from hcsim.engine.modes import CELLS, ForecastScope, cell, listed
+
+    assert len(CELLS) == 8
+    replay_sbc, replay_hcf = cell("replay", "hcf+sbc"), cell(M.REPLAY, ForecastScope.HEADCOUNT)
+    assert (replay_sbc.computes_sbc, replay_sbc.scores_sbc) == (True, True)
+    assert (replay_hcf.computes_sbc, replay_hcf.scores_sbc) == (False, False)
+    # With everything upstream pinned, a gap in SBC is the Financial Layer's own.
+    assert replay_sbc.isolates == "orchestration, data fidelity, and the Financial Layer"
+    assert replay_hcf.isolates == "orchestration and data fidelity"
+    assert cell("guided_actuals", "hcf+sbc").scores_sbc  # a closed window has actuals
+    forecast = cell("guided_forecast", "hcf+sbc")
+    assert (forecast.computes_sbc, forecast.scores_sbc) == (True, False)
+    assert forecast.isolates == "the guidance forecast"
+    assert listed(["a"]) == "a"
+    from hcsim.engine.config import ForecastScope as FromConfig
+
+    assert FromConfig is ForecastScope  # the configuration's scope is the axis's
