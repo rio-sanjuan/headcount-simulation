@@ -59,6 +59,7 @@ from hcsim.engine.settings import settings
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.alignment_builders import Shape, synthetic
 from hcsim.model.core.schema import COST_CENTER
+from hcsim.model.data.subset import SubsetError, SubsetSpec
 from hcsim.studies.evaluators import EVALUATORS
 
 #: Every setting path an arm may override.
@@ -266,6 +267,9 @@ class StudyProfile(BaseModel):
     months: int = Field(default=12, ge=1)
     #: The first simulated month. Defaults to the month after the world's last snapshot.
     run_date: dt.date | None = None
+    #: The part of the population the study runs on its own, as a subset's rules in raw labels
+    #: (see `model.data.subset`); everyone, with none.
+    subset: dict[str, list[str]] = Field(default_factory=dict)
     #: Settings the whole study overrides, by `group.key` path, as the supply rule.
     settings: dict[str, Any] = Field(default_factory=dict)
     #: The plan the study aligns to, and which valve it drives.
@@ -282,6 +286,15 @@ class StudyProfile(BaseModel):
     #: The alternatives the study compares, declared and in groups.
     arms: list[Arm] = Field(default_factory=list)
     arm_groups: list[ArmGroup] = Field(default_factory=list)
+
+    @field_validator("subset")
+    @classmethod
+    def _subset(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        try:
+            SubsetSpec({c: frozenset(v) for c, v in value.items()})
+        except SubsetError as error:
+            raise ValueError(str(error)) from None
+        return value
 
     @field_validator("settings")
     @classmethod
