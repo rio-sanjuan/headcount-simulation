@@ -19,6 +19,24 @@ Each arm simulates its own copy of the seed, so arms differ only by what they ov
 arm in order: the declared and expanded arms of a profile with arms, or the profile itself.
 The provenance it records names every input, so a scorecard row can be traced to the exact
 world, guidance, schema, and inputs behind it.
+
+**Window closure.** A study's months are wholly open, partially closed, or wholly closed by
+whether the world holds their actuals (`window_closure`), up to its last snapshot.
+
+**Deferred variants and recorded skips.** An arm whose mode reads the window's actuals can't run
+until the window is wholly closed; it's **deferred**, recorded with when it can run, rather than
+failing the study. An evaluator with nothing to score, such as plan alignment for a study with
+no plan, is **skipped**, with its reason recorded.
+
+**Pass A and Pass B.** With a screen, pass A runs every compared arm at the screen's
+trajectories and ranks them by its metric, lower first; the arms it doesn't keep are skipped,
+each with its rank. Pass B runs the null arm, the kept arms, and the reference arms at the
+study's full size. Without a screen, pass B runs every arm.
+
+**Metadata, persistence, and the timing ledger.** A study's run records its specification's
+digest, closure, passes, skips, deferrals, and provenance (`StudyRun.metadata`), and a timing
+ledger of how long preflight and each arm's simulation and evaluation took. `save` writes the
+metadata and every arm's metrics to a directory.
 """
 
 from __future__ import annotations
@@ -26,14 +44,17 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from importlib.metadata import version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 import duckdb
+import pandas as pd
 
 from hcsim.engine.alignment import AlignmentMethod
 from hcsim.engine.config import AwardSettings, ConfigError, ForecastScope, SimulationConfig
@@ -92,6 +113,8 @@ class Inputs:
     #: The input kinds the study reads.
     kinds: tuple[str, ...]
     world: Mapping[str, str]
+    #: The month-end the world holds actuals through: its last snapshot.
+    actuals_through: dt.date
 
 
 @dataclass(frozen=True)
@@ -108,14 +131,77 @@ class Preflight:
         return not self.problems
 
 
+class Closure(StrEnum):
+    """Whether a study's months have actuals to score."""
+
+    OPEN = "wholly_open"
+    PARTIAL = "partially_closed"
+    CLOSED = "wholly_closed"
+
+
+def window_closure(run_date: dt.date, months: int, actuals_through: dt.date) -> Closure:
+    """The closure of the `months` from `run_date`'s, against actuals through a month-end."""
+    first = pd.Period(run_date, freq="M")
+    last_actual = pd.Period(actuals_through, freq="M")
+    if first > last_actual:
+        return Closure.OPEN
+    if first + months - 1 <= last_actual:
+        return Closure.CLOSED
+    return Closure.PARTIAL
+
+
+@dataclass(frozen=True)
+class Skip:
+    """An arm or evaluator that didn't run, and why."""
+
+    what: str
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Deferred:
+    """An arm that can't run yet, and when it can."""
+
+    arm: str
+    reason: str
+
+
+def deferral(arm: Arm, mode: str, closure: Closure) -> Deferred | None:
+    """Why `arm` can't run yet under `mode` in a window of `closure`, or None if it can."""
+    if rung(mode).needs_actuals and closure is not Closure.CLOSED:
+        return Deferred(
+            arm.name,
+            f"its mode, {mode}, reads the window's actuals, which is {closure.value}; it runs once "
+            "the window is wholly closed",
+        )
+    return None
+
+
+#: What each evaluator needs from a study, and the reason it's skipped without it.
+NEEDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
+    {"plan_alignment": ("plan", "the study has no plan to score against")}
+)
+
+
+@dataclass(frozen=True)
+class Timing:
+    """One phase of the run, and how long it took."""
+
+    phase: str
+    arm: str
+    seconds: float
+
+
 @dataclass(frozen=True)
 class ArmRun:
-    """One arm's run: its configuration, results, and metrics."""
+    """One arm's run: its configuration, results, and metrics, and the pass it ran in."""
 
     arm: Arm
     config: SimulationConfig
     result: SimulationResult
     metrics: tuple[Metric, ...]
+    pass_name: str = "B"
 
     @property
     def passed(self) -> bool:
@@ -133,10 +219,33 @@ class StudyRun:
     provenance: dict[str, str]
     #: Every arm's run, in order; the study's own run first is its null arm, or the profile.
     arms: tuple[ArmRun, ...] = ()
+    closure: Closure = Closure.OPEN
+    #: Pass A's runs, ranked, best first; none without a screen.
+    screened: tuple[ArmRun, ...] = ()
+    skips: tuple[Skip, ...] = ()
+    deferred: tuple[Deferred, ...] = ()
+    timing: tuple[Timing, ...] = ()
 
     @property
     def passed(self) -> bool:
         return all(m.passed for m in self.metrics) and all(a.passed for a in self.arms)
+
+    def metadata(self) -> dict[str, Any]:
+        """Everything about the run but its metrics, as plain data."""
+        return {
+            "profile": self.profile.name,
+            "spec": self.profile.spec().digest(),
+            "closure": self.closure.value,
+            "passed": self.passed,
+            "arms": [
+                {"arm": a.arm.name, "pass": a.pass_name, "passed": a.passed}
+                for a in (*self.screened, *self.arms)
+            ],
+            "skips": [dataclasses.asdict(s) for s in self.skips],
+            "deferred": [dataclasses.asdict(d) for d in self.deferred],
+            "timing": [dataclasses.asdict(t) for t in self.timing],
+            "provenance": dict(self.provenance),
+        }
 
 
 def _world_identity(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
@@ -250,6 +359,7 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             except (OSError, AlignmentError) as error:
                 return Preflight((f"can't build the plan: {error}",))
         world_identity = _world_identity(con)
+        actuals_through = snapshot_before(con, dt.date.max)
     configs = {}
     for arm in _arms(profile):
         try:
@@ -259,7 +369,17 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
     if problems:
         return Preflight(tuple(problems))
     inputs = Inputs(
-        schema, run_date, fitted, state, seed, artifact, plan, lowered, kinds, world_identity
+        schema,
+        run_date,
+        fitted,
+        state,
+        seed,
+        artifact,
+        plan,
+        lowered,
+        kinds,
+        world_identity,
+        actuals_through,
     )
     return Preflight((), inputs, MappingProxyType(configs))
 
@@ -283,16 +403,61 @@ def _arm_config(
 
 
 def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) -> StudyRun:
+    timing: list[Timing] = []
+    started = time.perf_counter()
     checked = preflight(profile, world, guidance)
+    timing.append(Timing("preflight", "", time.perf_counter() - started))
     if not checked.ok or checked.inputs is None:
         raise StudyError(list(checked.problems))
     inputs = checked.inputs
-    runs = []
+    closure = window_closure(inputs.run_date, profile.months, inputs.actuals_through)
+    skips, deferred, runnable = [], [], []
     for arm in _arms(profile):
+        mode = (arm.mode or profile.mode).value
+        waiting = deferral(arm, mode, closure)
+        if waiting is None:
+            runnable.append(arm)
+        else:
+            deferred.append(waiting)
+    if not runnable:
+        raise StudyError([f"nothing can run yet: {d.arm} waits: {d.reason}" for d in deferred])
+    evaluators = []
+    for name in profile.evaluators:
+        need, reason = NEEDS.get(name, ("", ""))
+        if need == "plan" and inputs.plan is None:
+            skips.append(Skip("evaluator", name, reason))
+        else:
+            evaluators.append(name)
+
+    def run(arm: Arm, pass_name: str, trajectories: int | None = None) -> ArmRun:
         config = checked.configs[arm.name]
+        if trajectories is not None:
+            config = dataclasses.replace(config, num_trajectories=trajectories)
+        began = time.perf_counter()
         result = simulate(config, inputs.state)
-        metrics = tuple(m for name in profile.evaluators for m in EVALUATORS[name](result))
-        runs.append(ArmRun(arm, config, result, metrics))
+        simulated = time.perf_counter()
+        metrics = tuple(m for name in evaluators for m in EVALUATORS[name](result))
+        timing.append(Timing(f"simulate {pass_name}", arm.name, simulated - began))
+        timing.append(Timing(f"evaluate {pass_name}", arm.name, time.perf_counter() - simulated))
+        return ArmRun(arm, config, result, metrics, pass_name)
+
+    screened: list[ArmRun] = []
+    keep = runnable
+    if profile.screen is not None:
+        screen = profile.screen
+        compared = [a for a in runnable if not (a.null or a.reference)]
+        screened = sorted(
+            (run(a, "A", screen.trajectories) for a in compared),
+            key=lambda r: _ranked(r, screen.rank_by),
+        )
+        kept = {r.arm.name for r in screened[: screen.keep]}
+        n = len(screened)
+        for rank, r in enumerate(screened, start=1):
+            if r.arm.name not in kept:
+                out = f"screened out in pass A: ranked {rank} of {n} by {screen.rank_by}"
+                skips.append(Skip("arm", r.arm.name, out))
+        keep = [a for a in runnable if a.null or a.reference or a.name in kept]
+    runs = [run(arm, "B") for arm in keep]
     first = runs[0]
     provenance = dict(inputs.world) | {
         "hcsim_version": version("hcsim"),
@@ -315,4 +480,43 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         first.metrics,
         provenance,
         tuple(runs) if profile.expanded_arms() else (),
+        closure,
+        tuple(screened),
+        tuple(skips),
+        tuple(deferred),
+        tuple(timing),
     )
+
+
+def _ranked(run: ArmRun, rank_by: str) -> float:
+    evaluator, name = rank_by.split(".", 1)
+    for m in run.metrics:
+        if m.evaluator == evaluator and m.name == name:
+            return m.value
+    raise StudyError([f"arm {run.arm.name} has no metric {rank_by} to rank by"])
+
+
+def save(run: StudyRun, directory: Path) -> Path:
+    """Write the run's metadata, `study.json`, and every arm's metrics, `metrics.csv`, one row
+    per pass, arm, evaluator, and metric. Returns the directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "study.json").write_text(
+        json.dumps(run.metadata(), indent=2, sort_keys=True, default=str) + "\n"
+    )
+    arms = (*run.screened, *(run.arms or (ArmRun(ITSELF, run.config, run.result, run.metrics),)))
+    rows = [
+        {
+            "pass": a.pass_name,
+            "arm": a.arm.name,
+            "evaluator": m.evaluator,
+            "metric": m.name,
+            "value": m.value,
+            "threshold": m.threshold,
+            "passed": m.passed,
+        }
+        for a in arms
+        for m in a.metrics
+    ]
+    columns = ["pass", "arm", "evaluator", "metric", "value", "threshold", "passed"]
+    pd.DataFrame(rows, columns=columns).to_csv(directory / "metrics.csv", index=False)
+    return directory

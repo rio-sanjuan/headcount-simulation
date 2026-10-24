@@ -23,6 +23,11 @@ every combination, in the order the settings are listed, each named for its valu
 `gain[requisitions.supply_gain=0.5]`. Settings a group fixes apply to all of its arms. Arm names,
 declared and expanded, are unique.
 
+**Screening.** A profile with a `screen` runs in two passes: pass A runs every compared arm
+briefly, at the screen's trajectories, and ranks them by one metric, lower first; pass B runs the
+null arm, the screen's best `keep`, and the reference arms at the study's full size. Without a
+screen, every arm runs once, in pass B.
+
 **A frozen specification.** `spec` resolves a profile into a `StudySpec`: the profile with its
 arm groups expanded, immutable, and a digest over it, so a study's record can name exactly what
 it ran. `to_mapping` writes a profile back as plain data, which `from_mapping` reads as the same
@@ -255,6 +260,17 @@ class Tilt(BaseModel):
         return ProbabilityTilt.from_dict(self.model_dump() | {"scope": self.scope})
 
 
+class Screen(BaseModel):
+    """Pass A's screen: every compared arm, briefly, ranked by `rank_by`, lower first."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trajectories: int = Field(ge=1)
+    keep: int = Field(ge=1)
+    #: The metric that ranks the arms, as `evaluator.metric`.
+    rank_by: str = Field(pattern=r"^[a-z_]+\.[A-Za-z0-9_\-]+$")
+
+
 class StudyProfile(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -286,6 +302,8 @@ class StudyProfile(BaseModel):
     #: The alternatives the study compares, declared and in groups.
     arms: list[Arm] = Field(default_factory=list)
     arm_groups: list[ArmGroup] = Field(default_factory=list)
+    #: Pass A's screen of the compared arms; none runs every arm once.
+    screen: Screen | None = None
 
     @field_validator("subset")
     @classmethod
@@ -335,6 +353,14 @@ class StudyProfile(BaseModel):
             raise ValueError(f"arms {twice} set {METHOD} and an alignment override both")
         if METHOD in self.settings:
             raise ValueError(f"the study's method is alignment.method, not settings.{METHOD}")
+        if self.screen is not None:
+            evaluator = self.screen.rank_by.split(".")[0]
+            if evaluator not in self.evaluators:
+                raise ValueError(f"the screen ranks by {evaluator}, which the study doesn't run")
+            if not any(not (a.null or a.reference) for a in arms):
+                raise ValueError("a screen needs compared arms to rank")
+            if self.screen.trajectories >= self.trajectories:
+                raise ValueError("a screen runs fewer trajectories than the study")
         return self
 
     @field_validator("capacity_caps")
