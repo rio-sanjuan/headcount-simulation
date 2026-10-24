@@ -1,7 +1,8 @@
 """Inputs: fit the walking skeleton's domain models from the synthetic warehouse.
 
 Every rate is fitted over the twelve months that end at the seed snapshot, so a run never reads
-the future. The skeleton's models are deliberately simple: constant monthly hazards for
+the future; a window of other months fits the same estimators over them, as scoring a study's
+own window does. The skeleton's models are deliberately simple: constant monthly hazards for
 attrition, external fill, and unfilled exit; one pooled backfill rate; a Poisson growth count
 per cost center; and empirical requisition roles. Per-domain extracts and trained models
 arrive in M3 and M8.3.
@@ -74,10 +75,17 @@ def _role_codes(frame: pd.DataFrame, schema: SimulationSchema) -> np.ndarray:
 
 
 def fit_models(
-    con: duckdb.DuckDBPyConnection, schema: SimulationSchema, run_date: dt.date
+    con: duckdb.DuckDBPyConnection,
+    schema: SimulationSchema,
+    run_date: dt.date,
+    window_months: int = WINDOW_MONTHS,
 ) -> FittedModels:
+    """The domain models, fitted over the `window_months` that end at the snapshot before
+    `run_date`."""
+    if window_months < 1:
+        raise InputError(f"a fit window is at least a month, not {window_months}")
     end = snapshot_before(con, run_date)
-    start = (pd.Period(end, freq="M") - WINDOW_MONTHS).end_time.date()
+    start = (pd.Period(end, freq="M") - window_months).end_time.date()
     window: list[object] = [start, end]
     n = len(schema.vocabulary(COST_CENTER))
     requisitions = _REQUISITIONS.format(cost_center=role_column(con, "req_interval"))
@@ -147,14 +155,14 @@ def fit_models(
         """,
         window,
     ).df()
-    counts = np.zeros((WINDOW_MONTHS, n))
+    counts = np.zeros((window_months, n))
     if len(growth):
         months = pd.to_datetime(growth["month"]).dt.to_period("M")
         offset = np.array([(m - pd.Period(start, freq="M")).n - 1 for m in months])
         codes = schema.encode(COST_CENTER, growth["cost_center"], unknown="unattributed")
         known = codes >= 0
         np.add.at(counts, (offset[known], codes[known]), growth["n"].to_numpy()[known])
-    growth_model = PoissonGrowthModel(n, min_months=6).fit(counts)
+    growth_model = PoissonGrowthModel(n, min_months=min(6, window_months)).fit(counts)
     rates["growth"] = growth_model.pooled
 
     # Roles: every growth requisition up to the snapshot, or every requisition if none.

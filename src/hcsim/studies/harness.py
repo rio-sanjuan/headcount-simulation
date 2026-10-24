@@ -59,7 +59,7 @@ from enum import StrEnum
 from importlib.metadata import version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any
 
 import duckdb
 import pandas as pd
@@ -87,8 +87,9 @@ from hcsim.model.core.guidance import GuidanceArtifactError, GuidanceForecast
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 from hcsim.model.data.population import REGULAR
 from hcsim.model.data.subset import LoweredSubset, SubsetError, SubsetSpec
+from hcsim.studies.actuals import Actuals, resolve
 from hcsim.studies.backends import ModeInputs, mode_inputs, offline_metrics, simulate_arm
-from hcsim.studies.evaluators import EVALUATORS, Metric
+from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS, Evaluator, Metric, Scoring
 from hcsim.studies.inputs import FittedModels, InputError, fit_models
 from hcsim.studies.profile import Arm, Backend, StudyProfile
 from hcsim.studies.resolve import probe, required_kinds
@@ -126,6 +127,8 @@ class Inputs:
     actuals_through: dt.date
     #: What each mode the study's runnable arms run under reads, by mode.
     modes: Mapping[str, ModeInputs] = dataclasses.field(default_factory=dict)
+    #: The window's actuals, the parts the study's evaluators read; none for an open window.
+    actuals: Actuals | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,9 @@ class Preflight:
     configs: Mapping[str, SimulationConfig] = dataclasses.field(default_factory=dict)
     closure: Closure | None = None
     deferred: tuple[Deferred, ...] = ()
+    #: The evaluators the study runs, and those it skips.
+    evaluators: tuple[str, ...] = ()
+    skips: tuple[Skip, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -191,10 +197,26 @@ def deferral(arm: Arm, mode: str, closure: Closure) -> Deferred | None:
     return None
 
 
-#: What each evaluator needs from a study, and the reason it's skipped without it.
-NEEDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
-    {"plan_alignment": ("plan", "the study has no plan to score against")}
-)
+def choose_evaluators(
+    profile: StudyProfile, closure: Closure
+) -> tuple[list[Evaluator], list[Skip]]:
+    """The profile's evaluators the study runs, and those it skips, each with its reason."""
+    registry = OFFLINE_EVALUATORS if profile.backend is Backend.OFFLINE else EVALUATORS
+    chosen, skips = [], []
+    for name in profile.evaluators:
+        evaluator = registry[name]
+        reason = evaluator.skipped(
+            plan=profile.plan is not None,
+            sbc=cell(profile.mode.value, profile.scope).computes_sbc,
+            trajectories=profile.trajectories,
+            closed=closure is Closure.CLOSED,
+            subset=bool(profile.subset),
+        )
+        if reason is None:
+            chosen.append(evaluator)
+        else:
+            skips.append(Skip("evaluator", name, reason))
+    return chosen, skips
 
 
 @dataclass(frozen=True)
@@ -350,10 +372,12 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             if a.mode is not None and (d := deferral(a, a.mode.value, closure)) is not None
         ]
         runnable = [a for a in _arms(profile) if a.name not in {d.arm for d in deferred}]
+        chosen, skips = choose_evaluators(profile, closure)
         kinds = required_kinds(
             profile.mode.value,
             profile.scope,
             plan_path=profile.plan is not None and profile.plan.path is not None,
+            evaluator_kinds=[k for e in chosen for k in e.kinds],
         )
         problems += probe(con, kinds, REGULAR, role_column(con, "req_interval"))
         subset, lowered = None, None
@@ -412,10 +436,24 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         for mode in dict.fromkeys((a.mode or profile.mode).value for a in runnable):
             try:
                 modes[mode] = mode_inputs(
-                    con, mode, schema, state, run_date, profile.months, base.awards
+                    con,
+                    mode,
+                    schema,
+                    state,
+                    run_date,
+                    profile.months,
+                    base.awards,
+                    profile.replay_lag,
                 )
             except (ValueError, duckdb.Error) as error:
                 problems.append(f"can't resolve the inputs {mode} reads: {error}")
+        parts = list(dict.fromkeys(p for e in chosen for p in e.actuals))
+        actuals = None
+        if parts:
+            try:
+                actuals = resolve(con, schema, run_date, profile.months, parts)
+            except (ValueError, duckdb.Error) as error:
+                problems.append(f"can't resolve the window's actuals: {error}")
     if problems:
         return Preflight(tuple(problems))
     configs = {}
@@ -439,8 +477,17 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         world_identity,
         actuals_through,
         MappingProxyType(modes),
+        actuals,
     )
-    return Preflight((), inputs, MappingProxyType(configs), closure, tuple(deferred))
+    return Preflight(
+        (),
+        inputs,
+        MappingProxyType(configs),
+        closure,
+        tuple(deferred),
+        tuple(e.name for e in chosen),
+        tuple(skips),
+    )
 
 
 def _arm_config(
@@ -478,14 +525,8 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
     inputs = checked.inputs
     closure = checked.closure or Closure.OPEN
     runnable = [a for a in _arms(profile) if a.name in checked.configs]
-    skips: list[Skip] = []
-    evaluators = []
-    for name in profile.evaluators:
-        need, reason = NEEDS.get(name, ("", ""))
-        if need == "plan" and inputs.plan is None:
-            skips.append(Skip("evaluator", name, reason))
-        else:
-            evaluators.append(name)
+    skips = list(checked.skips)
+    evaluators = checked.evaluators
 
     def run(arm: Arm, pass_name: str, trajectories: int | None = None) -> ArmRun:
         config = checked.configs[arm.name]
@@ -493,12 +534,13 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             config = dataclasses.replace(config, num_trajectories=trajectories)
         began = time.perf_counter()
         if profile.backend is Backend.OFFLINE:
-            metrics = offline_metrics(evaluators, inputs.fitted)
+            metrics = offline_metrics(evaluators, Scoring(None, inputs.fitted, inputs.actuals))
             timing.append(Timing(f"evaluate {pass_name}", arm.name, time.perf_counter() - began))
             return ArmRun(arm, config, None, metrics, pass_name)
         result = simulate_arm(config, inputs.state, inputs.modes[config.run_mode or ""])
         simulated = time.perf_counter()
-        metrics = tuple(m for name in evaluators for m in EVALUATORS[name](result))
+        scoring = Scoring(result, inputs.fitted, inputs.actuals)
+        metrics = tuple(m for name in evaluators for m in EVALUATORS[name].score(scoring))
         timing.append(Timing(f"simulate {pass_name}", arm.name, simulated - began))
         timing.append(Timing(f"evaluate {pass_name}", arm.name, time.perf_counter() - simulated))
         return ArmRun(arm, config, result, metrics, pass_name)
