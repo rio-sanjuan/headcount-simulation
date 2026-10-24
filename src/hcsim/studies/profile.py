@@ -59,13 +59,14 @@ from pydantic import (
 
 from hcsim.engine.alignment import AlignmentMethod, MethodChoice
 from hcsim.engine.config import ForecastScope
+from hcsim.engine.modes import rung
 from hcsim.engine.planner import FillShareTarget, PlannerError, PlannerScope, ProbabilityTilt
 from hcsim.engine.settings import settings
 from hcsim.model.core.alignment import AlignmentTarget
 from hcsim.model.core.alignment_builders import Shape, synthetic
 from hcsim.model.core.schema import COST_CENTER
 from hcsim.model.data.subset import SubsetError, SubsetSpec
-from hcsim.studies.evaluators import EVALUATORS
+from hcsim.studies.evaluators import EVALUATORS, OFFLINE_EVALUATORS
 
 #: Every setting path an arm may override.
 SETTING_PATHS: Final = frozenset(settings())
@@ -87,10 +88,19 @@ class ProfileError(ValueError):
 
 
 class Mode(StrEnum):
-    """The run modes the skeleton supports. `replay` and `guided_actuals` arrive in M8.1."""
+    """A study's rung of the run-mode ladder (see `engine.modes`)."""
 
+    REPLAY = "replay"
+    GUIDED_ACTUALS = "guided_actuals"
     GUIDED_FORECAST = "guided_forecast"
     UNGUIDED = "unguided"
+
+
+class Backend(StrEnum):
+    """How a study's arms produce results: by simulating, or offline from their inputs."""
+
+    SIMULATION = "simulation"
+    OFFLINE = "offline"
 
 
 def _known_paths(paths: Any) -> None:
@@ -277,6 +287,7 @@ class StudyProfile(BaseModel):
     name: str = Field(min_length=1)
     scope: ForecastScope = ForecastScope.HEADCOUNT_AND_SBC
     mode: Mode = Mode.GUIDED_FORECAST
+    backend: Backend = Backend.SIMULATION
     #: Studies are always seeded, so every study is reproducible.
     seed: int = Field(ge=0)
     trajectories: int = Field(default=20, ge=1)
@@ -326,9 +337,10 @@ class StudyProfile(BaseModel):
     @field_validator("evaluators")
     @classmethod
     def _evaluators(cls, value: list[str]) -> list[str]:
-        unknown = sorted(set(value) - set(EVALUATORS))
+        known = {*EVALUATORS, *OFFLINE_EVALUATORS}
+        unknown = sorted(set(value) - known)
         if unknown:
-            raise ValueError(f"no evaluators {unknown}; known: {', '.join(EVALUATORS)}")
+            raise ValueError(f"no evaluators {unknown}; known: {', '.join(sorted(known))}")
         return value
 
     @model_validator(mode="after")
@@ -353,6 +365,22 @@ class StudyProfile(BaseModel):
             raise ValueError(f"arms {twice} set {METHOD} and an alignment override both")
         if METHOD in self.settings:
             raise ValueError(f"the study's method is alignment.method, not settings.{METHOD}")
+        if self.backend is Backend.OFFLINE and (arms or self.screen is not None):
+            raise ValueError(
+                "an offline study scores its inputs, which every arm shares, so it has no arms "
+                "or screen"
+            )
+        modes = [self.mode.value, *(a.mode.value for a in arms if a.mode is not None)]
+        whole = sorted({m for m in modes if rung(m).needs_actuals})
+        if self.subset and whole:
+            raise ValueError(f"modes {whole} read the whole world's actuals, so take no subset")
+        registry = OFFLINE_EVALUATORS if self.backend is Backend.OFFLINE else EVALUATORS
+        foreign = sorted(set(self.evaluators) - set(registry))
+        if foreign:
+            raise ValueError(
+                f"a study on the {self.backend.value} backend runs {self.backend.value} "
+                f"evaluators, which {foreign} aren't"
+            )
         if self.screen is not None:
             evaluator = self.screen.rank_by.split(".")[0]
             if evaluator not in self.evaluators:
@@ -380,6 +408,7 @@ class StudyProfile(BaseModel):
 
     @property
     def guided(self) -> bool:
+        """Whether the study reads a guidance artifact it's given: a guided forecast."""
         return self.mode is Mode.GUIDED_FORECAST
 
     def probability_tilts(self) -> tuple[ProbabilityTilt, ...]:

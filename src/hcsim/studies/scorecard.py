@@ -86,7 +86,7 @@ def run_record(run: StudyRun, seconds: float) -> dict[str, Any]:
         "profile": run.profile.model_dump(mode="json"),
         "provenance": run.provenance,
         "passed": run.passed,
-        "results_digest": results_digest(run.result),
+        "results_digest": results_digest(run.result) if run.result is not None else "",
         "seed": {
             "snapshot_date": seed.snapshot_date.isoformat(),
             "employees": seed.employees_seeded,

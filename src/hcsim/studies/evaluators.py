@@ -38,6 +38,7 @@ from hcsim.engine.alignment import AlignmentMethod
 from hcsim.engine.ceiling import Ceiling
 from hcsim.engine.loop import HEADCOUNT_IDENTITY, OPENING_IDENTITY, SimulationResult
 from hcsim.model.core.schema import COST_CENTER
+from hcsim.studies.inputs import FittedModels
 
 #: The skeleton's identities, as flow symbol to sign. They grow as M4 adds flows.
 
@@ -258,7 +259,20 @@ def _valves_in_order(column: pd.Series) -> list[str]:
     return [v for v in VALVE_LABELS if v in present]
 
 
-#: Every evaluator a profile can name.
+#: Every evaluator a profile can name that scores a simulation's results.
 EVALUATORS: Final = MappingProxyType(
     {"invariants": invariants, "summary": summary, "plan_alignment": plan_alignment}
 )
+
+
+def fitted_rates(fitted: FittedModels) -> list[Metric]:
+    """The pooled rates the models were fitted at, over the year before the run: an offline
+    evaluator, which needs no simulation. Reported, never gated."""
+    return [
+        Metric("fitted_rates", f"{name}_rate", float(value), None, "pooled over the fit window")
+        for name, value in sorted(fitted.rates.items())
+    ]
+
+
+#: Every evaluator that scores a study's inputs offline, with no simulation.
+OFFLINE_EVALUATORS: Final = MappingProxyType({"fitted_rates": fitted_rates})

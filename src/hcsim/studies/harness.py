@@ -3,17 +3,24 @@
 **Preflight** (`preflight`) checks everything a study needs before anything simulates, and
 reports every problem at once rather than stopping at the first:
 
-- the world, and a guidance artifact where the mode needs one and none where it doesn't;
+- the world, and a guidance artifact where a mode needs one and none where none does: a guided
+  forecast reads the artifact it's given, and guided actuals the window's realized totals;
+- that the study's own mode can run in its window: one that reads the window's actuals needs
+  it wholly closed;
 - that the world can serve every input kind the study needs (`resolve.probe`);
 - the profile's subset, lowered through the world's schema;
 - the plan, loaded or built;
-- the fitted models and the seed;
+- the fitted models, the seed, and each mode's inputs (`backends.mode_inputs`);
 - and every arm's configuration, its overrides and alignment method applied, each refused with
   the arm's name where it doesn't validate.
 
 **Inputs resolved once.** Every arm reads one set of inputs (`Inputs`): one schema, one run date,
-one set of fitted models, one seed, lowered to the subset, one guidance artifact, and one plan.
-Each arm simulates its own copy of the seed, so arms differ only by what they override.
+one set of fitted models, one seed, lowered to the subset, one guidance artifact, one plan, and
+one set of inputs for each mode its arms run under. Each arm simulates its own copy of the seed,
+so arms differ only by their mode, if they're reference arms, and what they override.
+
+**Backends.** On the in-simulation backend, each arm simulates under its mode; on the offline
+backend, the study is scored from its inputs alone, with no simulation (see `backends`).
 
 `run_study` runs preflight, refuses the study with every problem it found, and then runs each
 arm in order: the declared and expanded arms of a profile with arms, or the profile itself.
@@ -23,10 +30,11 @@ world, guidance, schema, and inputs behind it.
 **Window closure.** A study's months are wholly open, partially closed, or wholly closed by
 whether the world holds their actuals (`window_closure`), up to its last snapshot.
 
-**Deferred variants and recorded skips.** An arm whose mode reads the window's actuals can't run
-until the window is wholly closed; it's **deferred**, recorded with when it can run, rather than
-failing the study. An evaluator with nothing to score, such as plan alignment for a study with
-no plan, is **skipped**, with its reason recorded.
+**Deferred variants and recorded skips.** A reference arm whose mode reads the window's actuals
+can't run until the window is wholly closed; it's **deferred**, recorded with when it can run,
+rather than failing the study. A study whose own mode can't run yet is refused in preflight.
+An evaluator with nothing to score, such as plan alignment for a study with no plan, is
+**skipped**, with its reason recorded.
 
 **Pass A and Pass B.** With a screen, pass A runs every compared arm at the screen's
 trajectories and ranks them by its metric, lower first; the arms it doesn't keep are skipped,
@@ -58,8 +66,8 @@ import pandas as pd
 
 from hcsim.engine.alignment import AlignmentMethod
 from hcsim.engine.config import AwardSettings, ConfigError, ForecastScope, SimulationConfig
-from hcsim.engine.loop import SimulationResult, simulate
-from hcsim.engine.modes import cell, rung
+from hcsim.engine.loop import SimulationResult
+from hcsim.engine.modes import RunMode, cell, rung
 from hcsim.engine.seeding import (
     SeedingError,
     SeedReport,
@@ -79,9 +87,10 @@ from hcsim.model.core.guidance import GuidanceArtifactError, GuidanceForecast
 from hcsim.model.core.schema import COST_CENTER, SimulationSchema
 from hcsim.model.data.population import REGULAR
 from hcsim.model.data.subset import LoweredSubset, SubsetError, SubsetSpec
+from hcsim.studies.backends import ModeInputs, mode_inputs, offline_metrics, simulate_arm
 from hcsim.studies.evaluators import EVALUATORS, Metric
 from hcsim.studies.inputs import FittedModels, InputError, fit_models
-from hcsim.studies.profile import Arm, StudyProfile
+from hcsim.studies.profile import Arm, Backend, StudyProfile
 from hcsim.studies.resolve import probe, required_kinds
 
 #: Every setting, by its `group.key` path.
@@ -115,16 +124,20 @@ class Inputs:
     world: Mapping[str, str]
     #: The month-end the world holds actuals through: its last snapshot.
     actuals_through: dt.date
+    #: What each mode the study's runnable arms run under reads, by mode.
+    modes: Mapping[str, ModeInputs] = dataclasses.field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Preflight:
-    """What preflight found: every problem, and when there are none, the resolved inputs and
-    each arm's configuration."""
+    """What preflight found: every problem, and when there are none, the resolved inputs, each
+    runnable arm's configuration, the window's closure, and the arms deferred until it closes."""
 
     problems: tuple[str, ...]
     inputs: Inputs | None = None
     configs: Mapping[str, SimulationConfig] = dataclasses.field(default_factory=dict)
+    closure: Closure | None = None
+    deferred: tuple[Deferred, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -195,17 +208,25 @@ class Timing:
 
 @dataclass(frozen=True)
 class ArmRun:
-    """One arm's run: its configuration, results, and metrics, and the pass it ran in."""
+    """One arm's run: its configuration, results, and metrics, and the pass it ran in. On the
+    offline backend, an arm has no simulation's results, only its metrics."""
 
     arm: Arm
     config: SimulationConfig
-    result: SimulationResult
+    result: SimulationResult | None
     metrics: tuple[Metric, ...]
     pass_name: str = "B"
 
     @property
     def passed(self) -> bool:
         return all(m.passed for m in self.metrics)
+
+    @property
+    def simulated(self) -> SimulationResult:
+        """The arm's simulated results; an arm run offline has none."""
+        if self.result is None:
+            raise StudyError(f"arm {self.arm.name} ran offline, so has no simulated results")
+        return self.result
 
 
 @dataclass(frozen=True)
@@ -214,7 +235,7 @@ class StudyRun:
     config: SimulationConfig
     seed: SeedReport
     fitted: FittedModels
-    result: SimulationResult
+    result: SimulationResult | None
     metrics: tuple[Metric, ...]
     provenance: dict[str, str]
     #: Every arm's run, in order; the study's own run first is its null arm, or the profile.
@@ -229,6 +250,13 @@ class StudyRun:
     @property
     def passed(self) -> bool:
         return all(m.passed for m in self.metrics) and all(a.passed for a in self.arms)
+
+    @property
+    def simulated(self) -> SimulationResult:
+        """The study's own simulated results; a study run offline has none."""
+        if self.result is None:
+            raise StudyError(f"study {self.profile.name} ran offline, so has no simulated results")
+        return self.result
 
     def metadata(self) -> dict[str, Any]:
         """Everything about the run but its metrics, as plain data."""
@@ -269,13 +297,23 @@ def _arms(profile: StudyProfile) -> tuple[Arm, ...]:
     return (*(a for a in arms if a.null), *(a for a in arms if not a.null))
 
 
+def _modes(profile: StudyProfile) -> list[str]:
+    """Every mode the study's arms run under, its own first."""
+    modes = [profile.mode.value]
+    modes += [a.mode.value for a in profile.expanded_arms() if a.mode is not None]
+    return list(dict.fromkeys(modes))
+
+
+def _reads_artifact(mode: str) -> bool:
+    """Whether `mode` reads the guidance artifact a study is given, not the window's actuals."""
+    return rung(mode).reads_guidance and not rung(mode).realized_guidance
+
+
 def _guidance(profile: StudyProfile, guidance: Path | None, problems: list[str]) -> Any:
-    reads = rung(profile.mode.value).reads_guidance or any(
-        a.mode is not None and rung(a.mode.value).reads_guidance for a in profile.expanded_arms()
-    )
-    if reads and guidance is None:
-        problems.append(f"mode {profile.mode.value!r} needs a guidance artifact")
-    if not reads and guidance is not None:
+    reading = [m for m in _modes(profile) if _reads_artifact(m)]
+    if reading and guidance is None:
+        problems.append(f"mode {reading[0]!r} needs a guidance artifact")
+    if not reading and guidance is not None:
         problems.append(f"mode {profile.mode.value!r} reads no guidance; drop the artifact")
     if guidance is None:
         return None
@@ -301,6 +339,17 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             run_date = dt.date.fromisoformat(artifact.snapshot_date) + dt.timedelta(days=1)
         else:
             run_date = snapshot_before(con, dt.date.max) + dt.timedelta(days=1)
+        actuals_through = snapshot_before(con, dt.date.max)
+        closure = window_closure(run_date, profile.months, actuals_through)
+        own = deferral(ITSELF, profile.mode.value, closure)
+        if own is not None:
+            problems.append(f"nothing can run yet: {own.reason}")
+        deferred = [
+            d
+            for a in _arms(profile)
+            if a.mode is not None and (d := deferral(a, a.mode.value, closure)) is not None
+        ]
+        runnable = [a for a in _arms(profile) if a.name not in {d.arm for d in deferred}]
         kinds = required_kinds(
             profile.mode.value,
             profile.scope,
@@ -339,7 +388,7 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
                 num_trajectories=profile.trajectories,
                 seed=profile.seed,
                 forecast_scope=profile.scope,
-                guidance=artifact if rung(profile.mode.value).reads_guidance else None,
+                guidance=artifact if _reads_artifact(profile.mode.value) else None,
                 awards=awards,
                 capacity_caps=profile.capacity_caps,
                 fill_shares=profile.fill_share_targets(),
@@ -359,11 +408,20 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             except (OSError, AlignmentError) as error:
                 return Preflight((f"can't build the plan: {error}",))
         world_identity = _world_identity(con)
-        actuals_through = snapshot_before(con, dt.date.max)
+        modes = {}
+        for mode in dict.fromkeys((a.mode or profile.mode).value for a in runnable):
+            try:
+                modes[mode] = mode_inputs(
+                    con, mode, schema, state, run_date, profile.months, base.awards
+                )
+            except (ValueError, duckdb.Error) as error:
+                problems.append(f"can't resolve the inputs {mode} reads: {error}")
+    if problems:
+        return Preflight(tuple(problems))
     configs = {}
-    for arm in _arms(profile):
+    for arm in runnable:
         try:
-            configs[arm.name] = _arm_config(base, profile, arm, plan, artifact)
+            configs[arm.name] = _arm_config(base, profile, arm, plan, artifact, modes)
         except ConfigError as error:
             problems += [f"arm {arm.name}: {p}" for p in error.problems]
     if problems:
@@ -380,8 +438,9 @@ def preflight(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         kinds,
         world_identity,
         actuals_through,
+        MappingProxyType(modes),
     )
-    return Preflight((), inputs, MappingProxyType(configs))
+    return Preflight((), inputs, MappingProxyType(configs), closure, tuple(deferred))
 
 
 def _arm_config(
@@ -390,14 +449,21 @@ def _arm_config(
     arm: Arm,
     plan: AlignmentTarget | None,
     artifact: GuidanceForecast | None,
+    modes: Mapping[str, ModeInputs],
 ) -> SimulationConfig:
-    """The arm's configuration: the study's, with the plan, its alignment method, its own
-    mode, and the guidance that mode reads, if it's a reference arm, and its overrides."""
+    """The arm's configuration: the study's, with the plan, its alignment method, its mode (its
+    own, if it's a reference arm), the guidance and awards that mode reads, and its
+    overrides."""
     method = profile.alignment.choice().resolve(None if arm is ITSELF else arm.name)
-    fields: dict[str, Any] = {"plan": plan, "alignment_method": method}
-    if arm.mode is not None:
-        fields["run_mode"] = arm.mode.value
-        fields["guidance"] = artifact if rung(arm.mode.value).reads_guidance else None
+    mode = (arm.mode or profile.mode).value
+    reads = modes[mode]
+    fields: dict[str, Any] = {
+        "plan": plan,
+        "alignment_method": method,
+        "run_mode": RunMode(mode),
+        "guidance": artifact if _reads_artifact(mode) else reads.guidance,
+        "awards": reads.awards,
+    }
     fields |= {SETTINGS[path].name: value for path, value in arm.overrides.items()}
     return dataclasses.replace(base, **fields)
 
@@ -410,17 +476,9 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
     if not checked.ok or checked.inputs is None:
         raise StudyError(list(checked.problems))
     inputs = checked.inputs
-    closure = window_closure(inputs.run_date, profile.months, inputs.actuals_through)
-    skips, deferred, runnable = [], [], []
-    for arm in _arms(profile):
-        mode = (arm.mode or profile.mode).value
-        waiting = deferral(arm, mode, closure)
-        if waiting is None:
-            runnable.append(arm)
-        else:
-            deferred.append(waiting)
-    if not runnable:
-        raise StudyError([f"nothing can run yet: {d.arm} waits: {d.reason}" for d in deferred])
+    closure = checked.closure or Closure.OPEN
+    runnable = [a for a in _arms(profile) if a.name in checked.configs]
+    skips: list[Skip] = []
     evaluators = []
     for name in profile.evaluators:
         need, reason = NEEDS.get(name, ("", ""))
@@ -434,7 +492,11 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         if trajectories is not None:
             config = dataclasses.replace(config, num_trajectories=trajectories)
         began = time.perf_counter()
-        result = simulate(config, inputs.state)
+        if profile.backend is Backend.OFFLINE:
+            metrics = offline_metrics(evaluators, inputs.fitted)
+            timing.append(Timing(f"evaluate {pass_name}", arm.name, time.perf_counter() - began))
+            return ArmRun(arm, config, None, metrics, pass_name)
+        result = simulate_arm(config, inputs.state, inputs.modes[config.run_mode or ""])
         simulated = time.perf_counter()
         metrics = tuple(m for name in evaluators for m in EVALUATORS[name](result))
         timing.append(Timing(f"simulate {pass_name}", arm.name, simulated - began))
@@ -468,7 +530,10 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         "seed": str(profile.seed),
         "run_date": inputs.run_date.isoformat(),
         "schema_fingerprint": inputs.schema.fingerprint(),
-        "guidance_fingerprint": inputs.artifact.fingerprint() if inputs.artifact else "",
+        "backend": profile.backend.value,
+        "guidance_fingerprint": first.config.guidance.fingerprint()
+        if first.config.guidance
+        else "",
         "input_kinds": ",".join(inputs.kinds),
     }
     return StudyRun(
@@ -483,7 +548,7 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
         closure,
         tuple(screened),
         tuple(skips),
-        tuple(deferred),
+        checked.deferred,
         tuple(timing),
     )
 
