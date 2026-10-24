@@ -149,6 +149,8 @@ class SeedReport:
     #: Seed tranches recorded per holder status, and those left out per cause.
     seed_tranches: Mapping[str, int] = field(default_factory=dict)
     seed_pruned: Mapping[str, int] = field(default_factory=dict)
+    #: In a subset run, the capped cost centers outside the subset: caps that can't bind.
+    caps_outside_subset: tuple[str, ...] = ()
 
 
 def schema_from_world(con: duckdb.DuckDBPyConnection) -> SimulationSchema:
@@ -377,11 +379,28 @@ def seed_for(
         months=config.simulation_months,
         with_ledger=config.computes_sbc,
     )
+    report = dataclasses.replace(
+        report, caps_outside_subset=_caps_outside(config.capacity_caps, config.schema, subset)
+    )
     if not config.computes_sbc:
         return state, report
     equity = seed_equity(con, config.schema, config.run_date, report.snapshot_date, state)
     recorded = record_seed(state, equity.seed)
     return state, dataclasses.replace(report, seed_tranches=recorded, seed_pruned=equity.pruned)
+
+
+def _caps_outside(
+    caps: Mapping[str, int], schema: SimulationSchema, subset: SubsetSpec | None
+) -> tuple[str, ...]:
+    """The capped cost centers a subset leaves out: none without a subset, or one that doesn't
+    constrain cost centers."""
+    if subset is None or not caps:
+        return ()
+    inside = subset.lower(schema).codes.get(COST_CENTER)
+    if inside is None:
+        return ()
+    vocab = schema.vocabulary(COST_CENTER)
+    return tuple(sorted(c for c in caps if c in vocab and vocab.code(c) not in inside))
 
 
 def executive_min_level(con: duckdb.DuckDBPyConnection) -> int | None:

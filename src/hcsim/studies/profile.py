@@ -41,6 +41,16 @@ class StudyProfile(BaseModel):
     months: int = Field(default=12, ge=1)
     #: The first simulated month. Defaults to the month after the world's last snapshot.
     run_date: dt.date | None = None
+    #: Capacity caps, `Cap(c)`, by cost-center label: heads of committed strength each may hold.
+    capacity_caps: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("capacity_caps")
+    @classmethod
+    def _whole_heads(cls, value: dict[str, int]) -> dict[str, int]:
+        negative = sorted(c for c, cap in value.items() if cap < 0)
+        if negative:
+            raise ValueError(f"caps are non-negative heads, which {negative} aren't")
+        return value
 
     @field_validator("run_date")
     @classmethod

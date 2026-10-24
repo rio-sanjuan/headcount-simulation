@@ -50,7 +50,7 @@ def test_caps_and_plans_that_don_t_fit_are_refused() -> None:
     with pytest.raises(CeilingError) as caught:
         Ceiling.build(SCHEMA, {"CC-09": 5, "CC-01": -1}, plan({"CC-07": [1.0, 1.0]}))
     assert caught.value.problems == [
-        "the cap on CC-01 must be a non-negative integer",
+        "the cap on CC-01 must be a non-negative whole number, not -1",
         "no cost center 'CC-09' to cap",
         "the plan targets cost centers the run lacks: ['CC-07']",
     ]

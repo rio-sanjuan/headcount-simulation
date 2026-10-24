@@ -104,6 +104,7 @@ def run_study(profile: StudyProfile, world: Path, guidance: Path | None = None) 
             forecast_scope=profile.scope,
             guidance=artifact,
             awards=awards,
+            capacity_caps=profile.capacity_caps,
         )
         state, seed = seed_for(con, config)
         provenance = _world_identity(con)

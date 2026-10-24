@@ -2,7 +2,9 @@
 
 Two inputs can bound a cost center's committed strength, `S = H + O`:
 
-- the **capacity cap** `Cap(c)`, a fixed ceiling per cost center;
+- the **capacity cap** `Cap(c)`, a fixed ceiling per cost center: a vector field over the
+  schema's cost centers, declared by label, each value a finite, non-negative whole number of
+  heads, and infinite where none is declared;
 - the **plan target** `H*(c, t)`, read from an alignment target's cost-center marginal at the
   step's month, interpolated as the target says, in the cost centers the alignment method lets
   the plan drive supply in (see `alignment`). Outside its window, for a cost center it has no
@@ -61,7 +63,7 @@ class Ceiling:
     def build(
         cls,
         schema: SimulationSchema,
-        caps: Mapping[str, int] | None = None,
+        caps: Mapping[str, object] | None = None,
         plan: AlignmentTarget | None = None,
         supplied: NDArray[np.bool_] | None = None,
         rule: SupplyRule = SupplyRule.STRENGTH,
@@ -75,8 +77,17 @@ class Ceiling:
         for label, cap in sorted((caps or {}).items()):
             if label not in vocab:
                 problems.append(f"no cost center {label!r} to cap")
-            elif not isinstance(cap, int | np.integer) or cap < 0:
-                problems.append(f"the cap on {label} must be a non-negative integer")
+            elif not isinstance(cap, int | float | np.integer | np.floating):
+                problems.append(f"the cap on {label} is a number of heads, not {cap!r}")
+            elif not np.isfinite(cap):
+                problems.append(
+                    f"the cap on {label} must be finite, not {cap}: leave it out to leave {label} "
+                    "uncapped"
+                )
+            elif cap < 0 or float(cap) != int(cap):
+                problems.append(
+                    f"the cap on {label} must be a non-negative whole number, not {cap}"
+                )
             else:
                 values[vocab.code(label)] = float(cap)
         group = np.full(len(vocab), -1, dtype=np.int64)
