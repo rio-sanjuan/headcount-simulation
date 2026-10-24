@@ -138,6 +138,19 @@ def test_the_provenance_names_every_input(guided: StudyRun, inputs: tuple[Path, 
     )
 
 
+def test_a_profile_can_declare_capacity_caps(inputs: tuple[Path, Path]) -> None:
+    with pytest.raises(ProfileError, match="caps are non-negative heads"):
+        profile(capacity_caps={"CC-01": -1})
+    run = run_study(profile(mode="unguided", scope="hcf", trajectories=1), inputs[0])
+    label = run.config.schema.vocabulary("cost_center").labels[0]
+    capped = run_study(
+        profile(mode="unguided", scope="hcf", trajectories=1, capacity_caps={label: 0}), inputs[0]
+    )
+    assert dict(capped.config.capacity_caps) == {label: 0}
+    assert capped.config.ceiling.caps[0] == 0.0
+    assert dict(run.config.capacity_caps) == {}
+
+
 def test_an_unguided_headcount_study_reads_no_guidance(inputs: tuple[Path, Path]) -> None:
     run = run_study(profile(mode="unguided", scope="hcf"), inputs[0])
     assert run.passed
