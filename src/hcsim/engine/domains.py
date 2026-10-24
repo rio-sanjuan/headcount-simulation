@@ -28,7 +28,7 @@ from hcsim.engine.fills import FILLS, fills
 from hcsim.engine.known_events import EventKind
 from hcsim.engine.known_resolution import FiringLog, ResolvedEvent, ResolvedPlan
 from hcsim.engine.logit import logit_shift
-from hcsim.engine.modes import RunMode
+from hcsim.engine.modes import RunMode, rung
 from hcsim.engine.planner import TILTED
 from hcsim.engine.replay import ReplayedRequisitions
 from hcsim.engine.results import DomainResult, QuotaRecord, RowChange
@@ -149,7 +149,7 @@ class StepContext:
     @property
     def pinned(self) -> bool:
         """Whether every movement is pinned to history, as in replay: then nothing is sampled."""
-        return self.config.run_mode is RunMode.REPLAY
+        return rung(self.config.run_mode or RunMode.UNGUIDED).replays_history
 
     def sampled(self, rows: Buffer, p: Probabilities) -> Probabilities:
         """`p` with every employee waiting on a known event set to zero, so no sampled draw
