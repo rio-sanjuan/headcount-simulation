@@ -12,9 +12,13 @@
   every flow in and out of it: the requisitions opened by growth, campus, and backfill; those
   that exit unfilled; and the openings each fill channel takes. The opening identity holds
   exactly, and its residual says so.
-- **The SBC layer** (`sbc`): the expense a run recognizes each month, by part (the seed's
-  equity, the run's own grants, and the offline stream), the grants it makes by award type, and
-  one new-hire grant's vesting schedule.
+- **The SBC layer** (`sbc`): the expense a run recognizes each month, in total and by part (the
+  seed's equity, the run's own grants, and the offline stream), the grants it makes by award
+  type, and one new-hire grant's vesting schedule.
+
+A run's headcount, its open openings, and its total expense vary across trajectories, so each
+is a spread: its mean, and its 10th, 50th and 90th percentiles, month by month. Flows and parts
+are means, so they add up to the mean they explain.
 
 Every demo is a seeded run, so the same request gives the same answer, and each answer is kept,
 so asking again is free. Runs read the world through its data, as studies do.
@@ -54,14 +58,31 @@ PLAN_MONTHS: Final = 6
 #: The flows into and out of the open-openings stock.
 OPENED: Final = ("G", "G_camp", "B_att", "B_tr")
 FILLED: Final = ("F_ext", "F_conv", "F_tr", "F_camp", "F_pend")
+#: The trajectories a run takes unless asked for others: enough for a stable 10th and 90th
+#: percentile on the tiny world.
+TRAJECTORIES: Final = 10
+#: The percentiles a spread gives, beside its mean.
+PERCENTILES: Final = (10, 50, 90)
 
 
 class DemoError(ValueError):
     """A demo that can't run on its world."""
 
 
-def _mean(values: np.ndarray) -> list[float]:
+def _rounded(values: np.ndarray) -> list[float]:
     return [round(float(v), 4) for v in values]
+
+
+def _spread(values: np.ndarray) -> dict[str, list[float]]:
+    """The spread of `values`, trajectories by months, across trajectories: each month's mean,
+    and its 10th, 50th and 90th percentiles."""
+    low, median, high = np.percentile(values, PERCENTILES, axis=0)
+    return {
+        "mean": _rounded(values.mean(axis=0)),
+        "p10": _rounded(low),
+        "p50": _rounded(median),
+        "p90": _rounded(high),
+    }
 
 
 def sampling(
@@ -89,7 +110,7 @@ def sampling(
     low = int(min(c.min() for c in counts.values()))
     high = int(max(c.max() for c in counts.values()))
     bins = list(range(low, high + 1))
-    out: dict[str, Any] = {"probabilities": _mean(p), "expected": round(float(p.sum()), 4)}
+    out: dict[str, Any] = {"probabilities": _rounded(p), "expected": round(float(p.sum()), 4)}
     out["bins"] = bins
     for name in counts:
         c = counts[name]
@@ -97,7 +118,7 @@ def sampling(
             "histogram": [int((c == b).sum()) for b in bins],
             "mean": round(float(c.mean()), 4),
             "sd": round(float(c.std(ddof=1)) if trajectories > 1 else 0.0, 4),
-            "rates": _mean(hits[name] / trajectories),
+            "rates": _rounded(hits[name] / trajectories),
         }
     return out
 
@@ -167,8 +188,9 @@ class Explorer:
         guidance.finish(self._forecast(), plan).artifact.save(guidance_path)
         return plan_path, guidance_path
 
-    def valves(self, growth: float = 0.05, trajectories: int = 4) -> dict[str, Any]:
-        """One plan, rising to `growth` above the seed over six months, driven by each method."""
+    def valves(self, growth: float = 0.05, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
+        """One plan, rising to `growth` above the seed over six months, driven by each method:
+        each run's headcount at each month-end, every cost center together, as a spread."""
         return dict(
             self._keep(("valves", growth, trajectories), lambda: self._valves(growth, trajectories))
         )
@@ -191,12 +213,12 @@ class Explorer:
                 {"name": f"valves-{method}", "seed": 7, "scope": "hcf"} | fields
             )
             run = run_study(profile, self.world, guidance if demand else None)
-            heads = run.simulated.headcount.sum(axis=2).mean(axis=0)
-            start_total = float(heads[0])
+            heads = run.simulated.headcount.sum(axis=2)  # (trajectories, months + 1)
+            start_total = float(heads[:, 0].mean())  # every trajectory starts from the seed
             bias = {m.name: m.value for m in run.metrics if m.evaluator == "plan_alignment"}
             runs[method] = {
                 "valve": VALVES[method],
-                "headcount": _mean(heads),
+                "headcount": _spread(heads),
                 "bias_mean": round(bias.get("bias_mean", float("nan")), 4),
             }
         # A relative plan scales each cost center's seed, so its total scales the seed's total.
@@ -210,8 +232,9 @@ class Explorer:
 
     # --- the requisition lifecycle ------------------------------------------------------------
 
-    def lifecycle(self, months: int = 12, trajectories: int = 4) -> dict[str, Any]:
-        """The open-openings stock and every flow in and out of it, month by month."""
+    def lifecycle(self, months: int = 12, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
+        """The open-openings stock at each month-end, as a spread, and the mean of every flow in
+        and out of it, month by month."""
         return dict(
             self._keep(
                 ("lifecycle", months, trajectories), lambda: self._lifecycle(months, trajectories)
@@ -234,18 +257,18 @@ class Explorer:
         return {
             "months": months,
             "run_date": self.run_date.isoformat(),
-            "open": _mean(stock.mean(axis=0)),
-            "opened": {s: _mean(v.mean(axis=0)) for s, v in opened.items()},
-            "filled": {s: _mean(v.mean(axis=0)) for s, v in filled.items()},
-            "unfilled": _mean(unfilled.mean(axis=0)),
+            "open": _spread(stock),
+            "opened": {s: _rounded(v.mean(axis=0)) for s, v in opened.items()},
+            "filled": {s: _rounded(v.mean(axis=0)) for s, v in filled.items()},
+            "unfilled": _rounded(unfilled.mean(axis=0)),
             "identity_residual": int(np.abs(residual).max(initial=0)),
         }
 
     # --- the SBC layer ------------------------------------------------------------------------
 
-    def sbc(self, months: int = 12, trajectories: int = 2) -> dict[str, Any]:
-        """The expense a run recognizes each month by part, its grants by award type, and one
-        new-hire grant's vesting schedule."""
+    def sbc(self, months: int = 12, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
+        """The expense a run recognizes each month, in total as a spread and by part as means,
+        its grants by award type, and one new-hire grant's vesting schedule."""
         return dict(
             self._keep(("sbc", months, trajectories), lambda: self._sbc(months, trajectories))
         )
@@ -253,6 +276,7 @@ class Explorer:
     def _sbc(self, months: int, trajectories: int) -> dict[str, Any]:
         r = self._run(months=months, trajectories=trajectories, scope="hcf+sbc")
         parts: dict[str, np.ndarray] = {}
+        totals: list[np.ndarray] = []
         grants: dict[str, float] = {}
         example: dict[str, Any] = {}
         labels = r.config.schema.vocabulary(AWARD_TYPE).labels
@@ -260,6 +284,8 @@ class Explorer:
             if t.sbc is None or t.tranches is None:
                 raise DemoError("an SBC run kept no SBC")
             window = t.sbc[t.sbc["month"].between(0, months - 1)]
+            total = window.groupby("month")["recognized"].sum()
+            totals.append(total.reindex(range(months), fill_value=0.0).to_numpy())
             by = window.groupby(["part", "month"])["recognized"].sum()
             for part in by.index.get_level_values(0).unique():
                 series = by.xs(part).reindex(range(months), fill_value=0.0).to_numpy()
@@ -299,7 +325,8 @@ class Explorer:
         return {
             "months": months,
             "run_date": self.run_date.isoformat(),
-            "recognized": {p: _mean(v) for p, v in sorted(parts.items())},
+            "total": _spread(np.stack(totals)),
+            "recognized": {p: _rounded(v) for p, v in sorted(parts.items())},
             "grants": {k: round(v, 4) for k, v in sorted(grants.items())},
             "example_grant": example,
         }

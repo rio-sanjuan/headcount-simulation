@@ -15,7 +15,10 @@ from typing import Annotated, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 
-from hcsim.app.demos import DemoError, Explorer, sampling
+from hcsim.app.demos import TRAJECTORIES, DemoError, Explorer, sampling
+
+#: The most trajectories a request for a run on the world may ask for.
+MOST_TRAJECTORIES = 20
 
 
 def create_app(world: Path, static: Path | None = None, scratch: Path | None = None) -> FastAPI:
@@ -51,21 +54,21 @@ def create_app(world: Path, static: Path | None = None, scratch: Path | None = N
     @app.get("/api/valves")
     def valves_demo(
         growth: Annotated[float, Query(ge=-0.2, le=0.3)] = 0.05,
-        trajectories: Annotated[int, Query(ge=1, le=8)] = 4,
+        trajectories: Annotated[int, Query(ge=1, le=MOST_TRAJECTORIES)] = TRAJECTORIES,
     ) -> dict[str, Any]:
         return answer(lambda: explorer.valves(round(growth, 3), trajectories))
 
     @app.get("/api/lifecycle")
     def lifecycle_demo(
         months: Annotated[int, Query(ge=1, le=36)] = 12,
-        trajectories: Annotated[int, Query(ge=1, le=8)] = 4,
+        trajectories: Annotated[int, Query(ge=1, le=MOST_TRAJECTORIES)] = TRAJECTORIES,
     ) -> dict[str, Any]:
         return answer(lambda: explorer.lifecycle(months, trajectories))
 
     @app.get("/api/sbc")
     def sbc_demo(
         months: Annotated[int, Query(ge=1, le=36)] = 12,
-        trajectories: Annotated[int, Query(ge=1, le=4)] = 2,
+        trajectories: Annotated[int, Query(ge=1, le=MOST_TRAJECTORIES)] = TRAJECTORIES,
     ) -> dict[str, Any]:
         return answer(lambda: explorer.sbc(months, trajectories))
 
