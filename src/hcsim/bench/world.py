@@ -97,33 +97,35 @@ def _rss_mib(pid: int) -> float:
     return int(out) / 1024 if out else 0.0
 
 
+def run_child(command: list[str], label: str, max_rss_gib: float | None = None) -> str:
+    """Run `command` in a fresh process, watching its memory, and return its last line of
+    output. A process that passes `max_rss_gib` is killed; one that fails is reported with its
+    error. `label` names it in either message."""
+    with subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as child:
+        peak = 0.0
+        while child.poll() is None:
+            peak = max(peak, _rss_mib(child.pid))
+            if max_rss_gib is not None and peak > max_rss_gib * 1024:
+                child.kill()
+                child.communicate()
+                raise BenchError(f"the {label} passed its memory limit of {max_rss_gib} GiB")
+            time.sleep(POLL_SECONDS)
+        out, err = child.communicate()
+        if child.returncode != 0:
+            raise BenchError(f"the {label} failed:\n{err.strip()}")
+    return out.strip().splitlines()[-1]
+
+
 def run(presets: list[str], seed: int = 0, max_rss_gib: float | None = None) -> list[PresetRun]:
     """Run each preset in a fresh process, in order, and stop at the first that fails."""
     runs = []
     for name in presets:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            subprocess.Popen(
-                [sys.executable, "-m", "hcsim.bench.world", name, str(seed), directory],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            ) as child,
-        ):
-            peak = 0.0
-            while child.poll() is None:
-                peak = max(peak, _rss_mib(child.pid))
-                if max_rss_gib is not None and peak > max_rss_gib * 1024:
-                    child.kill()
-                    child.communicate()
-                    raise BenchError(
-                        f"the {name!r} preset passed its memory limit of {max_rss_gib} GiB"
-                    )
-                time.sleep(POLL_SECONDS)
-            out, err = child.communicate()
-            if child.returncode != 0:
-                raise BenchError(f"the {name!r} preset failed:\n{err.strip()}")
-            runs.append(PresetRun(**json.loads(out.strip().splitlines()[-1])))
+        with tempfile.TemporaryDirectory() as directory:
+            command = [sys.executable, "-m", "hcsim.bench.world", name, str(seed), directory]
+            line = run_child(command, f"{name!r} preset", max_rss_gib)
+        runs.append(PresetRun(**json.loads(line)))
     return runs
 
 

@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-baseline world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -89,6 +89,16 @@ test-extras: ## The optional extras' adapter tests, with the extras installed
 BENCH_PRESETS ?= tiny small medium
 bench-world: ## Time generating, writing, and checking each world preset
 	$(UV_RUN) hcsim bench world $(foreach p,$(BENCH_PRESETS),--preset $(p)) --max-rss-gib 16
+
+# The scale harness's worlds and runs stay in .bench, which git ignores. Timings are flagged,
+# never gated: compare on the machine the baseline ran on.
+bench: ## Run the scale harness's suite and flag regressions past 20% over the stored baseline
+	$(UV_RUN) hcsim bench scale --cache-dir .bench/worlds --out .bench/run.json --max-rss-gib 16
+	$(UV_RUN) hcsim bench compare --run .bench/run.json
+
+bench-baseline: ## Measure the suite and store it as the benchmark baseline
+	$(UV_RUN) hcsim bench scale --cache-dir .bench/worlds --out .bench/run.json --max-rss-gib 16 \
+		--baseline-out benchmarks/baseline.json
 
 # The `small` world as a release asset: generated, checked, and exported as uncompressed
 # Parquet, so the scan before upload reads every label. Then it's archived, compressed, with a
