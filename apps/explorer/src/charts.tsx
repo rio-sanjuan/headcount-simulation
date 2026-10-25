@@ -85,9 +85,12 @@ export function format(v: number): string {
   return String(Number(v.toPrecision(4)));
 }
 
-/** Labels for no more than about a dozen of `count` positions, evenly spaced. */
-export function labelled(count: number): (i: number) => boolean {
-  const every = Math.max(1, Math.ceil(count / 12));
+/** The room an x label needs, so a narrow chart labels fewer positions. */
+const X_LABEL_ROOM = 36;
+
+/** Labels for no more than `most` of `count` positions, evenly spaced. */
+export function labelled(count: number, most = 12): (i: number) => boolean {
+  const every = Math.max(1, Math.ceil(count / Math.max(1, most)));
   return (i) => i % every === 0;
 }
 
@@ -262,7 +265,6 @@ export function LineChart({
   const lo = Math.min(...all);
   const hi = Math.max(...all);
   const yTicks = ticks(lo, hi);
-  const shown = labelled(xs.length);
   const ordered = [...series].sort((a, b) => DRAW_ORDER[roleOf(a)] - DRAW_ORDER[roleOf(b)]);
   return (
     <Figure title={axes.title} after={after}>
@@ -271,6 +273,7 @@ export function LineChart({
         const y = scale(Math.min(lo, yTicks[0] ?? lo), Math.max(hi, yTicks.at(-1) ?? hi), HEIGHT - PAD.bottom, PAD.top);
         const xv = scale(xs[0] ?? 0, xs.at(-1) ?? 1, PAD.left, right);
         const x = (i: number) => xv(xs[i] ?? i);
+        const shown = labelled(xs.length, Math.min(12, (right - PAD.left) / X_LABEL_ROOM));
         const ends = ordered.flatMap((s) => {
           const last = lastFinite(s.values);
           return last === undefined ? [] : [{ s, wanted: y(last) }];
@@ -350,7 +353,6 @@ export function BarChart({
   const hi = Math.max(0, ...all);
   const lo = Math.min(0, ...all);
   const yTicks = ticks(lo, hi);
-  const shown = labelled(categories.length);
   return (
     <Figure title={axes.title} after={after}>
       {(width) => {
@@ -358,6 +360,7 @@ export function BarChart({
         // Room above the tallest bar for the series' labels.
         const y = scale(lo, Math.max(hi, yTicks.at(-1) ?? hi), HEIGHT - PAD.bottom, PAD.top + LABEL_GAP * series.length);
         const slot = (right - PAD.left) / Math.max(categories.length, 1);
+        const shown = labelled(categories.length, Math.min(12, (right - PAD.left) / X_LABEL_ROOM));
         const bar = Math.min(BAR_MAX, (slot * 0.8) / Math.max(series.length, 1));
         const group = bar * series.length;
         const left = (i: number, k: number) => PAD.left + i * slot + (slot - group) / 2 + k * bar;

@@ -19,7 +19,7 @@ export function ValvesDemo() {
   const [growth, setGrowth] = useState(5);
   const { data, error, loading } = useDemo<Valves>("valves", { growth: growth / 100, trajectories: TRAJECTORIES });
   return (
-    <section>
+    <div className="demo">
       <p className="lead">
         A plan for every cost center, rising evenly over six months, and the valve each alignment
         method drives toward it: the requisitions growth opens (supply), guidance aligned to the
@@ -67,6 +67,6 @@ export function ValvesDemo() {
           </table>
         </>
       )}
-    </section>
+    </div>
   );
 }

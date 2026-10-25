@@ -10,7 +10,7 @@ export function SbcDemo() {
   const { data, error, loading } = useDemo<Sbc>("sbc", { months, trajectories: TRAJECTORIES });
   const grant = data?.example_grant;
   return (
-    <section>
+    <div className="demo">
       <p className="lead">
         Every grant becomes tranches that vest over the years after it, and each tranche&apos;s
         value is recognized as expense month by month. The run&apos;s expense comes from the
@@ -56,6 +56,6 @@ export function SbcDemo() {
           )}
         </>
       )}
-    </section>
+    </div>
   );
 }
