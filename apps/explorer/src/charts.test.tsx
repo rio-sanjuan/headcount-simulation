@@ -43,6 +43,7 @@ describe("labelled", () => {
     const every = labelled(200);
     expect([0, 1, 17, 34].map(every)).toEqual([true, false, true, true]);
     expect([0, 1, 2].map(labelled(3))).toEqual([true, true, true]);
+    expect([0, 34, 50].map(labelled(200, 4))).toEqual([true, false, true]); // a narrow chart
   });
 });
 

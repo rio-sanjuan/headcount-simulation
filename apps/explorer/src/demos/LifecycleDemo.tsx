@@ -28,7 +28,7 @@ export function LifecycleDemo() {
   const { data, error, loading } = useDemo<Lifecycle>("lifecycle", { months, trajectories: TRAJECTORIES });
   const steps = data ? Array.from({ length: data.months }, (_, i) => i + 1) : [];
   return (
-    <section>
+    <div className="demo">
       <p className="lead">
         A requisition opens (for growth, a campus class, or a backfill), waits as open openings,
         and leaves either filled, by one of five channels, or unfilled. Every month the stock
@@ -76,6 +76,6 @@ export function LifecycleDemo() {
           />
         </>
       )}
-    </section>
+    </div>
   );
 }

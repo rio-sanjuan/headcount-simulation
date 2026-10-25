@@ -1,41 +1,63 @@
-import { useState } from "react";
+import { useEffect } from "react";
 
-import { LifecycleDemo } from "./demos/LifecycleDemo";
-import { SamplingDemo } from "./demos/SamplingDemo";
-import { SbcDemo } from "./demos/SbcDemo";
-import { ValvesDemo } from "./demos/ValvesDemo";
+import { ChapterRail, useChapterInView } from "./ChapterRail";
+import { CHAPTERS, Prose } from "./story";
 
-/** The explorer's demos, each a tab. */
-export const DEMOS = [
-  { key: "sampling", title: "Quota vs independent sampling", Demo: SamplingDemo },
-  { key: "valves", title: "The three valves", Demo: ValvesDemo },
-  { key: "lifecycle", title: "The requisition lifecycle", Demo: LifecycleDemo },
-  { key: "sbc", title: "The SBC layer", Demo: SbcDemo },
-] as const;
+const NAME = "hcsim explorer";
+const KEYS = CHAPTERS.map((c) => c.key);
 
+/** How long the page keeps the address's chapter in view while the chapters above it fill in. */
+const HOLD_MS = 10_000;
+
+/** Opens the page at the chapter `hash` names. The page renders after the browser looks for the
+ * anchor, so it goes there itself, and the chapters above fill in as their runs arrive, so it
+ * stays there until the reader scrolls, or a while has passed. Returns what stops it. */
+export function holdAnchor(hash: string): () => void {
+  const key = decodeURIComponent(hash.slice(1));
+  const target = KEYS.includes(key) ? document.getElementById(key) : null;
+  if (target === null) {
+    return () => {};
+  }
+  const go = () => target.scrollIntoView();
+  go();
+  const main = target.closest("main");
+  if (main === null || typeof ResizeObserver === "undefined") {
+    return () => {};
+  }
+  const observer = new ResizeObserver(go);
+  observer.observe(main);
+  const reader = ["wheel", "touchstart", "keydown", "pointerdown"];
+  const stop = () => {
+    observer.disconnect();
+    clearTimeout(timer);
+    reader.forEach((event) => window.removeEventListener(event, stop));
+  };
+  const timer = setTimeout(stop, HOLD_MS);
+  reader.forEach((event) => window.addEventListener(event, stop, { passive: true }));
+  return stop;
+}
+
+/** The explorer: one page that tells its story in four chapters, with the rail beside them. */
 export function App() {
-  const [active, setActive] = useState<string>(DEMOS[0].key);
-  const current = DEMOS.find((d) => d.key === active) ?? DEMOS[0];
+  const current = useChapterInView(KEYS);
+  useEffect(() => holdAnchor(window.location.hash), []);
   return (
-    <main>
-      <header>
-        <h1>hcsim explorer</h1>
-        <p>An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
-      </header>
-      <nav role="tablist">
-        {DEMOS.map((d) => (
-          <button
-            key={d.key}
-            role="tab"
-            aria-selected={d.key === active}
-            className={d.key === active ? "active" : ""}
-            onClick={() => setActive(d.key)}
-          >
-            {d.title}
-          </button>
+    <div className="page">
+      <ChapterRail name={NAME} chapters={CHAPTERS} current={current} />
+      <main>
+        <header id="top">
+          <h1>{NAME}</h1>
+          <p className="lead">An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
+        </header>
+        {CHAPTERS.map(({ key, title, Demo, handOn }, i) => (
+          <section key={key} id={key} className="chapter" aria-labelledby={`${key}-title`}>
+            <p className="chapter-number">Chapter {i + 1}</p>
+            <h2 id={`${key}-title`}>{title}</h2>
+            <Demo />
+            <Prose line={handOn} className="hand-on" />
+          </section>
         ))}
-      </nav>
-      <current.Demo />
-    </main>
+      </main>
+    </div>
   );
 }

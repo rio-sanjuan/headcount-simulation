@@ -16,7 +16,7 @@ export function SamplingDemo() {
     trajectories: 500,
   });
   return (
-    <section>
+    <div className="demo">
       <p className="lead">
         Where guidance sets a count, the engine draws exactly that many rows, the model choosing
         which (quota sampling). Drawing every row on its own at the same rates expects the count,
@@ -57,6 +57,6 @@ export function SamplingDemo() {
           />
         </>
       )}
-    </section>
+    </div>
   );
 }
