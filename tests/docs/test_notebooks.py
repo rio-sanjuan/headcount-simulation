@@ -17,7 +17,12 @@ def cells(path: Path) -> list[dict[str, Any]]:
 
 
 def test_there_are_notebooks() -> None:
-    assert [p.name for p in NOTEBOOKS] == ["annual-grant.ipynb", "three-path-tranche.ipynb"]
+    assert [p.name for p in NOTEBOOKS] == [
+        "annual-grant.ipynb",
+        "guided-study.ipynb",
+        "quota-sampling.ipynb",
+        "three-path-tranche.ipynb",
+    ]
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.stem)

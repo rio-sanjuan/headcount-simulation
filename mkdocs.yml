@@ -1,0 +1,93 @@
+# The docs site, built and served locally: `make docs` builds it strictly into site/, and
+# `make docs-serve` serves it. Domain pages render the code's own docstrings (mkdocstrings), and
+# the notebooks run as the site builds (mkdocs-jupyter), so neither drifts from the engine.
+site_name: hcsim
+site_description: An employee-level Monte Carlo forecast of headcount and SBC expense.
+repo_url: https://github.com/rio-sanjuan/headcount-simulation
+docs_dir: docs
+site_dir: site
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: null
+            show_source: false
+            show_root_heading: false
+            show_root_toc_entry: false
+            members: false
+            heading_level: 3
+  - mkdocs-jupyter:
+      execute: true
+      include_source: true
+
+not_in_nav: |
+  implementation-plan.md
+
+nav:
+  - Home: index.md
+  - Design:
+      - Overview: design/overview.md
+      - Notation: design/notation.md
+      - Glossary: glossary.md
+  - Domains:
+      - domains/index.md
+      - Known events: domains/known-events.md
+      - Performance: domains/performance.md
+      - Promotion: domains/promotion.md
+      - Attrition: domains/attrition.md
+      - Backfill: domains/backfill.md
+      - Awards: domains/awards.md
+      - Pending starts: domains/pending-starts.md
+      - Fills: domains/fills.md
+      - Transfers: domains/transfers.md
+      - Campus: domains/campus.md
+      - Cancellation: domains/cancellation.md
+      - Growth: domains/growth.md
+  - Tutorials:
+      - Generate a world: tutorials/world.md
+      - Fit the guidance forecast: tutorials/guidance.md
+      - Run a study: tutorials/study.md
+      - Run the study catalog: tutorials/catalog.md
+      - Explore the engine: tutorials/explorer.md
+      - Measure performance: tutorials/benchmarks.md
+  - Worked examples:
+      - Quota sampling: notebooks/quota-sampling.ipynb
+      - A guided study: notebooks/guided-study.ipynb
+      - An annual grant: notebooks/annual-grant.ipynb
+      - One tranche, three paths: notebooks/three-path-tranche.ipynb
+  - Reference:
+      - Data contract: data-contract.md
+      - Decisions:
+          - adr/README.md
+          - "0001: Layered architecture": adr/0001-layered-architecture.md
+          - "0002: Quota sampling": adr/0002-quota-sampling.md
+          - "0003: A single writer": adr/0003-single-writer.md
+          - "0004: Three valves": adr/0004-three-valves.md
+          - "0005: Expense after the simulation": adr/0005-post-simulation-expense.md
+          - "0006: Known events as a capability": adr/0006-known-events-capability.md
+          - "0007: One frozen configuration": adr/0007-frozen-configuration.md
+          - "0008: A synthetic world": adr/0008-synthetic-world.md
+          - "0009: NumPy arrays": adr/0009-numpy-backend.md
+          - "0010: Time-series adapters": adr/0010-time-series-adapters.md
+          - "0011: Local execution": adr/0011-local-execution.md
+          - "0012: pandas and DuckDB": adr/0012-pandas-and-duckdb.md
+      - Sanitization: sanitization.md
