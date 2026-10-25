@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy docs docs-serve bench-world bench bench-large bench-baseline explorer-install explorer-check explorer-build explorer world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy docs docs-serve bench-world bench bench-large bench-baseline explorer-install explorer-check explorer-build explorer release-prepare release-package world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -145,9 +145,31 @@ explorer-check: explorer-install ## Type-check and test the explorer's frontend,
 explorer-build: explorer-install ## Build the explorer's frontend into apps/explorer/dist
 	cd $(EXPLORER) && npm run build
 
-explorer: explorer-build ## Serve the explorer on this machine, for the world at $$WORLD
+explorer: explorer-build ## Serve the explorer on this machine, for the world at $WORLD
 	@test -n "$$WORLD" || { echo "set WORLD to a world's DuckDB file"; exit 2; }
 	$(UV_RUN) --extra app hcsim app serve --world "$$WORLD"
+
+# Releases (tools/release.py). The version and tag come from the environment, never from make
+# arguments, so they can't reach the shell: `VERSION=0.1.0 make release-prepare`.
+release-prepare: ## Set the package's version, and date its changelog section, for $VERSION
+	@test -n "$$VERSION" || { echo "set VERSION, as in VERSION=0.1.0"; exit 2; }
+	$(UV_RUN) python tools/release.py prepare "$$VERSION"
+	uv lock
+
+# CI, when a release is published: check its tag against the version and the changelog, build
+# the package into a fresh dist/package, and scan everything inside it, and the release's notes,
+# before anything is uploaded.
+release-package: ## Check a release's tag ($TAG), build its package, and scan it (CI)
+	@test -n "$$TAG" || { echo "set TAG to the release's tag"; exit 2; }
+	$(UV_RUN) python tools/release.py check "$$TAG"
+	@if [ -e dist/package ]; then echo "dist/package already exists: move it aside first"; exit 2; fi
+	uv build --out-dir dist/package
+	mkdir -p dist/package-contents/wheel dist/package-contents/sdist
+	unzip -q dist/package/*.whl -d dist/package-contents/wheel
+	tar -xzf dist/package/*.tar.gz -C dist/package-contents/sdist
+	ARTIFACT_PATH=dist/package-contents $(MAKE) -s sanitize-artifact
+	$(UV_RUN) python tools/release.py notes "$$TAG" > dist/package-notes.md
+	NAME="release notes" $(MAKE) -s sanitize-text < dist/package-notes.md
 
 # The docs site, from mkdocs.yml: built strictly, so a broken link, nav entry, or reference fails
 # it, with the notebooks run as it builds. It goes to site/, which git ignores.

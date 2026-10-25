@@ -34,3 +34,12 @@ These conventions apply to work on the repository itself.
 - **Conventional commits.** Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/), such as `feat:`, `fix:`, `docs:`, `build:`, `ci:`, and `test:`.
 - **Local checks.** `pre-commit` runs on every commit, and the full suite runs in CI on every PR.
 - **Sanitization.** A denylist scanner checks files, commit messages, and issue and PR text before anything is published. Its patterns are kept private.
+
+## How a release is made
+
+Versions follow [Semantic Versioning](https://semver.org/), and every notable change is recorded in [CHANGELOG.md](CHANGELOG.md) under `Unreleased`.
+
+1. **Prepare.** `VERSION=X.Y.Z make release-prepare` sets the package's version, dates the changelog's section for it, and updates the lockfile. Merge that in a PR of its own.
+2. **Publish.** Publish a GitHub release tagged `vX.Y.Z` from that commit. The release workflows check the tag against the package's version and the changelog, then build, scan, and attach the wheel and sdist, set the release's notes from the changelog, and attach the small world. A tag that disagrees stops them before anything is uploaded.
+
+Nothing is published to a package index.

@@ -1,0 +1,42 @@
+# Attaches the package to a release when it's published: its tag checked against the package's
+# version and the changelog, the wheel and sdist built from the tag and scanned inside before
+# upload, and the release's notes set from the changelog. Nothing runs until a maintainer
+# publishes a release, and it publishes to no package index.
+name: release package
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    name: attach the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: a release build mustn't read or write the shared uv cache.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - env:
+          SANITIZE_DENYLIST: ${{ secrets.SANITIZE_DENYLIST }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: make release-package
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" dist/package/*.whl dist/package/*.tar.gz
+          gh release edit "$TAG" --notes-file dist/package-notes.md
