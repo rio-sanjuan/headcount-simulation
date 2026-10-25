@@ -17,7 +17,9 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
    is partial wherever people move between groups, and the report names every missing term;
 7. **align**, when the configuration names a method, moves each group's anchor onto its plan
    targets and re-derives the flows (see `alignment`), after reconciliation, so the aligned
-   values are final, and a coherence pass follows it;
+   values are final, and a coherence pass follows it. In the months it aligns, it re-derives
+   the flows from their forecasts as generated: reconciliation fitted them to the forecast's
+   anchor, which the plan's replaces there;
 8. **disaggregate**, when the configuration names a strategy, splits each group's forecasts
    onto the leaf grain inside it (see `disaggregation`);
 9. **format** writes the artifact, stamped with the alignment target's digest (`aligned_to`) and
@@ -261,11 +263,12 @@ class Cohere:
 
 @dataclass(frozen=True)
 class Reconcile:
-    """Reconcile each group's flows to its anchor, rewriting the forecasts."""
+    """Reconcile each group's flows to its anchor, rewriting the forecasts, and keep them as
+    they were before (`unreconciled`) for alignment."""
 
     name: str = "reconcile"
     needs: tuple[str, ...] = ("series", "forecasts", "residuals", "config")
-    gives: tuple[str, ...] = ("forecasts",)
+    gives: tuple[str, ...] = ("forecasts", "unreconciled")
 
     def validate(self, ctx: Context) -> list[str]:
         tolerance = ctx["config"].tolerance
@@ -273,7 +276,8 @@ class Reconcile:
 
     def execute(self, ctx: Context) -> Mapping[str, Any]:
         series, config = ctx["series"], ctx["config"]
-        forecasts: Forecasts = dict(ctx["forecasts"])
+        unreconciled: Forecasts = dict(ctx["forecasts"])
+        forecasts: Forecasts = dict(unreconciled)
         # The identity's terms: the deepest cover of the fill tree the run forecasts, and the
         # other flows it carries. A flow it doesn't carry can't be adjusted, and the gap it
         # leaves falls on the others.
@@ -315,17 +319,28 @@ class Reconcile:
             terms=signs,
             missing_terms=[*(c.value for c in missing), TRANSFERS_OUT],
         )
-        return {"forecasts": forecasts}
+        return {"forecasts": forecasts, "unreconciled": unreconciled}
 
 
 @dataclass(frozen=True)
 class Align:
     """Move each group's anchor onto its plan targets, re-deriving the flows (see
-    `alignment`), after reconciliation, so the aligned values are final."""
+    `alignment`), after reconciliation, so the aligned values are final.
+
+    After a reconciliation (`reconciled`), the flows of the months the plan aligns start from
+    their forecasts as generated, not as reconciled: reconciliation fitted them to the
+    forecast's anchor, which the plan's replaces in those months. A forecast whose first month
+    falls well below the last actual would otherwise leave its fall in the flows, as exits that
+    alignment then matches with as many hires."""
 
     name: str = "align"
-    needs: tuple[str, ...] = ("series", "forecasts", "config", "target", "movements")
+    reconciled: bool = False
     gives: tuple[str, ...] = ("forecasts",)
+
+    @property
+    def needs(self) -> tuple[str, ...]:
+        reads = ("series", "forecasts", "config", "target", "movements")
+        return (*reads, "unreconciled") if self.reconciled else reads
 
     def validate(self, ctx: Context) -> list[str]:
         target, config = ctx["target"], ctx["config"]
@@ -345,6 +360,7 @@ class Align:
         series, config, target = ctx["series"], ctx["config"], ctx["target"]
         rules = config.alignment
         forecasts: Forecasts = dict(ctx["forecasts"])
+        generated: Forecasts = ctx["unreconciled"] if self.reconciled else forecasts
         terms_of, _ = identity_terms({category for _, category in forecasts})
         signs = {c.value: s for c, s in terms_of.items()}
         marginal = target.marginal(config.grouping)
@@ -361,10 +377,16 @@ class Align:
                 continue
             g = marginal.groups.index(group)
             goal, band = _targets(target, marginal, config.grouping, months, g, rules.all_months)
+            aligned = ~np.isnan(goal)
             problem = AlignmentProblem(
                 forecasts[group, ANCHOR],
                 float(series.values(group, ANCHOR).iloc[-1]),
-                {c.value: forecasts[group, c] for c in terms_of},
+                {
+                    c.value: np.where(
+                        aligned, generated.get((group, c), forecasts[group, c]), forecasts[group, c]
+                    )
+                    for c in terms_of
+                },
                 signs,
                 goal,
                 band,
@@ -378,7 +400,7 @@ class Align:
             forecasts[group, ANCHOR] = result.anchor
             for c in terms_of:
                 forecasts[group, c] = result.flows[c.value]
-            aligned_months += int((~np.isnan(goal)).sum())
+            aligned_months += int(aligned.sum())
             shortfalls[group] = float(np.abs(result.shortfall).max(initial=0.0))
         ctx.note(
             self.name,
@@ -553,7 +575,11 @@ class Format:
 def pipeline(config: GuidanceConfig) -> Pipeline:
     """The lite pipeline's steps, reconciling when `config` asks to."""
     middle = (Reconcile(), Cohere("reconciled")) if config.reconcile else ()
-    align = (Align(), Cohere("aligned")) if config.alignment.method is not None else ()
+    align = (
+        (Align(reconciled=config.reconcile), Cohere("aligned"))
+        if config.alignment.method is not None
+        else ()
+    )
     split_ = (Disaggregate(),) if config.disaggregation.strategy is not None else ()
     return Pipeline(
         (

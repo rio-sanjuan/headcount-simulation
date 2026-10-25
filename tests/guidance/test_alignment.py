@@ -200,6 +200,42 @@ def test_alignment_takes_precedence_over_reconciliation(con: duckdb.DuckDBPyConn
     assert steps.index("reconcile") < steps.index("align") < steps.index("format")
 
 
+def totals(result: object) -> dict[str, np.ndarray]:
+    """Each category's values by forecast month."""
+    frame = result.artifact.frame  # type: ignore[attr-defined]
+    table = frame.pivot_table(index="forecast_month", columns="category", values="value")
+    return {str(c): table[c].to_numpy(dtype=float) for c in table.columns}
+
+
+def test_alignment_re_derives_its_months_from_the_flows_as_generated(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    # The tiny world grew lately, so its forecast anchor starts well below the last actual, and
+    # reconciliation books the fall as exits. Where the plan replaces that anchor, the flows
+    # start from their forecasts as generated, so the fall doesn't stay as exits that as many
+    # hires then cancel: hires the engine can only fill from the openings it has.
+    plain = {"horizon": 6, "grouping": "TOPLINE"}
+    generated = run(con, GuidanceConfig.from_mapping({**plain, "reconciliation": {"method": None}}))
+    last = float(generated.series.values("ALL", GuidanceCategory.HEADCOUNT).iloc[-1])
+    start = pd.Period("2026-01", "M")
+    dates = [str(start + k) for k in range(6)]
+    m = marginal("TOPLINE", ["ALL"], dates, [[last] * 6])
+    flat = AlignmentTarget((m,), start, months=6, planned_depth=6)
+    before, reconciled = totals(generated), totals(run(con, GuidanceConfig.from_mapping(plain)))
+    assert reconciled["attrition"][0] > 10 * before["attrition"][0]  # the fall, as exits
+    aligned = run(con, GuidanceConfig.from_mapping(CONFIG), flat)
+    after = totals(aligned)
+    assert after["headcount"] == pytest.approx([last] * 6)
+    # Holding the plan flat, month 0's flows only close the gap between its hires and exits.
+    flows = ("attrition", "external_hires")
+    widest = max(before[c][0] for c in flows)
+    assert max(after[c][0] for c in flows) == pytest.approx(widest)
+    # Every month is aligned, so reconciling first changes nothing.
+    without = {**CONFIG, "reconciliation": {"method": None}}
+    unreconciled = run(con, GuidanceConfig.from_mapping(without), flat)
+    pd.testing.assert_frame_equal(aligned.artifact.frame, unreconciled.artifact.frame)
+
+
 def test_the_command_aligns_to_a_saved_target(
     con: duckdb.DuckDBPyConnection, world: Path, tmp_path: Path
 ) -> None:
