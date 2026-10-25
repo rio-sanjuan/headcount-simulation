@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -124,3 +125,26 @@ def test_series_reads_one_group_and_category(con: duckdb.DuckDBPyConnection) -> 
     values = series.values("CC-02", ATTRITION)
     assert len(values) == 60
     assert values.index.is_monotonic_increasing
+
+
+def test_series_reads_each_key_as_a_filter_of_the_frame_would(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    # The series keep each one's rows, found once; reading them gives what filtering does.
+    series = ingest(con)
+    frame = series.frame
+    present = set(zip(frame["group"], frame["category"], strict=True))
+    groups = sorted(frame["group"].unique())
+    expected = [(g, c) for g in groups for c in GuidanceCategory if (g, c.value) in present]
+    assert series.keys == expected
+    for group, category in expected:
+        rows = frame[(frame["group"] == group) & (frame["category"] == category.value)]
+        reference = rows.set_index("month")["value"].sort_index()
+        pd.testing.assert_series_equal(series.values(group, category), reference)
+        np.testing.assert_array_equal(series.history(group, category), reference.to_numpy())
+        assert series.carries(group, category)
+    assert series.values("CC-99", ATTRITION).empty
+    assert not series.carries("CC-99", ATTRITION)
+    # Each history is the caller's own.
+    series.history("CC-01", HEADCOUNT)[:] = -1
+    assert (series.history("CC-01", HEADCOUNT) >= 0).all()

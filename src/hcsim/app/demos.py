@@ -34,8 +34,8 @@ import pandas as pd
 
 from hcsim.engine.loop import SimulationResult
 from hcsim.engine.seeding import schema_from_world, seed_state, snapshot_before
+from hcsim.guidance import pipeline as guidance
 from hcsim.guidance.config import GuidanceConfig
-from hcsim.guidance.pipeline import run as fit_guidance
 from hcsim.model.core.alignment_builders import synthetic
 from hcsim.model.core.schema import AWARD_TYPE, COST_CENTER
 from hcsim.model.ml.sampling import bernoulli, quota_select
@@ -112,7 +112,7 @@ class Explorer:
         self.world = world
         self.scratch = scratch
         self._kept: dict[Hashable, Any] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # reentrant: a kept demo keeps the forecast it aligns
         with duckdb.connect(str(world), read_only=True) as con:
             last = snapshot_before(con, dt.date.max)
         self.run_date = last + dt.timedelta(days=1)
@@ -134,6 +134,14 @@ class Explorer:
     def _factors(self, growth: float) -> list[float]:
         return [round(1 + growth * (k + 1) / PLAN_MONTHS, 6) for k in range(PLAN_MONTHS)]
 
+    def _forecast(self) -> guidance.Fitted:
+        """The world's guidance forecast, fitted once: only its alignment depends on a plan."""
+        config = GuidanceConfig.from_mapping(
+            {"horizon": PLAN_MONTHS, "alignment": {"method": "greedy"}}
+        )
+        fitted: guidance.Fitted = self._keep("forecast", lambda: guidance.fit(self.world, config))
+        return fitted
+
     def _aligned(self, growth: float) -> tuple[Path, Path]:
         """A plan rising evenly to `growth` above the seed, saved, and guidance aligned to it."""
         where = self.scratch / f"valves-{growth:g}"
@@ -145,21 +153,18 @@ class Explorer:
             schema = schema_from_world(con)
             labels = schema.vocabulary(COST_CENTER).labels
             state, _ = seed_state(con, schema, self.run_date)
-            heads = {labels[c]: float(n) for c, n in enumerate(state.headcount) if n > 0}
-            plan = synthetic(
-                "relative",
-                COST_CENTER,
-                heads,
-                start=start,
-                months=PLAN_MONTHS,
-                dates=[str(start + k) for k in range(PLAN_MONTHS)],
-                factors=self._factors(growth),
-            )
-            plan.save(plan_path)
-            config = GuidanceConfig.from_mapping(
-                {"horizon": PLAN_MONTHS, "alignment": {"method": "greedy"}}
-            )
-            fit_guidance(con, config, plan).artifact.save(guidance_path)
+        heads = {labels[c]: float(n) for c, n in enumerate(state.headcount) if n > 0}
+        plan = synthetic(
+            "relative",
+            COST_CENTER,
+            heads,
+            start=start,
+            months=PLAN_MONTHS,
+            dates=[str(start + k) for k in range(PLAN_MONTHS)],
+            factors=self._factors(growth),
+        )
+        plan.save(plan_path)
+        guidance.finish(self._forecast(), plan).artifact.save(guidance_path)
         return plan_path, guidance_path
 
     def valves(self, growth: float = 0.05, trajectories: int = 4) -> dict[str, Any]:

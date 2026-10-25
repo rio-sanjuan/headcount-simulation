@@ -16,9 +16,9 @@ from hcsim.engine.config import ConfigError
 from hcsim.guidance.alignment import AlignmentProblem, greedy, path, shortfall_of
 from hcsim.guidance.config import GuidanceConfig, GuidanceConfigError
 from hcsim.guidance.framework import PipelineError
-from hcsim.guidance.pipeline import run
+from hcsim.guidance.pipeline import finish, fit, run
 from hcsim.model.core.alignment import AlignmentTarget, marginal
-from hcsim.model.core.categories import GuidanceCategory
+from hcsim.model.core.categories import ANCHOR, GuidanceCategory
 from hcsim.model.core.guidance import GuidanceForecast, movements_digest
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
@@ -198,6 +198,50 @@ def test_alignment_takes_precedence_over_reconciliation(con: duckdb.DuckDBPyConn
     assert result.report["alignment"]["precedence"] == "aligned after reconciliation"
     steps = [s["step"] for s in result.report["steps"]]
     assert steps.index("reconcile") < steps.index("align") < steps.index("format")
+
+
+def test_one_fit_finishes_for_each_target_as_a_whole_run_would(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    # Per cost center, its own target dates and bands, and one center the plan leaves out.
+    config = GuidanceConfig.from_mapping({"horizon": 6, "alignment": {"method": "greedy"}})
+    fitted = fit(con, config)
+    groups = sorted({group for group, _ in fitted.context["forecasts"]})
+    last = {g: float(fitted.context["series"].values(g, ANCHOR).iloc[-1]) for g in groups}
+    dates = ["2026-02", "2026-04", "2026-06"]
+    planned = groups[:-1]
+
+    def plan(growth: float) -> AlignmentTarget:
+        values = [
+            [last[g] * (1 + growth * (k + 1)) if (k + i) % 2 == 0 else np.nan for k in range(3)]
+            for i, g in enumerate(planned)
+        ]
+        bands = [[1.0 if not np.isnan(v) else np.nan for v in row] for row in values]
+        m = marginal("cost_center", planned, dates, values, bands)
+        return AlignmentTarget((m,), pd.Period("2026-01", "M"), months=6, planned_depth=6)
+
+    for growth in (0.0, 0.1):  # finishing twice leaves the fit as it was
+        target = plan(growth)
+        finished = finish(fitted, target)
+        whole = run(con, config, target)
+        assert finished.artifact.fingerprint() == whole.artifact.fingerprint()
+        assert finished.report["alignment"]["untargeted_groups"] == [groups[-1]]
+        assert finished.report["alignment"]["aligned_months"] == sum(
+            (k + i) % 2 == 0 for i in range(len(planned)) for k in range(3)
+        )
+        assert finished.report["alignment"]["max_shortfall"] == 0.0
+        # Each center lands within its own band on its own dates.
+        frame = finished.artifact.frame.query("category == 'headcount'")
+        heads = frame.set_index(["cost_center", "forecast_month"])["value"]
+        goals = target.marginals[0].values
+        for i, g in enumerate(planned):
+            for k, month in enumerate((1, 3, 5)):
+                if not np.isnan(goals[i, k]):
+                    assert abs(heads[g, month] - goals[i, k]) <= 1.0 + 1e-6, (g, month)
+    assert "align" not in fitted.context.report
+    steps = [s["step"] for s in finished.report["steps"]]
+    assert steps.count("ingest") == 1
+    assert steps[-1] == "format"
 
 
 def totals(result: object) -> dict[str, np.ndarray]:
