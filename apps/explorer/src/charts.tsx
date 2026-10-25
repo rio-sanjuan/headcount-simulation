@@ -173,14 +173,16 @@ function Figure({
   children: (width: number) => ReactNode;
   after?: ReactNode;
 }) {
-  const ref = useRef<HTMLElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref);
   return (
-    <figure className="chart" ref={ref}>
+    <figure className="chart">
       <figcaption>{title}</figcaption>
-      <svg viewBox={`0 0 ${width} ${HEIGHT}`} width={width} height={HEIGHT} role="img" aria-label={title}>
-        {children(width)}
-      </svg>
+      <div className="plot" ref={ref}>
+        <svg viewBox={`0 0 ${width} ${HEIGHT}`} width={width} height={HEIGHT} role="img" aria-label={title}>
+          {children(width)}
+        </svg>
+      </div>
       {after}
     </figure>
   );
