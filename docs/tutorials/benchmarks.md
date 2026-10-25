@@ -11,6 +11,9 @@ make bench-baseline  # remeasures every case and stores the baseline
 
 Timings are machine-specific, so they're flagged for a person to read and never gate CI.
 
+Besides simulations, the suite fits guidance on the small and medium worlds and aligns it to a
+plan (`small-guidance`, `medium-guidance`), so a slower guidance pipeline is flagged too.
+
 ## Will a run fit?
 
 The capacity model, fitted to the baseline, predicts a run's time and peak memory, and whether
@@ -28,3 +31,5 @@ which phase set its peak:
 ```bash
 uv run hcsim bench profile --case medium-sbc-2 --cache-dir .bench/worlds --out profiles
 ```
+
+A guidance case profiles the same way, as `--case medium-guidance`.

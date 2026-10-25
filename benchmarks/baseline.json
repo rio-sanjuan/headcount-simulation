@@ -147,6 +147,36 @@
       "prepare_peak_mib": 1284.4
     },
     {
+      "case": "small-guidance",
+      "preset": "small",
+      "scope": "guidance",
+      "trajectories": 1,
+      "months": 6,
+      "streaming": false,
+      "employees": 7012,
+      "openings": 0,
+      "tranches": 0,
+      "prepare_seconds": 0.256,
+      "simulate_seconds": 0.024,
+      "peak_mib": 405.4,
+      "prepare_peak_mib": 403.4
+    },
+    {
+      "case": "medium-guidance",
+      "preset": "medium",
+      "scope": "guidance",
+      "trajectories": 1,
+      "months": 6,
+      "streaming": false,
+      "employees": 72117,
+      "openings": 0,
+      "tranches": 0,
+      "prepare_seconds": 2.133,
+      "simulate_seconds": 0.211,
+      "peak_mib": 1280.5,
+      "prepare_peak_mib": 1263.6
+    },
+    {
       "case": "large-hcf-2",
       "preset": "large",
       "scope": "hcf",

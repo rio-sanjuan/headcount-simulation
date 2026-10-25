@@ -1,7 +1,8 @@
 """The capacity model: a run's time and peak memory, predicted from its size.
 
-The model is fitted per forecast scope from the scale harness's measurements, since SBC
-dominates both time and memory where a run computes it. Each cost is linear in the run's size:
+The model is fitted per forecast scope from the scale harness's measurements of simulations,
+since SBC dominates both time and memory where a run computes it. Each cost is linear in the
+run's size:
 
 - preparing takes `a + b · employees` seconds: reading the world, fitting, and seeding;
 - simulating takes `a + b · employee-months` seconds, where employee-months are the employees
@@ -32,7 +33,7 @@ from typing import Any, Final
 
 import numpy as np
 
-from hcsim.bench.scale import Measurement
+from hcsim.bench.scale import SIMULATED, Measurement
 
 FIT_VERSION: Final = 1
 #: Each measure's noise floor: below it, an error is relative to the floor, not the value.
@@ -157,7 +158,7 @@ class CapacityModel:
 
     @classmethod
     def fit(cls, measurements: Sequence[Measurement]) -> CapacityModel:
-        scopes = sorted({m.scope for m in measurements})
+        scopes = sorted({m.scope for m in measurements if m.scope in SIMULATED})
         return cls({s: Fit.of([m for m in measurements if m.scope == s]) for s in scopes})
 
     def _scope(self, scope: str) -> Fit:

@@ -20,7 +20,17 @@ from hcsim.bench.baseline import (
     machine,
 )
 from hcsim.bench.capacity import CapacityError, CapacityModel, Fit, nonnegative_fit
-from hcsim.bench.scale import CASES, LARGE, SUITE, Case, Measurement, ensure_world, measure
+from hcsim.bench.scale import (
+    CASES,
+    GUIDANCE,
+    LARGE,
+    SIMULATED,
+    SUITE,
+    Case,
+    Measurement,
+    ensure_world,
+    measure,
+)
 from hcsim.bench.world import BenchError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,9 +79,10 @@ def test_the_suites_name_their_cases_once() -> None:
     assert len(CASES) == len(SUITE) + len(LARGE)
     assert {c.preset for c in SUITE} == {"tiny", "small", "medium"}
     assert {c.preset for c in LARGE} == {"large"}
-    for scope in ("hcf", "hcf+sbc"):
+    for scope in SIMULATED:
         assert len([c for c in SUITE if c.scope == scope]) >= 3  # enough to fit each scope
     assert any(c.streaming for c in SUITE)
+    assert {c.preset for c in SUITE if c.scope == GUIDANCE} == {"small", "medium"}
 
 
 def test_a_case_measures_its_size_and_costs(tiny_world: Path) -> None:
@@ -83,6 +94,17 @@ def test_a_case_measures_its_size_and_costs(tiny_world: Path) -> None:
     assert held.employee_months == held.employees * 3 * 2
     assert min(held.prepare_seconds, held.simulate_seconds) >= 0
     assert held.peak_mib > 0
+
+
+def test_a_guidance_case_times_the_fit_and_the_alignment(tiny_world: Path) -> None:
+    m = measure(Case("tiny-guidance", "tiny", GUIDANCE, 1, months=6), tiny_world)
+    assert m.employees > 0
+    assert (m.openings, m.tranches) == (0, 0)
+    assert m.prepare_seconds > 0
+    assert m.simulate_seconds >= 0
+    assert 0 < m.prepare_peak_mib <= m.peak_mib
+    # It doesn't simulate, so the capacity model leaves it out.
+    assert set(CapacityModel.fit([*MEASURED, m]).fits) == {"hcf"}
 
 
 # 27 MiB on macOS at M9, imports included. The memory job runs on Linux, where the skeleton's
@@ -212,7 +234,7 @@ def test_the_stored_baseline_covers_the_suite_and_fits_itself() -> None:
     assert [m.case for m in stored.measurements] == [c.name for c in (*SUITE, *LARGE)]
     assert set(stored.capacity.fits) == {"hcf", "hcf+sbc"}
     assert {"system", "machine", "cpus", "memory_gib", "python"} <= set(stored.machine)
-    for m in stored.measurements:
+    for m in (m for m in stored.measurements if m.scope in SIMULATED):
         fit = stored.capacity.fits[m.scope]
         p = stored.capacity.predict(m.employees, m.trajectories, m.months, m.scope, m.streaming)
         error = abs(p.peak_mib - m.peak_mib) / max(m.peak_mib, 32.0)
