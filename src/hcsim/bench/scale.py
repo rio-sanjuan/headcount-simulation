@@ -15,6 +15,10 @@ watchdog (`world.run_child`), which stops one that passes a memory limit. In it,
 - simulates the run unguided, timed, with its trajectories held, or streamed to a sink that
   keeps only what it counts.
 
+A case of the `guidance` scope fits guidance on its world instead, as the explorer's valves do,
+and aligns it to a plan: its preparing is the fit, and its simulating the alignment and the
+artifact's writing. The capacity model fits only the cases that simulate.
+
 A **measurement** (`Measurement`) records the run's size (the employees and openings seeded,
 its trajectories and months, the tranches it tracked) and its costs: each phase's seconds, and
 the process's peak memory once prepared and at the end. A world is generated once into the
@@ -84,6 +88,10 @@ class Measurement:
 
 
 _HCF, _SBC = "hcf", "hcf+sbc"
+#: A case of this scope fits guidance instead of simulating (see `measure`).
+GUIDANCE: Final = "guidance"
+#: The scopes whose cases simulate, which the capacity model fits.
+SIMULATED: Final = (_HCF, _SBC)
 #: The cases the stored baseline measures.
 SUITE: Final = (
     Case("tiny-hcf-2", "tiny", _HCF, 2),
@@ -95,6 +103,8 @@ SUITE: Final = (
     Case("medium-hcf-2", "medium", _HCF, 2),
     Case("medium-hcf-8", "medium", _HCF, 8),
     Case("medium-sbc-2", "medium", _SBC, 2),
+    Case("small-guidance", "small", GUIDANCE, 1, months=6),
+    Case("medium-guidance", "medium", GUIDANCE, 1, months=6),
 )
 #: The cases at 500k employees.
 LARGE: Final = (
@@ -122,6 +132,8 @@ def ensure_world(case: Case, cache: Path) -> Path:
 
 def measure(case: Case, world: Path) -> Measurement:
     """Run `case` on `world` in this process, timing each phase."""
+    if case.scope == GUIDANCE:
+        return _guidance(case, world)
     # Imported here, so the harness's own process never loads the engine.
     from hcsim.engine.loop import simulate
     from hcsim.studies.harness import ITSELF, StudyError, preflight
@@ -172,6 +184,47 @@ def measure(case: Case, world: Path) -> Measurement:
         tranches=tranches,
         prepare_seconds=round(prepared - started, 3),
         simulate_seconds=round(simulated - prepared, 3),
+        peak_mib=round(peak_rss_mib(), 1),
+        prepare_peak_mib=round(prepare_peak, 1),
+    )
+
+
+def _guidance(case: Case, world: Path) -> Measurement:
+    """Fit guidance on `world` over `months`, as the explorer does, and align it greedily to a
+    plan holding each cost center at its last headcount. Fitting is timed as preparing, and
+    aligning and writing as simulating; the employees are the headcount the series end on."""
+    from hcsim.guidance.config import GuidanceConfig
+    from hcsim.guidance.pipeline import finish, fit
+    from hcsim.model.core.alignment_builders import synthetic
+    from hcsim.model.core.categories import ANCHOR
+
+    config = GuidanceConfig.from_mapping(
+        {"horizon": case.months, "alignment": {"method": "greedy"}}
+    )
+    started = time.perf_counter()
+    fitted = fit(world, config)
+    prepared = time.perf_counter()
+    prepare_peak = peak_rss_mib()
+    series = fitted.context["series"]
+    heads = {g: float(series.history(g, ANCHOR)[-1]) for g, c in series.keys if c is ANCHOR}
+    plan = synthetic(
+        "constant", series.grouping, heads, start=series.snapshot + 1, months=case.months
+    )
+    aligning = time.perf_counter()
+    finish(fitted, plan)
+    finished = time.perf_counter()
+    return Measurement(
+        case=case.name,
+        preset=case.preset,
+        scope=case.scope,
+        trajectories=case.trajectories,
+        months=case.months,
+        streaming=case.streaming,
+        employees=round(sum(heads.values())),
+        openings=0,
+        tranches=0,
+        prepare_seconds=round(prepared - started, 3),
+        simulate_seconds=round(finished - aligning, 3),
         peak_mib=round(peak_rss_mib(), 1),
         prepare_peak_mib=round(prepare_peak, 1),
     )

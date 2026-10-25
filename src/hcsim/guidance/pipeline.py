@@ -28,6 +28,10 @@ The pipeline runs as ordered steps over a shared context (see `framework`):
 
 The context starts with two slots: `source`, where the warehouse tables are read from (see
 `sources`), and `config`.
+
+Nothing before the align step reads the alignment target, so a run is two stages: `fit` runs
+the steps through reconciliation, and `finish` the rest, for a target. `run` does both; a
+caller aligning one forecast to several plans fits once and finishes it once per plan.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from hcsim.guidance.coherence import Method as CoherenceMethod
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.guidance.covariates import covariates
 from hcsim.guidance.disaggregation import basis, shares, split
-from hcsim.guidance.framework import Context, Pipeline
+from hcsim.guidance.framework import Context, Pipeline, Step
 from hcsim.guidance.generation import generate
 from hcsim.guidance.models import ForecastError, capabilities
 from hcsim.guidance.reconcile import RECONCILERS, Problem
@@ -142,8 +146,8 @@ class Validate:
 
 def _exposure(series: Any, group: str, category: GuidanceCategory) -> Any:
     """A flow's exposure: its group's anchor history, when the group has one."""
-    if category is not ANCHOR and (group, ANCHOR) in series.keys:
-        return series.values(group, ANCHOR).to_numpy()
+    if category is not ANCHOR and series.carries(group, ANCHOR):
+        return series.history(group, ANCHOR)
     return None
 
 
@@ -164,7 +168,7 @@ class Select:
         selections: dict[tuple[str, GuidanceCategory], Selection] = {}
         skipped: list[dict[str, str]] = []
         for group, category in series.keys:
-            values = series.values(group, category).to_numpy()
+            values = series.history(group, category)
             exposure = _exposure(series, group, category)
             try:
                 selections[group, category] = select(
@@ -199,7 +203,7 @@ class Generate:
         skipped: list[dict[str, str]] = []
         selections = ctx["selections"]
         for stream, ((group, category), selection) in enumerate(selections.items()):
-            values = series.values(group, category).to_numpy()
+            values = series.history(group, category)
             exposure = _exposure(series, group, category)
             future = None if exposure is None else forecasts.get((group, ANCHOR))
             try:
@@ -295,7 +299,7 @@ class Reconcile:
             keys = [ANCHOR, *terms]
             problem = Problem(
                 forecasts[group, ANCHOR],
-                float(series.values(group, ANCHOR).iloc[-1]),
+                float(series.history(group, ANCHOR)[-1]),
                 {c.value: forecasts[group, c] for c in terms},
                 signs,
                 config.tolerance,
@@ -365,6 +369,8 @@ class Align:
         signs = {c.value: s for c, s in terms_of.items()}
         marginal = target.marginal(config.grouping)
         months = [series.snapshot + 1 + k for k in range(config.horizon)]
+        goals, bands = _targets(target, marginal, config.grouping, months, rules.all_months)
+        index = {group: g for g, group in enumerate(marginal.groups)}
         movements = ctx["movements"] or {}
         shortfalls: dict[str, float] = {}
         untargeted, aligned_months = [], 0
@@ -372,15 +378,14 @@ class Align:
             keys = [ANCHOR, *terms_of]
             if any((group, c) not in forecasts for c in keys):
                 continue
-            if group not in marginal.groups:
+            if group not in index:
                 untargeted.append(group)
                 continue
-            g = marginal.groups.index(group)
-            goal, band = _targets(target, marginal, config.grouping, months, g, rules.all_months)
+            goal, band = goals[index[group]], bands[index[group]]
             aligned = ~np.isnan(goal)
             problem = AlignmentProblem(
                 forecasts[group, ANCHOR],
-                float(series.values(group, ANCHOR).iloc[-1]),
+                float(series.history(group, ANCHOR)[-1]),
                 {
                     c.value: np.where(
                         aligned, generated.get((group, c), forecasts[group, c]), forecasts[group, c]
@@ -422,23 +427,24 @@ def _targets(
     marginal: Any,
     grouping: str,
     months: list[Any],
-    group: int,
     all_months: bool,
 ) -> tuple[Any, Any]:
-    """Per forecast month, the group's target and band, NaN where the month isn't aligned:
-    outside the target's window, past its evaluation month, or, unless `all_months`, off its
-    target dates."""
+    """Per group of the marginal and forecast month, the target and band, NaN where the month
+    isn't aligned: outside the target's window, past its evaluation month, or, unless
+    `all_months`, off the group's target dates."""
     first, last = target.window
-    goal, band = np.full(len(months), np.nan), np.zeros(len(months))
+    shape = (len(marginal.groups), len(months))
+    goal, band = np.full(shape, np.nan), np.zeros(shape)
     for k, month in enumerate(months):
         if not first <= month <= last or not target.is_planned(month):
             continue
         if all_months:
-            goal[k] = target.target(grouping, month)[group]
+            goal[:, k] = target.target(grouping, month)
             continue
-        width = marginal.band_at(month)[group]
-        if not np.isnan(width):
-            goal[k], band[k] = target.target(grouping, month)[group], width
+        width = marginal.band_at(month)
+        dated = ~np.isnan(width)
+        goal[dated, k] = target.target(grouping, month)[dated]
+        band[dated, k] = width[dated]
     return goal, band
 
 
@@ -572,42 +578,57 @@ class Format:
         return {"artifact": artifact}
 
 
-def pipeline(config: GuidanceConfig) -> Pipeline:
-    """The lite pipeline's steps, reconciling when `config` asks to."""
+def _fitting(config: GuidanceConfig) -> tuple[Step, ...]:
+    """The steps no target changes: ingest through reconciliation."""
     middle = (Reconcile(), Cohere("reconciled")) if config.reconcile else ()
+    return (Ingest(), Validate(), Select(), Generate(), Cohere("generated"), *middle)
+
+
+def _finishing(config: GuidanceConfig) -> tuple[Step, ...]:
+    """The steps after them: alignment, which reads the target, and those that follow it."""
     align = (
         (Align(reconciled=config.reconcile), Cohere("aligned"))
         if config.alignment.method is not None
         else ()
     )
     split_ = (Disaggregate(),) if config.disaggregation.strategy is not None else ()
-    return Pipeline(
-        (
-            Ingest(),
-            Validate(),
-            Select(),
-            Generate(),
-            Cohere("generated"),
-            *middle,
-            *align,
-            *split_,
-            Format(),
-        )
-    )
+    return (*align, *split_, Format())
 
 
-def run(
-    source: Source | duckdb.DuckDBPyConnection | Path,
-    config: GuidanceConfig | None = None,
+def pipeline(config: GuidanceConfig) -> Pipeline:
+    """The lite pipeline's steps, reconciling when `config` asks to."""
+    return Pipeline((*_fitting(config), *_finishing(config)))
+
+
+@dataclass(frozen=True)
+class Fitted:
+    """A forecast fitted and reconciled, before alignment: the part of a run no target
+    changes, which `finish` completes for as many targets as it's given."""
+
+    config: GuidanceConfig
+    context: Context
+
+
+def fit(
+    source: Source | duckdb.DuckDBPyConnection | Path, config: GuidanceConfig | None = None
+) -> Fitted:
+    """Run the steps no target changes on `source`, as `run` does. A source that's a
+    connection must stay open until the forecast is finished, if it's disaggregated."""
+    config = config or GuidanceConfig()
+    ctx = Pipeline(_fitting(config)).run(Context({"source": source, "config": config}))
+    return Fitted(config, ctx)
+
+
+def finish(
+    fitted: Fitted,
     target: AlignmentTarget | None = None,
     movements: Mapping[str, Any] | None = None,
 ) -> PipelineResult:
-    """Run the pipeline on `source`: a `Source`, a DuckDB connection, or a path to a DuckDB
-    file or a directory of table files. `target` holds the plan targets alignment moves the
-    forecast onto, and `movements` each group's declared change, `ε_H`, per forecast month."""
-    config = config or GuidanceConfig()
-    seed = {"source": source, "config": config, "target": target, "movements": movements}
-    ctx = pipeline(config).run(Context(seed))
+    """Finish `fitted` as `run` does, aligned to `target` and `movements`. `fitted` itself is
+    left as it was, so another target can finish it again."""
+    config = fitted.config
+    ctx = fitted.context.fork({"target": target, "movements": movements})
+    ctx = Pipeline(_finishing(config)).run(ctx)
     artifact: GuidanceForecast = ctx["artifact"]
     sections = ctx.report
     report = {
@@ -664,3 +685,15 @@ def run(
         ],
     }
     return PipelineResult(artifact, report, ctx["series"])
+
+
+def run(
+    source: Source | duckdb.DuckDBPyConnection | Path,
+    config: GuidanceConfig | None = None,
+    target: AlignmentTarget | None = None,
+    movements: Mapping[str, Any] | None = None,
+) -> PipelineResult:
+    """Run the pipeline on `source`: a `Source`, a DuckDB connection, or a path to a DuckDB
+    file or a directory of table files. `target` holds the plan targets alignment moves the
+    forecast onto, and `movements` each group's declared change, `ε_H`, per forecast month."""
+    return finish(fit(source, config), target, movements)

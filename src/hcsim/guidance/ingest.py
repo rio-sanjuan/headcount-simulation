@@ -19,10 +19,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from functools import cached_property
+from typing import Any, Final
 
 import duckdb
+import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from hcsim.guidance.sources import TABLES, missing_tables
 from hcsim.model.core.aligner import TOPLINE, TOPLINE_LABEL
@@ -94,7 +97,10 @@ class IngestionError(ValueError):
 
 @dataclass(frozen=True)
 class Series:
-    """Long-form monthly series, with the snapshot: the last month with any data."""
+    """Long-form monthly series, with the snapshot: the last month with any data.
+
+    The frame is read, never changed, so what's read from it (the groups, the categories, and
+    each series' rows) is found once and kept: a run reads every series several times."""
 
     frame: pd.DataFrame
     grouping: str
@@ -104,25 +110,49 @@ class Series:
     #: The absolute count on rows no group took, left out of every series.
     ungrouped: float = 0.0
 
-    @property
+    @cached_property
     def groups(self) -> list[str]:
         return sorted(self.frame[GROUP].unique())
 
-    @property
+    @cached_property
     def categories(self) -> list[GuidanceCategory]:
         """The categories the series carry, in the categories' declared order."""
         carried = set(self.frame[CATEGORY])
         return [c for c in GuidanceCategory if c.value in carried]
 
-    @property
+    @cached_property
     def keys(self) -> list[tuple[str, GuidanceCategory]]:
         """Each series' (group, category), by group and then the categories' declared order."""
-        present = set(zip(self.frame[GROUP], self.frame[CATEGORY], strict=True))
+        present = self._rows
         return [(g, c) for g in self.groups for c in self.categories if (g, c.value) in present]
 
+    @cached_property
+    def _rows(self) -> dict[tuple[str, str], NDArray[np.intp]]:
+        """Each series' row positions in the frame, in month order, by group and category value."""
+        by_month = self.frame[MONTH].argsort(kind="stable").to_numpy()
+        found: dict[Any, Any] = (
+            self.frame.iloc[by_month].groupby([GROUP, CATEGORY], sort=False).indices
+        )
+        return {key: by_month[positions] for key, positions in found.items()}
+
+    @cached_property
+    def _values(self) -> NDArray[Any]:
+        values: NDArray[Any] = self.frame[VALUE].to_numpy()
+        return values
+
+    def carries(self, group: str, category: GuidanceCategory) -> bool:
+        """Whether there's a series for `group` and `category`."""
+        return (group, category.value) in self._rows
+
     def values(self, group: str, category: GuidanceCategory) -> pd.Series:
-        rows = self.frame[(self.frame[GROUP] == group) & (self.frame[CATEGORY] == category.value)]
+        rows = self.frame.iloc[self._rows.get((group, category.value), [])]
         return rows.set_index(MONTH)[VALUE].sort_index()
+
+    def history(self, group: str, category: GuidanceCategory) -> NDArray[Any]:
+        """The values of a series it carries, month by month, as a new array: `values`, without
+        the months."""
+        history: NDArray[Any] = self._values[self._rows[group, category.value]]
+        return history
 
 
 def grouping_problems(grouping: str) -> list[str]:

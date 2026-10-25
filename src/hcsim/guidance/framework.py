@@ -67,6 +67,16 @@ class Context:
         """Add entries to `step`'s report section."""
         self.report.setdefault(step, {}).update(entries)
 
+    def fork(self, slots: Mapping[str, Any] | None = None) -> Context:
+        """A copy, with `slots` added, for more steps to run on while this one stays as it was.
+        The slots' values are shared, not copied: a step returns new values rather than
+        changing the ones it reads."""
+        return Context(
+            {**self.slots, **(slots or {})},
+            {step: dict(section) for step, section in self.report.items()},
+            list(self.records),
+        )
+
 
 class Step(Protocol):
     """One stage of a pipeline."""
