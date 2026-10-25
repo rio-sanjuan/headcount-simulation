@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-baseline world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-large bench-baseline world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -96,9 +96,16 @@ bench: ## Run the scale harness's suite and flag regressions past 20% over the s
 	$(UV_RUN) hcsim bench scale --cache-dir .bench/worlds --out .bench/run.json --max-rss-gib 16
 	$(UV_RUN) hcsim bench compare --run .bench/run.json
 
-bench-baseline: ## Measure the suite and store it as the benchmark baseline
-	$(UV_RUN) hcsim bench scale --cache-dir .bench/worlds --out .bench/run.json --max-rss-gib 16 \
-		--baseline-out benchmarks/baseline.json
+bench-large: ## Run the 500k cases and flag regressions over the stored baseline (16 GiB)
+	$(UV_RUN) hcsim bench scale --suite large --cache-dir .bench/worlds --out .bench/large.json \
+		--max-rss-gib 16
+	$(UV_RUN) hcsim bench compare --run .bench/large.json
+
+# The baseline holds the 500k cases too, so the capacity model is fitted across the sizes it
+# predicts. The large world takes about six minutes to generate the first time, and 10 GiB.
+bench-baseline: ## Measure the suite and the 500k cases, and store them as the baseline
+	$(UV_RUN) hcsim bench scale --suite all --cache-dir .bench/worlds --out .bench/run.json \
+		--max-rss-gib 16 --baseline-out benchmarks/baseline.json
 
 # The `small` world as a release asset: generated, checked, and exported as uncompressed
 # Parquet, so the scan before upload reads every label. Then it's archived, compressed, with a

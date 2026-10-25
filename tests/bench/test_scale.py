@@ -209,7 +209,7 @@ def test_a_regression_past_twenty_percent_is_flagged() -> None:
 
 def test_the_stored_baseline_covers_the_suite_and_fits_itself() -> None:
     stored = Baseline.load(ROOT / BASELINE_PATH)
-    assert [m.case for m in stored.measurements] == [c.name for c in SUITE]
+    assert [m.case for m in stored.measurements] == [c.name for c in (*SUITE, *LARGE)]
     assert set(stored.capacity.fits) == {"hcf", "hcf+sbc"}
     assert {"system", "machine", "cpus", "memory_gib", "python"} <= set(stored.machine)
     for m in stored.measurements:
@@ -277,6 +277,8 @@ def test_scale_writes_measurements_and_a_baseline(
     assert Baseline.load(base).measurements == tuple(MEASURED)
     assert cli.main(["scale", "--cache-dir", str(tmp_path), "--suite", "large"]) == 0
     assert ran[-1] == [c.name for c in LARGE]
+    assert cli.main(["scale", "--cache-dir", str(tmp_path), "--suite", "all"]) == 0
+    assert ran[-1] == [c.name for c in (*SUITE, *LARGE)]
     assert cli.main(["scale", "--cache-dir", str(tmp_path), "--case", "small-hcf-2"]) == 0
     assert ran[-1] == ["small-hcf-2"]
 
@@ -290,3 +292,56 @@ def test_scale_writes_measurements_and_a_baseline(
     monkeypatch.setattr(scale, "run", broken)
     assert cli.main(["scale", "--cache-dir", str(tmp_path)]) == 1
     assert "memory limit" in capsys.readouterr().out
+
+
+# --- profiling --------------------------------------------------------------------------------
+
+
+def test_profiling_writes_statistics_and_a_report(tiny_world: Path, tmp_path: Path) -> None:
+    from hcsim.bench.profiling import profile_here
+
+    m = profile_here(TINY, tiny_world, tmp_path, top=5)
+    assert 0 < m.prepare_peak_mib <= m.peak_mib
+    report = (tmp_path / f"{TINY.name}.txt").read_text()
+    assert report.startswith(f"case {TINY.name}: tiny, hcf+sbc, 2 trajectories of 3 months")
+    assert "set it" in report
+    assert "## hcsim's functions, by cumulative time" in report
+    assert "## every function, by its own time" in report
+    assert "loop.py" in report  # the simulation, among the top five
+    assert (tmp_path / f"{TINY.name}.prof").stat().st_size > 0
+
+
+def test_a_case_is_profiled_in_its_own_process(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    case = dataclasses.replace(TINY, name="small-hcf-2", preset="tiny", scope="hcf")
+    monkey = pytest.MonkeyPatch()
+    monkey.setitem(CASES, "small-hcf-2", case)  # the tiny world, under a suite case's name
+    try:
+        args = ["profile", "--case", "small-hcf-2", "--cache-dir", str(tmp_path / "w")]
+        assert cli.main([*args, "--out", str(tmp_path / "p"), "--top", "3"]) == 0
+    finally:
+        monkey.undo()
+    out = capsys.readouterr().out
+    assert "case small-hcf-2: tiny, hcf" in out
+    assert (tmp_path / "p" / "small-hcf-2.prof").exists()
+
+
+def test_a_failed_profile_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hcsim.bench import profiling
+
+    def broken(*_: object) -> object:
+        raise BenchError("the 'tiny-hcf-2' profile failed:\nboom")
+
+    monkeypatch.setattr(profiling, "profile", broken)
+    args = ["profile", "--case", "tiny-hcf-2", "--cache-dir", str(tmp_path), "--out", str(tmp_path)]
+    assert cli.main(args) == 1
+    assert "boom" in capsys.readouterr().out
+
+
+def test_an_older_measurement_reads_without_its_prepared_peak() -> None:
+    row = dataclasses.asdict(MEASURED[0])
+    del row["prepare_peak_mib"]
+    assert Measurement(**row).prepare_peak_mib == 0.0

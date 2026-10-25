@@ -88,7 +88,7 @@ from hcsim.financial.expense import (
     calculate_chunks,
     prepare,
 )
-from hcsim.financial.output import combine_parts, publish, sbc_parts, streams
+from hcsim.financial.output import PartsTotal, coded_parts, publish, streams
 from hcsim.financial.tracker import HolderLedger, Tranches
 from hcsim.model.core.layouts import EmployeeColumn, OpeningColumn
 from hcsim.model.core.schema import COST_CENTER
@@ -421,13 +421,15 @@ def trajectory_expense(
     (see `financial.output`), each piece in its holder's cost center, with the offline stream's
     and the manual adjustments' beside it. The calculator works a chunk of tranches at a time
     (the expense settings' `chunk_size`), and each chunk's rows are summed into SBC and
-    released, so a seeded workforce's many rows are never all held. A row whose holder is
+    released, and the chunks' sums into a running total, so a seeded workforce's many rows,
+    and its chunks' many sums, are never all held. A row whose holder is
     outside the run's subset that month, by the ledger's membership, goes to the scratch frame,
     which isn't published. The result keeps every tranche's residual and
     opening balance, and no rows."""
     intervals = None if ledger is None else ledger.intervals()
     prepared = prepare(tranches, values, origin, intervals=intervals)
-    frames, scratches, residuals, openings = [], [], [], []
+    frames, scratches = PartsTotal(), PartsTotal()
+    residuals, openings = [], []
     for _, chunk, result in calculate_chunks(prepared, awards.expense, first_month=0):
         rows = result.rows
         holders = chunk.tranches.holder[rows["tranche"].to_numpy()]
@@ -437,12 +439,12 @@ def trajectory_expense(
             else ledger.inside(holders, rows["month"].to_numpy())
         )
         shown, held = publish(result, inside)
-        frames.append(sbc_parts(shown, chunk.tranches))
-        scratches.append(sbc_parts(held, chunk.tranches))
+        frames.add(coded_parts(shown, chunk.tranches))
+        scratches.add(coded_parts(held, chunk.tranches))
         residuals.append(result.residual)
         openings.append(result.opening if result.opening is not None else np.zeros(len(chunk)))
-    sbc = combine_parts([*frames, *streams(*awards.streams)])
-    scratch = combine_parts(scratches)
+    sbc = frames.total(streams(*awards.streams))
+    scratch = scratches.total()
     empty = result.rows.iloc[0:0].copy()
     result = ExpenseResult(
         empty, np.concatenate(residuals), np.concatenate(openings), awards.expense.enforces_identity

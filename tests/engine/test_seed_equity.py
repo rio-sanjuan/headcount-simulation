@@ -360,3 +360,30 @@ def test_the_actual_sbc_is_the_reference_ledgers_for_the_window(
     joined = align(forecast, actual)
     assert joined["actual"].sum() == pytest.approx(total)
     assert set(joined["part"]) >= {"seed", "sim"}
+
+
+def test_labels_encode_once_and_each_cause_counts_what_the_causes_before_it_kept() -> None:
+    from hcsim.engine.seed_equity import _encoded
+    from hcsim.model.core.schema import AWARD_TYPE, COST_CENTER, JOB_LEVEL, SimulationSchema
+
+    schema = SimulationSchema.build(
+        {COST_CENTER: ["A", "B"], JOB_LEVEL: [1, 2], AWARD_TYPE: ["annual", "new_hire"]}
+    )
+    frame = pd.DataFrame(
+        {
+            "cost_center": ["B", "A", "Z", None, "A", "B"],
+            "level": [2, 1, 9, 1, 9, 1],
+            "award_type": ["annual", "bonus", "annual", "annual", "annual", "new_hire"],
+            "shares": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    out, pruned = _encoded(frame, schema)
+    # Z and the missing cost center go first; of the rest, one level 9; then one bonus.
+    assert pruned == {"unknown_cost_center": 2, "unknown_level": 1, "unknown_award_type": 1}
+    assert out["shares"].tolist() == [1, 6]
+    assert out["cost_center"].tolist() == [1, 1]
+    assert out["level"].tolist() == [1, 0]
+    assert out["award_type"].tolist() == [0, 1]
+    empty, causes = _encoded(frame.assign(cost_center=None), schema)
+    assert empty.empty
+    assert causes == {"unknown_cost_center": 6}

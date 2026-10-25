@@ -8,6 +8,8 @@
   3 when anything is flagged.
 - `capacity` predicts a run's time and peak memory from the baseline's capacity model, and says
   whether it fits a memory budget as it stands, has to stream its trajectories, or can't fit.
+- `profile` runs one case under the profiler and writes its statistics and a report of where
+  its time went and which phase set its peak (see `profiling`).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from hcsim.bench import scale
+from hcsim.bench import profiling, scale
 from hcsim.bench.baseline import BASELINE_PATH, THRESHOLD, Baseline, BaselineError, compare
 from hcsim.bench.capacity import CapacityError
 from hcsim.bench.world import BenchError, run
@@ -42,7 +44,10 @@ def _parser() -> argparse.ArgumentParser:
 
     measure = commands.add_parser("scale", help="run the scale harness's cases")
     measure.add_argument(
-        "--suite", choices=["default", "large"], default="default", help="the cases to run"
+        "--suite",
+        choices=["default", "large", "all"],
+        default="default",
+        help="the cases to run: the suite, the 500k cases, or both",
     )
     measure.add_argument(
         "--case", action="append", choices=sorted(scale.CASES), help="run only these cases"
@@ -56,6 +61,13 @@ def _parser() -> argparse.ArgumentParser:
     against.add_argument("--run", type=Path, required=True, help="measurements, as `scale` wrote")
     against.add_argument("--baseline", type=Path, default=BASELINE_PATH)
     against.add_argument("--threshold", type=float, default=THRESHOLD)
+
+    profiled = commands.add_parser("profile", help="profile one case: its time, by function")
+    profiled.add_argument("--case", choices=sorted(scale.CASES), required=True)
+    profiled.add_argument("--cache-dir", type=Path, required=True, help="where worlds are kept")
+    profiled.add_argument("--out", type=Path, required=True, help="where the files are written")
+    profiled.add_argument("--top", type=int, default=30, help="functions in each table")
+    profiled.add_argument("--max-rss-gib", type=float, help="stop it if its memory passes this")
 
     capacity = commands.add_parser("capacity", help="predict a run's time and peak memory")
     capacity.add_argument("--baseline", type=Path, default=BASELINE_PATH)
@@ -93,7 +105,8 @@ def _scale(args: argparse.Namespace) -> int:
     if args.case:
         cases = [scale.CASES[name] for name in args.case]
     else:
-        cases = list(scale.SUITE if args.suite == "default" else scale.LARGE)
+        suites = {"default": scale.SUITE, "large": scale.LARGE, "all": (*scale.SUITE, *scale.LARGE)}
+        cases = list(suites[args.suite])
     try:
         measurements = scale.run(cases, args.cache_dir, args.max_rss_gib)
     except BenchError as error:
@@ -167,7 +180,26 @@ def _capacity(args: argparse.Namespace) -> int:
     return 0
 
 
+def _profile(args: argparse.Namespace) -> int:
+    try:
+        done = profiling.profile(
+            scale.CASES[args.case], args.cache_dir, args.out, args.top, args.max_rss_gib
+        )
+    except BenchError as error:
+        print(f"hcsim bench: {error}")
+        return 1
+    print(done.report.read_text().split("\n## ", 1)[0].rstrip())
+    print(f"wrote {done.report} and {done.stats}")
+    return 0
+
+
 def main(argv: Sequence[str]) -> int:
     args = _parser().parse_args(list(argv))
-    handlers = {"world": _world, "scale": _scale, "compare": _compare, "capacity": _capacity}
+    handlers = {
+        "world": _world,
+        "scale": _scale,
+        "compare": _compare,
+        "capacity": _capacity,
+        "profile": _profile,
+    }
     return handlers[args.command](args)

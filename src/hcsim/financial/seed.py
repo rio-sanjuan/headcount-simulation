@@ -70,15 +70,16 @@ class SeedError(ValueError):
     """Seed tranches that don't hold together."""
 
 
-def classify(holders: Ints, active: Ints, outside: Ints, future: Ints) -> NDArray[np.str_]:
+def classify(holders: Ints, active: Ints, outside: Ints, future: Ints) -> NDArray[np.object_]:
     """Each holder's status at the origin: active when in `active`, else outside when in
-    `outside`, else a future entrant when in `future`, else departed."""
+    `outside`, else a future entrant when in `future`, else departed. An object array, so its
+    many rows share the four statuses' strings."""
     holders = np.asarray(holders, dtype=np.int64)
     out = np.full(len(holders), HolderStatus.DEPARTED.value, dtype=object)
     out[np.isin(holders, future)] = HolderStatus.FUTURE.value
     out[np.isin(holders, outside)] = HolderStatus.OUTSIDE.value
     out[np.isin(holders, active)] = HolderStatus.ACTIVE.value
-    return out.astype(str)
+    return out
 
 
 @dataclass(frozen=True)

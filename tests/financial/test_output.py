@@ -127,3 +127,26 @@ def test_a_chunked_calculations_parts_keep_each_tranches_basis() -> None:
         frames.append(sbc_parts(result, chunk.tranches))
     pd.testing.assert_frame_equal(combine_parts(frames), parts(), check_exact=False)
     assert set(combine_parts(frames)["basis"]) == {"replayed", "sized"}
+
+
+def test_a_running_total_sums_chunks_as_they_come_and_labels_once() -> None:
+    from hcsim.financial.expense import calculate_chunks, prepare
+    from hcsim.financial.output import PartsTotal, coded_parts, streams
+
+    t = ledger().tranches()
+    values = np.where(np.isnan(t.values), 10.0, t.values)
+    keyed = {k: [0] for k in SBC_KEYS} | {v: [0.0] for v in SBC_VALUES}
+    offline = pd.DataFrame(keyed | {"recognized": [7.0]})
+    running = PartsTotal(limit=1)  # sums whenever two frames wait
+    for _, chunk, result in calculate_chunks(prepare(t, values), FLAT, 0, chunk_size=1):
+        running.add(coded_parts(result, chunk.tranches))
+    running.add(coded_parts(compute_expense(t, values, FLAT, first_month=0), t).iloc[0:0])
+    whole = sbc_parts(compute_expense(t, values, FLAT, first_month=0), t, offline)
+    pd.testing.assert_frame_equal(
+        running.total(streams(offline, None)), whole, check_exact=False, check_dtype=False
+    )
+    assert running.limit >= 2
+    assert PartsTotal().total(streams(offline, None))["part"].tolist() == ["offline"]
+    assert PartsTotal().total().empty
+    with pytest.raises(OutputError, match=r"only the ledger's rows are parts \['sim'\]"):
+        running.total([whole[whole["part"] == "sim"]])
