@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-large bench-baseline explorer-install explorer-check explorer-build explorer world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy docs docs-serve bench-world bench bench-large bench-baseline explorer-install explorer-check explorer-build explorer world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -148,6 +148,14 @@ explorer-build: explorer-install ## Build the explorer's frontend into apps/expl
 explorer: explorer-build ## Serve the explorer on this machine, for the world at $$WORLD
 	@test -n "$$WORLD" || { echo "set WORLD to a world's DuckDB file"; exit 2; }
 	$(UV_RUN) --extra app hcsim app serve --world "$$WORLD"
+
+# The docs site, from mkdocs.yml: built strictly, so a broken link, nav entry, or reference fails
+# it, with the notebooks run as it builds. It goes to site/, which git ignores.
+docs: ## Build the docs site into site/
+	$(UV_RUN) --extra docs mkdocs build --strict
+
+docs-serve: ## Serve the docs site at http://127.0.0.1:8000
+	$(UV_RUN) --extra docs mkdocs serve
 
 sanitize: ## Denylist scan of every tracked file
 	$(UV_RUN) python tools/sanitize_scan.py --tree
