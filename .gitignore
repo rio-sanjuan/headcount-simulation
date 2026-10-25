@@ -37,3 +37,4 @@ apps/explorer/dist/
 # Never commit private material. The pre-push hook enforces this too.
 *denylist*.txt
 project-description.md
+site/

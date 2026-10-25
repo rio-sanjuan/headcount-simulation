@@ -11,7 +11,7 @@ This repository is public, and all of its data is synthetic. This page states wh
 
 ## How it's enforced
 
-A denylist scanner, [`tools/sanitize_scan.py`](../tools/sanitize_scan.py), checks text against a list of patterns. **The list itself is private.** It never enters the repository: a maintainer keeps it in a local file, and CI reads it from an encrypted secret. Publishing it would disclose exactly what it protects.
+A denylist scanner, [`tools/sanitize_scan.py`](https://github.com/rio-sanjuan/headcount-simulation/blob/main/tools/sanitize_scan.py), checks text against a list of patterns. **The list itself is private.** It never enters the repository: a maintainer keeps it in a local file, and CI reads it from an encrypted secret. Publishing it would disclose exactly what it protects.
 
 The scanner runs at every point where text becomes public.
 
@@ -44,5 +44,5 @@ Notebooks are committed with their outputs stripped, so no rendered result can c
 Anything pushed to a public repository should be treated as disclosed, because it may already be cached or mirrored.
 
 1. Remove it at once: edit or delete the issue or comment, or revert the change.
-2. Report it privately as described in [SECURITY.md](../SECURITY.md), so the maintainer can judge whether history needs rewriting and whether GitHub should purge cached views.
+2. Report it privately as described in [SECURITY.md](https://github.com/rio-sanjuan/headcount-simulation/blob/main/SECURITY.md), so the maintainer can judge whether history needs rewriting and whether GitHub should purge cached views.
 3. Add a pattern to the private list, so the same text can't reappear.

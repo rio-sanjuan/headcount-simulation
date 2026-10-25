@@ -34,7 +34,12 @@ sktime = [
     "tbats>=1.1",
 ]
 prophet = ["prophet>=1.1.6"]
-docs = ["mkdocs-material>=9.6"]
+docs = [
+    "ipykernel>=6.29",
+    "mkdocs-jupyter>=0.25",
+    "mkdocs-material>=9.6",
+    "mkdocstrings[python]>=0.27",
+]
 # The explorer's server, `hcsim.app`. Its React frontend lives in apps/explorer.
 app = [
     "fastapi>=0.115",

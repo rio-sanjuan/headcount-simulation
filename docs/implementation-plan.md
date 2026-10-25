@@ -688,7 +688,7 @@ Every M1 epic is a deliberately minimal version of a later epic. Each one notes 
 | D3 | Array backend | **Decided:** NumPy |
 | D4 | Frame library | **Decided:** pandas |
 | D5 | Package name | **Decided:** `hcsim` |
-| D6 | Explorer stack | **Deferred** to M9. FastAPI with React is richer, and Streamlit or Marimo is faster to build. |
+| D6 | Explorer stack | **Decided:** FastAPI with React (M9.2), chosen over Streamlit and Marimo for the richer interface |
 | D7 | Issue structure | **Decided:** sub-issues for near-term milestones only, plus a small public Project board (section 10) |
 | D8 | Name of the synthetic-world package | **Decided:** `hcsim.synth` |
 
