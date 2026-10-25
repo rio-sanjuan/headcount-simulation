@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "machine": {
+    "system": "Darwin",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpus": "10",
+    "memory_gib": "32.0",
+    "python": "3.12.15"
+  },
+  "hcsim_version": "0.1.0.dev0",
+  "measured_on": "2026-10-24",
+  "measurements": [
+    {
+      "case": "tiny-hcf-2",
+      "preset": "tiny",
+      "scope": "hcf",
+      "trajectories": 2,
+      "months": 12,
+      "streaming": false,
+      "employees": 296,
+      "openings": 15,
+      "tranches": 0,
+      "prepare_seconds": 0.036,
+      "simulate_seconds": 0.02,
+      "peak_mib": 167.1
+    },
+    {
+      "case": "small-hcf-2",
+      "preset": "small",
+      "scope": "hcf",
+      "trajectories": 2,
+      "months": 12,
+      "streaming": false,
+      "employees": 7012,
+      "openings": 380,
+      "tranches": 0,
+      "prepare_seconds": 0.062,
+      "simulate_seconds": 0.084,
+      "peak_mib": 187.1
+    },
+    {
+      "case": "small-hcf-8",
+      "preset": "small",
+      "scope": "hcf",
+      "trajectories": 8,
+      "months": 12,
+      "streaming": false,
+      "employees": 7012,
+      "openings": 380,
+      "tranches": 0,
+      "prepare_seconds": 0.063,
+      "simulate_seconds": 0.368,
+      "peak_mib": 192.1
+    },
+    {
+      "case": "small-sbc-2",
+      "preset": "small",
+      "scope": "hcf+sbc",
+      "trajectories": 2,
+      "months": 12,
+      "streaming": false,
+      "employees": 7012,
+      "openings": 380,
+      "tranches": 284566,
+      "prepare_seconds": 0.223,
+      "simulate_seconds": 2.037,
+      "peak_mib": 472.1
+    },
+    {
+      "case": "small-sbc-8",
+      "preset": "small",
+      "scope": "hcf+sbc",
+      "trajectories": 8,
+      "months": 12,
+      "streaming": false,
+      "employees": 7012,
+      "openings": 380,
+      "tranches": 1137770,
+      "prepare_seconds": 0.218,
+      "simulate_seconds": 8.434,
+      "peak_mib": 713.5
+    },
+    {
+      "case": "small-sbc-8-streamed",
+      "preset": "small",
+      "scope": "hcf+sbc",
+      "trajectories": 8,
+      "months": 12,
+      "streaming": true,
+      "employees": 7012,
+      "openings": 380,
+      "tranches": 1137770,
+      "prepare_seconds": 0.221,
+      "simulate_seconds": 8.595,
+      "peak_mib": 566.2
+    },
+    {
+      "case": "medium-hcf-2",
+      "preset": "medium",
+      "scope": "hcf",
+      "trajectories": 2,
+      "months": 12,
+      "streaming": false,
+      "employees": 72117,
+      "openings": 3558,
+      "tranches": 0,
+      "prepare_seconds": 0.295,
+      "simulate_seconds": 0.748,
+      "peak_mib": 334.8
+    },
+    {
+      "case": "medium-hcf-8",
+      "preset": "medium",
+      "scope": "hcf",
+      "trajectories": 8,
+      "months": 12,
+      "streaming": false,
+      "employees": 72117,
+      "openings": 3558,
+      "tranches": 0,
+      "prepare_seconds": 0.295,
+      "simulate_seconds": 3.01,
+      "peak_mib": 369.6
+    },
+    {
+      "case": "medium-sbc-2",
+      "preset": "medium",
+      "scope": "hcf+sbc",
+      "trajectories": 2,
+      "months": 12,
+      "streaming": false,
+      "employees": 72117,
+      "openings": 3558,
+      "tranches": 3063381,
+      "prepare_seconds": 2.084,
+      "simulate_seconds": 23.849,
+      "peak_mib": 3342.0
+    }
+  ],
+  "capacity": {
+    "version": 1,
+    "fits": {
+      "hcf": {
+        "prepare": [
+          0.03649779737626718,
+          3.585598680062717e-06
+        ],
+        "simulate": [
+          0.027836288128239444,
+          4.304953851877346e-07
+        ],
+        "memory": [
+          169.9270503407139,
+          0.0021258798042788096,
+          8.081759884529185e-05
+        ],
+        "cases": 5,
+        "worst": {
+          "prepare": 0.0062,
+          "simulate": 0.1369,
+          "memory": 0.021
+        }
+      },
+      "hcf+sbc": {
+        "prepare": [
+          0.019980185853621123,
+          2.8620433658449168e-05
+        ],
+        "simulate": [
+          0.0,
+          1.3506388460513052e-05
+        ],
+        "memory": [
+          235.6737935320939,
+          0.03516207059698307,
+          0.003955677310656834
+        ],
+        "cases": 4,
+        "worst": {
+          "prepare": 0.0107,
+          "simulate": 0.1158,
+          "memory": 0.139
+        }
+      }
+    }
+  }
+}
