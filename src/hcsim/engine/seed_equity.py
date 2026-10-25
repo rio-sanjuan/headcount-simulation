@@ -47,7 +47,13 @@ from hcsim.financial.streams import OFFLINE_COLUMNS, OfflineStream
 from hcsim.model.core.contract import role_column
 from hcsim.model.core.layouts import EmployeeColumn
 from hcsim.model.core.measures import REGULAR_ACCOUNTS
-from hcsim.model.core.schema import AWARD_TYPE, COST_CENTER, JOB_LEVEL, SimulationSchema
+from hcsim.model.core.schema import (
+    AWARD_TYPE,
+    COST_CENTER,
+    JOB_LEVEL,
+    UNATTRIBUTED,
+    SimulationSchema,
+)
 
 _TRANCHES = """
 WITH tranches AS (
@@ -115,13 +121,18 @@ def seed_equity(
     outside = np.setdiff1d(in_post.to_numpy(dtype=np.int64), active)
     future = con.execute(_FUTURE, {"snapshot": snapshot, "run": run_date}).df()
     holders = frame["holder"].to_numpy(dtype=np.int64)
-    frame["status"] = classify(holders, active, outside, future["employee_id"].to_numpy())
-    starts = dict(zip(future["employee_id"], pd.to_datetime(future["start_date"]), strict=True))
+    status = classify(holders, active, outside, future["employee_id"].to_numpy())
+    frame["status"] = status
+    # A future entrant's start month, looked up once per entrant rather than once per tranche.
     run = pd.Period(run_date, "M")
-    frame["start_month"] = [
-        (pd.Period(starts[h], "M") - run).n if s == HolderStatus.FUTURE.value else -1
-        for h, s in zip(holders, frame["status"], strict=True)
-    ]
+    month_of = {
+        int(e): (pd.Period(d, "M") - run).n
+        for e, d in zip(future["employee_id"], pd.to_datetime(future["start_date"]), strict=True)
+    }
+    start_month = np.full(len(frame), -1, dtype=np.int64)
+    entering = status == HolderStatus.FUTURE.value
+    start_month[entering] = [month_of[int(h)] for h in holders[entering]]
+    frame["start_month"] = start_month
     frame, pruned = _encoded(frame, schema)
     columns = [c for c in frame.columns if c != "employee_id"]
     return SeedEquity(SeedTranches(frame[columns]), pruned)
@@ -246,20 +257,34 @@ def offline_equity(
 
 def _encoded(frame: pd.DataFrame, schema: SimulationSchema) -> tuple[pd.DataFrame, dict[str, int]]:
     """`frame` with its cost centers, levels, and award types as schema codes, the rows whose
-    label the schema can't encode left out and counted by cause."""
-    pruned = {}
+    label the schema can't encode left out and counted by cause, each cause counting the rows
+    the causes before it kept. Each column's distinct labels are encoded once, not each row's,
+    and the frame is filtered once, or coded in place where every row encodes."""
+    pruned, coded = {}, {}
+    keep = np.ones(len(frame), dtype=bool)
     for name, vocabulary, column in (
         ("unknown_cost_center", COST_CENTER, "cost_center"),
         ("unknown_level", JOB_LEVEL, "level"),
         ("unknown_award_type", AWARD_TYPE, "award_type"),
     ):
-        codes = schema.encode(vocabulary, frame[column].astype(str), unknown="unattributed")
-        keep = codes >= 0
-        if (~keep).any():
-            pruned[name] = int((~keep).sum())
-        frame = frame[keep].copy()
-        frame[column] = codes[keep]
-    return frame.reset_index(drop=True), pruned
+        inverse, uniques = pd.factorize(frame[column], use_na_sentinel=True)
+        labels = schema.encode(vocabulary, [str(u) for u in uniques], unknown="unattributed")
+        # A missing label is unattributed, as is every row of a column with no labels at all.
+        labels = np.append(labels, UNATTRIBUTED)
+        codes = labels[np.where(inverse >= 0, inverse, len(labels) - 1)]
+        unknown = keep & (codes < 0)
+        if unknown.any():
+            pruned[name] = int(unknown.sum())
+        keep &= codes >= 0
+        coded[column] = codes
+    if keep.all():  # nothing to leave out: code the frame in place, rather than copy it
+        for column, codes in coded.items():
+            frame[column] = codes
+        return frame.reset_index(drop=True), pruned
+    out = frame[keep].reset_index(drop=True)
+    for column, codes in coded.items():
+        out[column] = codes[keep]
+    return out, pruned
 
 
 _ACTUAL = """

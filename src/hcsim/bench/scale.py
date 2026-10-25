@@ -16,8 +16,9 @@ watchdog (`world.run_child`), which stops one that passes a memory limit. In it,
   keeps only what it counts.
 
 A **measurement** (`Measurement`) records the run's size (the employees and openings seeded,
-its trajectories and months, the tranches it tracked) and its costs: each phase's seconds and
-the process's peak memory. A world is generated once into the cache directory and reused.
+its trajectories and months, the tranches it tracked) and its costs: each phase's seconds, and
+the process's peak memory once prepared and at the end. A world is generated once into the
+cache directory and reused.
 
 Timings are machine-specific and noisy, so they're recorded and compared, never gated in CI.
 """
@@ -68,6 +69,8 @@ class Measurement:
     prepare_seconds: float
     simulate_seconds: float
     peak_mib: float
+    #: The process's peak once prepared, before simulating: the world read, fitted, and seeded.
+    prepare_peak_mib: float = 0.0
 
     @property
     def employee_months(self) -> int:
@@ -140,6 +143,7 @@ def measure(case: Case, world: Path) -> Measurement:
     if not checked.ok or checked.inputs is None:
         raise StudyError(list(checked.problems))
     prepared = time.perf_counter()
+    prepare_peak = peak_rss_mib()
     config = checked.configs[ITSELF.name]
     tranches = 0
     if case.streaming:
@@ -169,6 +173,7 @@ def measure(case: Case, world: Path) -> Measurement:
         prepare_seconds=round(prepared - started, 3),
         simulate_seconds=round(simulated - prepared, 3),
         peak_mib=round(peak_rss_mib(), 1),
+        prepare_peak_mib=round(prepare_peak, 1),
     )
 
 
@@ -201,11 +206,17 @@ def run(cases: Sequence[Case], cache: Path, max_rss_gib: float | None = None) ->
 
 
 def main(argv: list[str]) -> int:
-    """The child's entry point: `world CASE CACHE`, or `case CASE WORLD`."""
-    action, spec, where = argv
+    """The child's entry point: `world CASE CACHE`, `case CASE WORLD`, or `profile CASE WORLD
+    OUT TOP` (see `profiling`)."""
+    action, spec, where, *rest = argv
     case = Case(**json.loads(spec))
     if action == "world":
         print(ensure_world(case, Path(where)))
+    elif action == "profile":
+        from hcsim.bench.profiling import profile_here
+
+        out, top = rest
+        print(json.dumps(dataclasses.asdict(profile_here(case, Path(where), Path(out), int(top)))))
     else:
         print(json.dumps(dataclasses.asdict(measure(case, Path(where)))))
     return 0

@@ -9,8 +9,9 @@ dominates both time and memory where a run computes it. Each cost is linear in t
 - the peak is `base + per_employee · employees + per_held · employees · held` MiB, where a run
   holds every trajectory, or one at a time when they stream.
 
-Every coefficient is fitted by least squares and kept nonnegative: where the unconstrained fit
-would make one negative, the best fit over the remaining terms is used instead. Each fit
+Every coefficient is fitted by least squares on the cases' relative errors, so a small case
+counts as much as one a hundred times its size, and kept nonnegative: where the unconstrained
+fit would make one negative, the best fit over the remaining terms is used instead. Each fit
 reports its worst relative error over the cases it was fitted to, so a prediction says how far
 to trust it. The error is relative to the case's value or the measure's noise floor, whichever
 is larger, so a case that takes hundredths of a second can't dominate it. Outside the sizes it
@@ -62,6 +63,13 @@ def nonnegative_fit(features: np.ndarray, target: np.ndarray) -> np.ndarray:
     return best
 
 
+def _relative_fit(features: np.ndarray, target: np.ndarray, floor: float) -> np.ndarray:
+    """A nonnegative fit that weighs each case by its own size, floored at the measure's noise,
+    so it minimizes the cases' relative errors rather than their absolute ones."""
+    weight = 1 / np.maximum(np.abs(target), floor)
+    return nonnegative_fit(features * weight[:, None], target * weight)
+
+
 def _worst(
     features: np.ndarray, coefficients: np.ndarray, target: np.ndarray, floor: float
 ) -> float:
@@ -93,9 +101,9 @@ class Fit:
         prepare_y = np.array([m.prepare_seconds for m in measurements])
         simulate_y = np.array([m.simulate_seconds for m in measurements])
         memory_y = np.array([m.peak_mib for m in measurements])
-        prepare = nonnegative_fit(prepare_x, prepare_y)
-        simulate = nonnegative_fit(simulate_x, simulate_y)
-        memory = nonnegative_fit(memory_x, memory_y)
+        prepare = _relative_fit(prepare_x, prepare_y, FLOORS["prepare"])
+        simulate = _relative_fit(simulate_x, simulate_y, FLOORS["simulate"])
+        memory = _relative_fit(memory_x, memory_y, FLOORS["memory"])
         worst = {
             "prepare": _worst(prepare_x, prepare, prepare_y, FLOORS["prepare"]),
             "simulate": _worst(simulate_x, simulate, simulate_y, FLOORS["simulate"]),
