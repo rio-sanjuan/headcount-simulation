@@ -9,6 +9,11 @@ holds:
 where `ε_H` is the change declared movements make to the group, such as people moved in or
 out by a reorganization, which no flow forecasts.
 
+**Which flows.** In the months it aligns, the pipeline hands alignment the flows as generated,
+not as reconciled. Reconciliation fitted them to the forecast's anchor, and the plan's
+replaces it there; starting from the reconciled flows would keep the gap between that anchor
+and the plan as gross flows in both directions.
+
 **Which months.** Only months the plan actively plans (up to its evaluation month `t*`) are
 aligned. By default only its target dates are, each to within its band; with `all_months`,
 every planned month is aligned to the interpolated target, exactly.

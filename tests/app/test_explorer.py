@@ -72,6 +72,16 @@ def test_each_valve_drives_the_same_plan(explorer: Explorer) -> None:
     assert explorer.valves(growth=0.05, trajectories=2) == v  # kept
 
 
+def test_demand_holds_a_flat_plan_from_its_first_month(explorer: Explorer) -> None:
+    # Guidance aligned to a flat plan once asked for 53 exits in the first month and as many
+    # hires. Every exit happened, but only the hires the open openings allowed did, and demand
+    # lost 33 heads at once.
+    v = explorer.valves(growth=0.0, trajectories=2)
+    demand = v["runs"]["demand"]["headcount"]
+    assert abs(demand[1] - v["plan"][0]) <= 3
+    assert abs(demand[-1] - v["plan"][-1]) <= 8
+
+
 def test_the_lifecycle_balances_the_open_openings(explorer: Explorer) -> None:
     life = explorer.lifecycle(months=6, trajectories=2)
     assert life["identity_residual"] == 0
