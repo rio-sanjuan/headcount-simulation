@@ -92,7 +92,7 @@ def test_test_and_tool_changes_run_their_own_tests() -> None:
     ]
 
 
-LAYERS = {"model", "guidance", "financial", "engine", "studies", "synth", "bench"}
+LAYERS = {"model", "guidance", "financial", "engine", "studies", "synth", "bench", "app"}
 
 
 def test_the_real_graph_respects_the_layer_rules() -> None:
@@ -105,6 +105,8 @@ def test_the_real_graph_respects_the_layer_rules() -> None:
     # Only the scale harness may import the synthetic world, and nothing imports the harness.
     assert importers_from_graph("synth") <= {"bench"}
     assert importers_from_graph("bench") == set()
+    # Nothing imports the explorer's server either.
+    assert importers_from_graph("app") == set()
 
 
 def test_main_without_a_base_runs_everything(capsys: pytest.CaptureFixture[str]) -> None:

@@ -35,7 +35,11 @@ sktime = [
 ]
 prophet = ["prophet>=1.1.6"]
 docs = ["mkdocs-material>=9.6"]
-# The `app` extra arrives with the explorer in M9, once its stack is chosen.
+# The explorer's server, `hcsim.app`. Its React frontend lives in apps/explorer.
+app = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
@@ -45,6 +49,8 @@ build-backend = "uv_build"
 dev = [
     "actionlint-py>=1.7.12.25",
     "diff-cover>=10.6.0",
+    "fastapi>=0.115",
+    "httpx>=0.27",
     "hypothesis>=6.170.5",
     "import-linter>=2.15",
     "mypy>=2.4.0",
@@ -57,6 +63,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.1",
     "types-pyyaml>=6.0.12.20260724",
+    "uvicorn>=0.30",
     "zizmor>=1.31.1",
 ]
 
@@ -126,7 +133,9 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
 xfail_strict = true
-filterwarnings = ["error"]
+# Starlette's test client deprecates httpx, on import, for a successor package. httpx is the
+# established client, and the explorer's tests stay on it rather than adopt an unvetted one.
+filterwarnings = ["error", "ignore:Using `httpx` with `starlette.testclient` is deprecated"]
 markers = [
     "slow: long-running tests, run in the heavy CI jobs",
     "acceptance: statistical checks over many trajectories",
@@ -185,8 +194,19 @@ name = "Nothing but the scale harness imports the synthetic world"
 type = "forbidden"
 source_modules = [
     "hcsim.model", "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies",
+    "hcsim.app",
 ]
 forbidden_modules = ["hcsim.synth"]
+
+# The explorer's server sits on top of everything else, and nothing builds on it.
+[[tool.importlinter.contracts]]
+name = "Nothing imports the explorer's server"
+type = "forbidden"
+source_modules = [
+    "hcsim.model", "hcsim.guidance", "hcsim.financial", "hcsim.engine", "hcsim.studies",
+    "hcsim.synth", "hcsim.bench",
+]
+forbidden_modules = ["hcsim.app"]
 
 [[tool.importlinter.contracts]]
 name = "Nothing imports the scale harness"

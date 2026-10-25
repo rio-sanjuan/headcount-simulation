@@ -12,7 +12,7 @@ COVERAGE_XML := .cache/coverage.xml
 TESTS ?= tests
 
 .DEFAULT_GOAL := help
-.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-large bench-baseline world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
+.PHONY: help check check-all lint format typecheck arch workflows deps test test-cov diff-coverage memory test-heavy bench-world bench bench-large bench-baseline explorer-install explorer-check explorer-build explorer world-asset baselines sanitize sanitize-pr sanitize-main sanitize-text sanitize-artifact secrets affected
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -129,6 +129,25 @@ world-asset: ## Build the small world's release archive under dist/
 # regenerate the baselines and commit them in the same PR.
 baselines: ## Regenerate the committed metric baselines
 	HCSIM_UPDATE_BASELINES=1 $(UV_RUN) pytest -m e2e tests/e2e
+
+# The explorer: a React frontend in apps/explorer, served by `hcsim app serve`. Its packages
+# install from the lockfile, as locked. The world comes from the environment, never from make
+# arguments, so it can't reach the shell: `WORLD=path/to/world.duckdb make explorer`.
+EXPLORER := apps/explorer
+
+explorer-install: ## Install the explorer's frontend packages, as locked
+	cd $(EXPLORER) && npm ci --no-audit --no-fund
+
+explorer-check: explorer-install ## Type-check and test the explorer's frontend, and check its licenses
+	cd $(EXPLORER) && npm run typecheck && npm test
+	$(UV_RUN) python -m tools.npm_licenses $(EXPLORER)/package-lock.json
+
+explorer-build: explorer-install ## Build the explorer's frontend into apps/explorer/dist
+	cd $(EXPLORER) && npm run build
+
+explorer: explorer-build ## Serve the explorer on this machine, for the world at $$WORLD
+	@test -n "$$WORLD" || { echo "set WORLD to a world's DuckDB file"; exit 2; }
+	$(UV_RUN) --extra app hcsim app serve --world "$$WORLD"
 
 sanitize: ## Denylist scan of every tracked file
 	$(UV_RUN) python tools/sanitize_scan.py --tree

@@ -14,6 +14,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "guidance": ("hcsim.guidance.cli", "fit the guidance forecast"),
     "study": ("hcsim.studies.cli", "run a study and write its scorecard"),
     "bench": ("hcsim.bench.cli", "time the synthetic world's presets"),
+    "app": ("hcsim.app.cli", "serve the explorer on this machine"),
 }
 
 USAGE = "usage: hcsim <command> [options]\n\ncommands:\n" + "\n".join(
