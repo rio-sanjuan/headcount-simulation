@@ -1,0 +1,26 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #111827;
+  background: #f9fafb;
+}
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+header h1 { margin: 0 0 4px; font-size: 1.6rem; }
+header p, .lead { color: #4b5563; line-height: 1.5; }
+nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0; }
+nav button { border: 1px solid #d1d5db; background: white; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+nav button.active { background: #2563eb; border-color: #2563eb; color: white; }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0; }
+.control { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; }
+.stats { font-size: 0.95rem; }
+.error { color: #b91c1c; }
+.loading { color: #6b7280; }
+figure { margin: 16px 0; }
+figcaption { font-weight: 600; margin-bottom: 4px; }
+svg { width: 100%; height: auto; background: white; border: 1px solid #e5e7eb; border-radius: 6px; }
+.grid { stroke: #e5e7eb; }
+.tick, .label { font-size: 11px; fill: #6b7280; }
+.line { fill: none; stroke-width: 2; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.85rem; margin-top: 4px; }
+.legend i { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: -1px; border-radius: 2px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
