@@ -10,7 +10,11 @@ export type Sampling = {
   independent: Draws;
 };
 
-export type ValveRun = { valve: string; headcount: number[]; bias_mean: number };
+/** A value across trajectories, month by month: its mean, and its 10th, 50th and 90th
+ * percentiles. */
+export type Spread = { mean: number[]; p10: number[]; p50: number[]; p90: number[] };
+
+export type ValveRun = { valve: string; headcount: Spread; bias_mean: number };
 
 export type Valves = {
   months: number;
@@ -22,7 +26,7 @@ export type Valves = {
 export type Lifecycle = {
   months: number;
   run_date: string;
-  open: number[];
+  open: Spread;
   opened: Record<string, number[]>;
   filled: Record<string, number[]>;
   unfilled: number[];
@@ -32,12 +36,17 @@ export type Lifecycle = {
 export type Sbc = {
   months: number;
   run_date: string;
+  total: Spread;
   recognized: Record<string, number[]>;
   grants: Record<string, number>;
   example_grant: { award_month?: number; vest_months?: number[]; shares?: number[] };
 };
 
 export type Query = Record<string, number>;
+
+/** The trajectories the page asks a run on the world for: enough for a stable 10th and 90th
+ * percentile on the tiny world. */
+export const TRAJECTORIES = 10;
 
 /** GET one demo, with its parameters, refusing an answer that isn't OK with the API's reason. */
 export async function get<T>(demo: string, query: Query): Promise<T> {

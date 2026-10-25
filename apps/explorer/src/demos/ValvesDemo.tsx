@@ -1,13 +1,23 @@
 import { useState } from "react";
 
-import type { Valves } from "../api";
-import { LineChart } from "../charts";
+import { TRAJECTORIES, type Valves } from "../api";
+import { LineChart, spreadSeries, type Series } from "../charts";
 import { Control, Status } from "../Control";
 import { useDemo } from "../useDemo";
 
+/** Each method's valve, as the plan names it. */
+const NAMES: Record<string, string> = {
+  none: "No valve",
+  supply: "Supply",
+  demand: "Flow",
+  rate_calibration: "Rate",
+};
+/** The valve in focus. */
+const FOCUS = "supply";
+
 export function ValvesDemo() {
   const [growth, setGrowth] = useState(5);
-  const { data, error, loading } = useDemo<Valves>("valves", { growth: growth / 100, trajectories: 4 });
+  const { data, error, loading } = useDemo<Valves>("valves", { growth: growth / 100, trajectories: TRAJECTORIES });
   return (
     <section>
       <p className="lead">
@@ -28,8 +38,13 @@ export function ValvesDemo() {
             y="headcount"
             xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
             series={[
-              { name: "plan", values: [Number.NaN, ...data.plan], dashed: true },
-              ...Object.entries(data.runs).map(([method, run]) => ({ name: method, values: run.headcount })),
+              { name: "Plan", values: [Number.NaN, ...data.plan], role: "plan" },
+              ...Object.entries(data.runs).map(([method, run]): Series => {
+                const name = NAMES[method] ?? method;
+                return method === FOCUS
+                  ? spreadSeries(name, run.headcount)
+                  : { name, values: run.headcount.p50 };
+              }),
             ]}
           />
           <table>

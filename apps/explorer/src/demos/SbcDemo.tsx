@@ -1,13 +1,13 @@
 import { useState } from "react";
 
-import type { Sbc } from "../api";
+import { TRAJECTORIES, type Sbc } from "../api";
 import { BarChart, LineChart } from "../charts";
 import { Control, Status } from "../Control";
 import { useDemo } from "../useDemo";
 
 export function SbcDemo() {
   const [months, setMonths] = useState(12);
-  const { data, error, loading } = useDemo<Sbc>("sbc", { months, trajectories: 2 });
+  const { data, error, loading } = useDemo<Sbc>("sbc", { months, trajectories: TRAJECTORIES });
   const grant = data?.example_grant;
   return (
     <section>
@@ -27,14 +27,23 @@ export function SbcDemo() {
             x="month"
             y="recognized"
             xs={Array.from({ length: data.months }, (_, i) => i)}
-            series={Object.entries(data.recognized).map(([part, values]) => ({ name: part, values }))}
+            series={[
+              // The parts are means, so the total they add up to is the mean too, in its band.
+              {
+                name: "total",
+                role: "subject",
+                values: data.total.mean,
+                band: { low: data.total.p10, high: data.total.p90 },
+              },
+              ...Object.entries(data.recognized).map(([part, values]) => ({ name: part, values })),
+            ]}
           />
           <BarChart
             title="Grants the run makes, per trajectory"
             x="award type"
             y="grants"
             categories={Object.keys(data.grants)}
-            series={[{ name: "grants", values: Object.values(data.grants) }]}
+            series={[{ name: "grants", values: Object.values(data.grants), role: "subject" }]}
           />
           {grant?.vest_months && grant.shares && (
             <BarChart
@@ -42,7 +51,7 @@ export function SbcDemo() {
               x="vest month"
               y="shares"
               categories={grant.vest_months}
-              series={[{ name: "shares", values: grant.shares }]}
+              series={[{ name: "shares", values: grant.shares, role: "subject" }]}
             />
           )}
         </>

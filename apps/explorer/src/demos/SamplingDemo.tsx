@@ -40,7 +40,7 @@ export function SamplingDemo() {
             y="draws"
             categories={data.bins}
             series={[
-              { name: "quota sampling", values: data.quota.histogram },
+              { name: "quota sampling", values: data.quota.histogram, role: "subject" },
               { name: "independent draws", values: data.independent.histogram },
             ]}
           />
@@ -50,9 +50,9 @@ export function SamplingDemo() {
             y="share of draws"
             xs={data.probabilities.map((_, i) => i)}
             series={[
-              { name: "quota sampling", values: data.quota.rates },
+              { name: "quota sampling", values: data.quota.rates, role: "subject" },
               { name: "independent draws", values: data.independent.rates },
-              { name: "the row's probability", values: data.probabilities, dashed: true },
+              { name: "probability", values: data.probabilities, role: "plan" },
             ]}
           />
         </>

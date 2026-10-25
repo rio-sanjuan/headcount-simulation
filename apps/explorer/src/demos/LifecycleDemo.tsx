@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-import type { Lifecycle } from "../api";
-import { BarChart, LineChart } from "../charts";
+import { TRAJECTORIES, type Lifecycle } from "../api";
+import { BarChart, LineChart, spreadSeries } from "../charts";
 import { Control, Status } from "../Control";
 import { useDemo } from "../useDemo";
 
@@ -25,7 +25,7 @@ function total(parts: Record<string, number[]>, months: number): number[] {
 
 export function LifecycleDemo() {
   const [months, setMonths] = useState(12);
-  const { data, error, loading } = useDemo<Lifecycle>("lifecycle", { months, trajectories: 4 });
+  const { data, error, loading } = useDemo<Lifecycle>("lifecycle", { months, trajectories: TRAJECTORIES });
   const steps = data ? Array.from({ length: data.months }, (_, i) => i + 1) : [];
   return (
     <section>
@@ -48,7 +48,7 @@ export function LifecycleDemo() {
             x="month-end"
             y="openings"
             xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
-            series={[{ name: "open", values: data.open }]}
+            series={[spreadSeries("open", data.open)]}
           />
           <BarChart
             title="Each month's flows, per trajectory"
@@ -56,9 +56,9 @@ export function LifecycleDemo() {
             y="openings"
             categories={steps}
             series={[
-              { name: "opened", values: total(data.opened, data.months) },
-              { name: "filled", values: total(data.filled, data.months) },
-              { name: "left unfilled", values: data.unfilled },
+              { name: "opened", values: total(data.opened, data.months), shade: 3 },
+              { name: "filled", values: total(data.filled, data.months), shade: 2 },
+              { name: "left unfilled", values: data.unfilled, shade: 1 },
             ]}
           />
           <BarChart
@@ -69,6 +69,7 @@ export function LifecycleDemo() {
             series={[
               {
                 name: "filled",
+                role: "subject",
                 values: Object.values(data.filled).map((v) => v.reduce((a, b) => a + b, 0)),
               },
             ]}
