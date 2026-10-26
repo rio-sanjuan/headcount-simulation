@@ -88,7 +88,7 @@ describe("the story", () => {
       "The requisition lifecycle",
       "The SBC layer",
     ]);
-    await waitFor(() => expect(screen.getByText(/quota sampling drew 1 ± 0/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Quota sampling drew 1 row in all 10 trajectories/)).toBeTruthy());
     await waitFor(() => expect(screen.getByText(/largest residual: 0 openings/)).toBeTruthy());
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("hcsim explorer");
   });

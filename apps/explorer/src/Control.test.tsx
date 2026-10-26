@@ -8,11 +8,14 @@ import { ask, forget, keyOf } from "./useDemo";
 
 const sampling = CHAPTERS.find((c) => c.key === "sampling")!;
 
+/** An answer whose quota sampling draws ten times the spread, plus one, so a test can tell which
+ * spread a chart shows. */
 function answer(spread: number) {
+  const drawn = Math.round(spread * 10);
   return {
     probabilities: [0.3, 0.2],
     expected: spread,
-    bins: [0, 1],
+    bins: [drawn, drawn + 1],
     quota: { histogram: [0, 10], mean: 1, sd: 0, rates: [0.6, 0.4] },
     independent: { histogram: [5, 5], mean: 0.5, sd: 0.5, rates: [0.3, 0.2] },
   };
@@ -78,9 +81,9 @@ describe("the presets", () => {
     const group = screen.getByRole("radiogroup", { name: "Quota sampling" });
     const radios = within(group).getAllByRole("radio") as HTMLInputElement[];
     expect(radios.map((r) => r.checked)).toEqual([false, true, false]);
-    expect(screen.getByText(/Expected count 1:/)).toBeTruthy(); // drawn at once, with no tick to wait
+    expect(screen.getByText(/drew 11 rows/)).toBeTruthy(); // drawn at once, with no tick to wait
     fireEvent.click(within(group).getByLabelText("Very uneven rows"));
-    expect(screen.getByText(/Expected count 2:/)).toBeTruthy();
+    expect(screen.getByText(/drew 21 rows/)).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("");
     expect(fetch).toHaveBeenCalledTimes(3);
   });
@@ -107,9 +110,9 @@ describe("Adjust", () => {
     await act(async () => vi.advanceTimersByTime(1));
     expect(fetch).toHaveBeenCalledTimes(4); // once, for the value it settled on
     expect(screen.getByRole("status").textContent).toBe("Running…");
-    expect(screen.getByText(/Expected count 1:/)).toBeTruthy(); // the last answer, while it runs
+    expect(screen.getByText(/drew 11 rows/)).toBeTruthy(); // the last answer, while it runs
     await act(async () => fetch.release());
-    expect(screen.getByText(/Expected count 1.5:/)).toBeTruthy();
+    expect(screen.getByText(/drew 16 rows/)).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("");
   });
 
