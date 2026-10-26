@@ -1,20 +1,13 @@
-import { useState } from "react";
-
 import type { Sampling } from "../api";
 import { BarChart, LineChart } from "../charts";
-import { Control, Status } from "../Control";
+import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import type { DemoProps } from "../story";
 import { useDemo } from "../useDemo";
 
-export function SamplingDemo() {
-  const [rows, setRows] = useState(200);
-  const [quota, setQuota] = useState(20);
-  const [spread, setSpread] = useState(1);
-  const { data, error, loading } = useDemo<Sampling>("sampling", {
-    rows,
-    quota: Math.min(quota, rows),
-    spread,
-    trajectories: 500,
-  });
+export function SamplingDemo({ name, presets }: DemoProps) {
+  const controls = useControls(presets);
+  const { rows = 200, quota = 20, spread = 1 } = controls.values;
+  const { data, error, loading } = useDemo<Sampling>("sampling", controls.query);
   return (
     <div className="demo">
       <p className="lead">
@@ -22,14 +15,8 @@ export function SamplingDemo() {
         which (quota sampling). Drawing every row on its own at the same rates expects the count,
         but misses it from draw to draw.
       </p>
-      <div className="controls">
-        <Control label="Rows" value={rows} min={20} max={1000} step={10} onChange={setRows} />
-        <Control label="Quota" value={Math.min(quota, rows)} min={1} max={rows} onChange={setQuota} />
-        <Control label="Spread of probabilities" value={spread} min={0} max={2} step={0.1} onChange={setSpread} />
-      </div>
-      <Status loading={loading} error={error} />
       {data && (
-        <>
+        <div className={loading ? "running" : undefined}>
           <p className="stats">
             Expected count {data.expected}: quota sampling drew {data.quota.mean} ± {data.quota.sd}; independent
             draws {data.independent.mean} ± {data.independent.sd}, over 500 draws.
@@ -55,8 +42,15 @@ export function SamplingDemo() {
               { name: "probability", values: data.probabilities, role: "plan" },
             ]}
           />
-        </>
+        </div>
       )}
+      <Status loading={loading} error={error} />
+      <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
+      <Adjust name={name}>
+        <Control label="Rows" value={rows} min={20} max={1000} step={10} onChange={(v) => controls.adjust({ rows: v, quota: Math.min(quota, v) })} />
+        <Control label="Quota" value={Math.min(quota, rows)} min={1} max={rows} onChange={(v) => controls.adjust({ quota: v })} />
+        <Control label="Spread of probabilities" value={spread} min={0} max={2} step={0.1} onChange={(v) => controls.adjust({ spread: v })} />
+      </Adjust>
     </div>
   );
 }

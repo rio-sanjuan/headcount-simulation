@@ -1,13 +1,13 @@
-import { useState } from "react";
-
-import { TRAJECTORIES, type Sbc } from "../api";
+import type { Sbc } from "../api";
 import { BarChart, LineChart } from "../charts";
-import { Control, Status } from "../Control";
+import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import type { DemoProps } from "../story";
 import { useDemo } from "../useDemo";
 
-export function SbcDemo() {
-  const [months, setMonths] = useState(12);
-  const { data, error, loading } = useDemo<Sbc>("sbc", { months, trajectories: TRAJECTORIES });
+export function SbcDemo({ name, presets }: DemoProps) {
+  const controls = useControls(presets);
+  const months = controls.values.months ?? 12;
+  const { data, error, loading } = useDemo<Sbc>("sbc", controls.query);
   const grant = data?.example_grant;
   return (
     <div className="demo">
@@ -16,12 +16,8 @@ export function SbcDemo() {
         value is recognized as expense month by month. The run&apos;s expense comes from the
         equity granted before it (seed), the grants it makes (sim), and offline plans.
       </p>
-      <div className="controls">
-        <Control label="Months" value={months} min={3} max={36} onChange={setMonths} />
-      </div>
-      <Status loading={loading} error={error} />
       {data && (
-        <>
+        <div className={loading ? "running" : undefined}>
           <LineChart
             title="Expense recognized each month, by part"
             x="month"
@@ -54,8 +50,13 @@ export function SbcDemo() {
               series={[{ name: "shares", values: grant.shares, role: "subject" }]}
             />
           )}
-        </>
+        </div>
       )}
+      <Status loading={loading} error={error} />
+      <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
+      <Adjust name={name}>
+        <Control label="Months" value={months} min={3} max={36} onChange={(v) => controls.adjust({ months: v })} />
+      </Adjust>
     </div>
   );
 }

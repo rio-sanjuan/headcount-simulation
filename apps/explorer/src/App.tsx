@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 
 import { ChapterRail, useChapterInView } from "./ChapterRail";
-import { CHAPTERS, Prose } from "./story";
+import { CHAPTERS, Prose, presetsToFetch } from "./story";
+import { prefetch } from "./useDemo";
 
 const NAME = "hcsim explorer";
 const KEYS = CHAPTERS.map((c) => c.key);
@@ -41,6 +42,7 @@ export function holdAnchor(hash: string): () => void {
 export function App() {
   const current = useChapterInView(KEYS);
   useEffect(() => holdAnchor(window.location.hash), []);
+  useEffect(() => prefetch(presetsToFetch(CHAPTERS)), []);
   return (
     <div className="page">
       <ChapterRail name={NAME} chapters={CHAPTERS} current={current} />
@@ -49,11 +51,11 @@ export function App() {
           <h1>{NAME}</h1>
           <p className="lead">An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
         </header>
-        {CHAPTERS.map(({ key, title, Demo, handOn }, i) => (
+        {CHAPTERS.map(({ key, title, Demo, presets, handOn }, i) => (
           <section key={key} id={key} className="chapter" aria-labelledby={`${key}-title`}>
             <p className="chapter-number">Chapter {i + 1}</p>
             <h2 id={`${key}-title`}>{title}</h2>
-            <Demo />
+            <Demo name={title} presets={presets} />
             <Prose line={handOn} className="hand-on" />
           </section>
         ))}

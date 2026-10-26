@@ -1,8 +1,7 @@
-import { useState } from "react";
-
-import { TRAJECTORIES, type Valves } from "../api";
+import type { Valves } from "../api";
 import { LineChart, spreadSeries, type Series } from "../charts";
-import { Control, Status } from "../Control";
+import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import type { DemoProps } from "../story";
 import { useDemo } from "../useDemo";
 
 /** Each method's valve, as the plan names it. */
@@ -15,9 +14,10 @@ const NAMES: Record<string, string> = {
 /** The valve in focus. */
 const FOCUS = "supply";
 
-export function ValvesDemo() {
-  const [growth, setGrowth] = useState(5);
-  const { data, error, loading } = useDemo<Valves>("valves", { growth: growth / 100, trajectories: TRAJECTORIES });
+export function ValvesDemo({ name, presets }: DemoProps) {
+  const controls = useControls(presets);
+  const growth = Math.round((controls.values.growth ?? 0.05) * 100);
+  const { data, error, loading } = useDemo<Valves>("valves", controls.query);
   return (
     <div className="demo">
       <p className="lead">
@@ -26,12 +26,8 @@ export function ValvesDemo() {
         plan (flow), or calibrated domain rates (rate). Bias is the mean gap per cost center where
         the plan is scored, at its last month.
       </p>
-      <div className="controls">
-        <Control label="Plan's growth (%)" value={growth} min={-10} max={20} onChange={setGrowth} />
-      </div>
-      <Status loading={loading} error={error} />
       {data && (
-        <>
+        <div className={loading ? "running" : undefined}>
           <LineChart
             title={`Headcount from ${data.run_date}, every cost center together`}
             x="month-end"
@@ -65,8 +61,13 @@ export function ValvesDemo() {
               ))}
             </tbody>
           </table>
-        </>
+        </div>
       )}
+      <Status loading={loading} error={error} />
+      <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
+      <Adjust name={name}>
+        <Control label="Plan's growth (%)" value={growth} min={-10} max={20} onChange={(v) => controls.adjust({ growth: v / 100 })} />
+      </Adjust>
     </div>
   );
 }
