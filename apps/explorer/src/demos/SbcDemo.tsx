@@ -7,7 +7,7 @@ import type { Sbc, SbcPart } from "../api";
 import { StackedBars, format, type Part } from "../charts";
 import { ChapterState } from "../ChapterState";
 import { Adjust, Control, Presets, useControls } from "../Control";
-import { DraftMark, type DemoProps } from "../story";
+import type { DemoProps } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
@@ -64,11 +64,6 @@ export function SbcDemo({ name, presets }: DemoProps) {
   const loaded = useDemo<Sbc>("sbc", controls.query);
   return (
     <div className="demo">
-      <p className="lead">
-        Every grant becomes tranches that vest over the years after it, and each tranche&apos;s
-        value is recognized as expense month by month. The run&apos;s expense comes from the
-        equity granted before it (seed), the grants it makes (sim), and offline plans.
-      </p>
       <ChapterState demo="sbc" query={controls.query} loaded={loaded}>
         {(data) => {
           const parts = drawn(data);
@@ -98,7 +93,6 @@ export function SbcDemo({ name, presets }: DemoProps) {
               <p className="lead">
                 Grants made before the run carry {inherited(data, 0)}% of the first month&apos;s expense, and{" "}
                 {inherited(data, data.months - 1)}% of the last month&apos;s, as the run&apos;s own grants take over.
-                <DraftMark />
               </p>
             </RunContext.Provider>
           );

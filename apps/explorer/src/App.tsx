@@ -73,12 +73,13 @@ export function App() {
             <h1>{NAME}</h1>
             <p className="lead">An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
           </header>
-          {CHAPTERS.map(({ key, title, Demo, presets, handOn }, i) => (
+          {CHAPTERS.map(({ key, title, intro, Demo, presets, handOn }, i) => (
             <section key={key} id={key} className="chapter" aria-labelledby={`${key}-title`}>
               <p className="chapter-number">Chapter {i + 1}</p>
               <h2 id={`${key}-title`}>{title}</h2>
+              <div className="intro">{intro}</div>
               <Demo name={title} presets={presets} />
-              <Prose line={handOn} className="hand-on" />
+              <Prose text={handOn} className="hand-on" />
             </section>
           ))}
         </main>

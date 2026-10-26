@@ -112,11 +112,17 @@ describe("the story", () => {
     expect(captions.filter((c) => c === "2 synthetic rows · 10 trajectories · seed 0 · hcsim 0.1.0")).toHaveLength(2);
   });
 
-  it("marks the text that waits for review as a draft", () => {
+  it("opens each chapter with its idea, before its demo, and ends with a line to the next", () => {
     vi.stubGlobal("fetch", serving());
     render(<App />);
-    const drafts = CHAPTERS.filter((c) => c.handOn.draft).length;
-    expect(screen.getAllByText("draft")).toHaveLength(drafts);
+    for (const chapter of CHAPTERS) {
+      const section = document.getElementById(chapter.key) as HTMLElement;
+      const intro = section.querySelector(".intro");
+      expect(intro?.textContent?.length).toBeGreaterThan(100);
+      expect(intro?.nextElementSibling?.classList.contains("demo")).toBe(true);
+      expect(section.lastElementChild?.textContent).toBe(chapter.handOn);
+    }
+    expect(screen.getByText(/drawn 71% of the time/)).toBeTruthy();
   });
 
   it("keeps a failed run in its own chapter, which can try again, while the others carry on", async () => {
