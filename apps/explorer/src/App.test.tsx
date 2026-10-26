@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { get } from "./api";
-import { App, holdAnchor } from "./App";
+import { App, SERVE, holdAnchor } from "./App";
 import { CHAPTERS } from "./story";
 import { forget } from "./useDemo";
 
@@ -10,7 +10,7 @@ const spread = (values: number[]) => ({ mean: values, p10: values, p50: values, 
 
 /** An answer for each demo, as the API gives it. */
 const ANSWERS: Record<string, unknown> = {
-  health: { world: "tiny5.duckdb", run_date: "2026-01-01", employees: 320, cost_centers: 10, version: "0.1.0" },
+  health: { world: "tiny5.duckdb", run_date: "2026-01-01", employees: 320, cost_centers: 10, version: "0.1.0", chapters: {} },
   sampling: {
     rows: 2,
     trajectories: 10,
@@ -119,11 +119,63 @@ describe("the story", () => {
     expect(screen.getAllByText("draft")).toHaveLength(drafts);
   });
 
-  it("shows a demo's error in its own chapter", async () => {
-    vi.stubGlobal("fetch", answering({ detail: "no world" }, false));
+  it("keeps a failed run in its own chapter, which can try again, while the others carry on", async () => {
+    let sampling = false; // the sampling demo fails until it's fixed
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const demo = /\/api\/(\w+)/.exec(url)?.[1] ?? "";
+        const ok = demo !== "sampling" || sampling;
+        const body = ok ? ANSWERS[demo] : { detail: "the engine stopped" };
+        return { ok, statusText: "Error", json: async () => body } as Response;
+      }),
+    );
+    const { container } = render(<App />);
+    const chapter = document.getElementById("sampling") as HTMLElement;
+    const alert = await within(chapter).findByRole("alert");
+    expect(alert.textContent).toMatch(/sampling: the engine stopped/);
+    await waitFor(() => expect(container.querySelector("#valves .provenance")).not.toBeNull()); // carries on
+    await waitFor(() => expect(screen.getByRole("link", { name: /Quota sampling \(failed\)/ })).toBeTruthy());
+    sampling = true;
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(within(chapter).getByText(/Quota sampling drew 1 row/)).toBeTruthy());
+    expect(within(chapter).queryByRole("alert")).toBeNull();
+  });
+
+  it("says the server isn't running, and how to start it, when it doesn't answer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
     render(<App />);
-    const sampling = document.getElementById("sampling") as HTMLElement;
-    await waitFor(() => expect(within(sampling).getByText("sampling: no world")).toBeTruthy());
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/server isn't running/);
+    expect(alert.textContent).toContain(SERVE);
+    expect(screen.queryAllByRole("region")).toHaveLength(0);
+  });
+
+  it("waits in each chapter, saying what the engine is doing and about how long is left", async () => {
+    const health = { ...(ANSWERS.health as object), chapters: { valves: { seconds: 40 } } };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.startsWith("/api/health")
+          ? Promise.resolve({ ok: true, statusText: "OK", json: async () => health } as Response)
+          : new Promise<Response>(() => {}), // the engine, still running
+      ),
+    );
+    render(<App />);
+    const valves = document.getElementById("valves") as HTMLElement;
+    const waiting = () => valves.querySelector(".chart-state.waiting p")?.textContent;
+    await waitFor(() => expect(waiting()).toMatch(/on tiny5.duckdb, then running 10 trajectories of each valve · about 40 s left/));
+    // Only what the engine is doing is announced, not the time left as it ticks.
+    expect(within(valves).getByRole("status").textContent).toBe(
+      "Fitting guidance on tiny5.duckdb, then running 10 trajectories of each valve",
+    );
+    expect(within(valves).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("0");
+    expect(screen.getByRole("link", { name: /The three valves \(still running\)/ })).toBeTruthy();
   });
 });
 
@@ -145,7 +197,7 @@ describe("the chapter rail", () => {
     const rail = screen.getByRole("navigation", { name: "Chapters" });
     const links = within(rail).getAllByRole("link").filter((l) => l.getAttribute("href") !== "#top");
     expect(links.map((l) => l.getAttribute("href"))).toEqual(["#sampling", "#valves", "#lifecycle", "#sbc"]);
-    expect(links[1]?.textContent).toBe("2The three valves");
+    expect(links[1]?.textContent).toMatch(/^2 The three valves/);
   });
 
   it("marks the chapter in view as the page scrolls", async () => {
@@ -170,7 +222,7 @@ describe("the chapter rail", () => {
     fireEvent.click(bar);
     expect(bar.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("navigation").className).toContain("open");
-    fireEvent.click(screen.getByRole("link", { name: "3The requisition lifecycle" }));
+    fireEvent.click(screen.getByRole("link", { name: /^3 The requisition lifecycle/ }));
     expect(bar.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(bar);
     fireEvent.keyDown(window, { key: "Escape" });

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SETTLE_MS } from "./Control";
 import { SamplingDemo } from "./demos/SamplingDemo";
 import { CHAPTERS, presetsToFetch } from "./story";
-import { ask, forget, keyOf } from "./useDemo";
+import { PREFETCH_AT_ONCE, ask, forget, keyOf, prefetch } from "./useDemo";
 
 const sampling = CHAPTERS.find((c) => c.key === "sampling")!;
 
@@ -65,6 +65,24 @@ describe("the kept answers", () => {
   });
 });
 
+describe("prefetching", () => {
+  it("asks for a few answers at once, and the next as each arrives", async () => {
+    const waiting: (() => void)[] = [];
+    const fetch = vi.fn(
+      (url: string) =>
+        new Promise<Response>((resolve) => {
+          const spread = Number(new URL(url, "http://here").searchParams.get("spread"));
+          waiting.push(() => resolve({ ok: true, statusText: "OK", json: async () => answer(spread) } as Response));
+        }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    prefetch(Array.from({ length: PREFETCH_AT_ONCE + 2 }, (_, i) => ({ demo: "sampling", query: { spread: i } })));
+    expect(fetch).toHaveBeenCalledTimes(PREFETCH_AT_ONCE);
+    await act(async () => waiting.shift()?.());
+    expect(fetch).toHaveBeenCalledTimes(PREFETCH_AT_ONCE + 1);
+  });
+});
+
 describe("the presets", () => {
   it("are fetched as the page loads, each chapter's first preset before the rest", () => {
     const asks = presetsToFetch(CHAPTERS);
@@ -117,6 +135,30 @@ describe("Adjust", () => {
     await act(async () => fetch.release());
     expect(screen.getByText(/drew 16 rows/)).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  it("runs a slow chapter's slider when it's let go, and says how long a run takes", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(async (url: string) => {
+      const spread = Number(new URL(url, "http://here").searchParams.get("spread"));
+      return { ok: true, statusText: "OK", json: async () => ({ ...answer(spread), seconds: 8.2 }) } as Response;
+    });
+    vi.stubGlobal("fetch", fetch);
+    await ask("sampling", sampling.presets[1]!.query);
+    render(<SamplingDemo name="Quota sampling" presets={sampling.presets} />);
+    fireEvent.click(screen.getByRole("button", { name: "Adjust: Quota sampling" }));
+    await act(async () => vi.advanceTimersByTime(0));
+    expect(screen.getByText(/A run takes about 8 s here, so a slider runs when you let it go/)).toBeTruthy();
+    const slider = screen.getByLabelText("Spread of probabilities");
+    fireEvent.pointerDown(slider);
+    fireEvent.change(slider, { target: { value: "1.3" } });
+    fireEvent.change(slider, { target: { value: "1.6" } });
+    await act(async () => vi.advanceTimersByTime(5_000));
+    expect(fetch).toHaveBeenCalledTimes(1); // still held
+    fireEvent.pointerUp(slider);
+    await act(async () => vi.advanceTimersByTime(0));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[1]?.[0])).toContain("spread=1.6");
   });
 
   it("returns to a preset when the sliders reach its values", () => {

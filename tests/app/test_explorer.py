@@ -158,6 +158,7 @@ def test_the_health_route_names_the_run_behind_every_chart(
     client: TestClient, explorer: Explorer
 ) -> None:
     health = client.get("/api/health").json()
+    assert health.pop("chapters").keys() == {"sampling", "valves", "lifecycle", "sbc"}
     assert health == {
         "world": "tiny.duckdb",
         "run_date": explorer.run_date.isoformat(),

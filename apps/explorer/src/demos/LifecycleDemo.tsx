@@ -5,7 +5,8 @@
 
 import type { Lifecycle } from "../api";
 import { FlowDiagram, LineChart, spreadSeries, type Flow } from "../charts";
-import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import { ChapterState } from "../ChapterState";
+import { Adjust, Control, Presets, useControls } from "../Control";
 import type { DemoProps } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
@@ -90,8 +91,7 @@ export function stockSummary(open: Lifecycle["open"]): string {
 export function LifecycleDemo({ name, presets }: DemoProps) {
   const controls = useControls(presets);
   const months = controls.values.months ?? 12;
-  const { data, error, loading } = useDemo<Lifecycle>("lifecycle", controls.query);
-  const through = data && flows(data);
+  const loaded = useDemo<Lifecycle>("lifecycle", controls.query);
   return (
     <div className="demo">
       <p className="lead">
@@ -99,35 +99,37 @@ export function LifecycleDemo({ name, presets }: DemoProps) {
         and leaves either filled, by one of five channels, or unfilled. Every month the stock
         changes by exactly what opened, less what filled and what left unfilled.
       </p>
-      {data && through && (
-        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
-          <div className={loading ? "running" : undefined}>
-            <FlowDiagram
-              title={`Openings over ${data.months} months, per trajectory`}
-              inflows={through.inflows}
-              outflows={through.outflows}
-              stock={{ name: "open openings", start: data.open.mean[0] ?? 0, end: data.open.mean.at(-1) ?? 0 }}
-              summary={identity(through.inflows, through.outflows)}
-              after={
-                through.empty.length > 0 && (
-                  <p className="summary">Nothing flowed through {listed(through.empty, "or", true)} on this world.</p>
-                )
-              }
-            />
-            <LineChart
-              title="Open openings at each month-end"
-              x="month-end"
-              y="openings"
-              xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
-              series={[spreadSeries("open", data.open)]}
-              summary={stockSummary(data.open)}
-            />
-          </div>
-        </RunContext.Provider>
-      )}
-      <Status loading={loading} error={error} />
+      <ChapterState demo="lifecycle" query={controls.query} loaded={loaded}>
+        {(data) => {
+          const through = flows(data);
+          return (
+            <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+              <FlowDiagram
+                title={`Openings over ${data.months} months, per trajectory`}
+                inflows={through.inflows}
+                outflows={through.outflows}
+                stock={{ name: "open openings", start: data.open.mean[0] ?? 0, end: data.open.mean.at(-1) ?? 0 }}
+                summary={identity(through.inflows, through.outflows)}
+                after={
+                  through.empty.length > 0 && (
+                    <p className="summary">Nothing flowed through {listed(through.empty, "or", true)} on this world.</p>
+                  )
+                }
+              />
+              <LineChart
+                title="Open openings at each month-end"
+                x="month-end"
+                y="openings"
+                xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
+                series={[spreadSeries("open", data.open)]}
+                summary={stockSummary(data.open)}
+              />
+            </RunContext.Provider>
+          );
+        }}
+      </ChapterState>
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
-      <Adjust name={name}>
+      <Adjust name={name} controls={controls} seconds={loaded.data?.seconds}>
         <Control label="Months" value={months} min={3} max={36} onChange={(v) => controls.adjust({ months: v })} />
       </Adjust>
     </div>

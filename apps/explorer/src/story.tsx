@@ -3,12 +3,13 @@
 
 import type { ComponentType } from "react";
 
-import { TRAJECTORIES } from "./api";
+import type { Query } from "./api";
 import type { Preset } from "./Control";
 import { LifecycleDemo } from "./demos/LifecycleDemo";
 import { SamplingDemo } from "./demos/SamplingDemo";
 import { SbcDemo } from "./demos/SbcDemo";
 import { ValvesDemo } from "./demos/ValvesDemo";
+import PRESETS from "./presets.json";
 
 /** A line of the story's text. A draft is a placeholder that waits for the maintainer's review
  * (#660), and the page marks it so. */
@@ -22,32 +23,31 @@ export type Chapter = {
   key: string;
   title: string;
   Demo: ComponentType<DemoProps>;
-  /** Three named scenarios that make the chapter's point; the middle one shows at first. Their
-   * labels are the design's proposed ones (E3), for the maintainer's review in #660. */
+  /** Three named scenarios that make the chapter's point; the middle one shows at first. */
   presets: readonly Preset[];
   /** The line that hands on to the next chapter. */
   handOn: Line;
 };
 
-/** Six months, a year, and three years of a run. */
-function horizons(): Preset[] {
-  return [
-    { label: "Six months", query: { months: 6, trajectories: TRAJECTORIES } },
-    { label: "A year", query: { months: 12, trajectories: TRAJECTORIES } },
-    { label: "Three years", query: { months: 36, trajectories: TRAJECTORIES } },
-  ];
+/** A demo's presets: their parameters, from presets.json, which the server keeps answers for
+ * too, each with its label. The labels are the design's proposed ones (E3), for the
+ * maintainer's review in #660. */
+function named(demo: keyof typeof PRESETS, labels: readonly string[]): Preset[] {
+  const queries: Query[] = PRESETS[demo];
+  if (queries.length !== labels.length) {
+    throw new Error(`${demo} has ${queries.length} presets, and ${labels.length} labels`);
+  }
+  return queries.map((query, i) => ({ label: labels[i] ?? "", query }));
 }
+
+const HORIZONS = ["Six months", "A year", "Three years"];
 
 export const CHAPTERS: readonly Chapter[] = [
   {
     key: "sampling",
     title: "Quota sampling",
     Demo: SamplingDemo,
-    presets: [
-      { label: "Even rows", query: { rows: 200, quota: 20, spread: 0, trajectories: 500 } },
-      { label: "Uneven rows", query: { rows: 200, quota: 20, spread: 1, trajectories: 500 } },
-      { label: "Very uneven rows", query: { rows: 200, quota: 20, spread: 2, trajectories: 500 } },
-    ],
+    presets: named("sampling", ["Even rows", "Uneven rows", "Very uneven rows"]),
     handOn: {
       text: "Quota sampling lets a guided month hit its counts. Next, how a run is steered toward a plan.",
       draft: true,
@@ -57,11 +57,7 @@ export const CHAPTERS: readonly Chapter[] = [
     key: "valves",
     title: "The three valves",
     Demo: ValvesDemo,
-    presets: [
-      { label: "No growth", query: { growth: 0, trajectories: TRAJECTORIES } },
-      { label: "A modest plan, 5%", query: { growth: 0.05, trajectories: TRAJECTORIES } },
-      { label: "An aggressive plan, 20%", query: { growth: 0.2, trajectories: TRAJECTORIES } },
-    ],
+    presets: named("valves", ["No growth", "A modest plan, 5%", "An aggressive plan, 20%"]),
     handOn: {
       text: "The supply valve works through the requisitions growth opens. Next, how a requisition opens, waits, and closes.",
       draft: true,
@@ -71,7 +67,7 @@ export const CHAPTERS: readonly Chapter[] = [
     key: "lifecycle",
     title: "The requisition lifecycle",
     Demo: LifecycleDemo,
-    presets: horizons(),
+    presets: named("lifecycle", HORIZONS),
     handOn: {
       text: "A filled opening is a hire, and a hire brings a grant. Next, how grants become expense.",
       draft: true,
@@ -81,7 +77,7 @@ export const CHAPTERS: readonly Chapter[] = [
     key: "sbc",
     title: "The SBC layer",
     Demo: SbcDemo,
-    presets: horizons(),
+    presets: named("sbc", HORIZONS),
     handOn: {
       text: "That's the engine's story. The studies and their scorecards compare runs in depth.",
       draft: true,

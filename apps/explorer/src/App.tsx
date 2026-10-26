@@ -4,10 +4,14 @@ import { health, type Health } from "./api";
 import { ChapterRail, useChapterInView } from "./ChapterRail";
 import { WorldContext } from "./provenance";
 import { CHAPTERS, Prose, presetsToFetch } from "./story";
-import { prefetch } from "./useDemo";
+import { prefetch, useAnswerStates } from "./useDemo";
 
 const NAME = "hcsim explorer";
 const KEYS = CHAPTERS.map((c) => c.key);
+/** Each chapter's first preset, whose answer the rail waits for. */
+const FIRSTS = CHAPTERS.map((c) => ({ demo: c.key, query: c.presets[Math.floor(c.presets.length / 2)]?.query ?? {} }));
+/** The command that starts the server, for a page that finds none. */
+export const SERVE = "uv run hcsim app serve --world path/to/world.duckdb";
 
 /** How long the page keeps the address's chapter in view while the chapters above it fill in. */
 const HOLD_MS = 10_000;
@@ -44,19 +48,26 @@ export function holdAnchor(hash: string): () => void {
 export function App() {
   const current = useChapterInView(KEYS);
   useEffect(() => holdAnchor(window.location.hash), []);
-  useEffect(() => prefetch(presetsToFetch(CHAPTERS)), []);
-  const [world, setWorld] = useState<Health | undefined>(undefined);
+  // The world, once the server says; "down" if it doesn't answer. It's asked for first, before
+  // the presets take the browser's connections.
+  const [world, setWorld] = useState<Health | "down" | undefined>(undefined);
   useEffect(() => {
     let current = true;
-    void health().then((answer) => current && setWorld(answer));
+    void health().then((answer) => current && setWorld(answer ?? "down"));
     return () => {
       current = false;
     };
   }, []);
+  useEffect(() => prefetch(presetsToFetch(CHAPTERS)), []);
+  const states = useAnswerStates(FIRSTS);
+  const chapters = CHAPTERS.map((c, i) => ({ ...c, state: states[i] }));
+  if (world === "down") {
+    return <NoServer />;
+  }
   return (
     <WorldContext.Provider value={world}>
       <div className="page">
-        <ChapterRail name={NAME} chapters={CHAPTERS} current={current} />
+        <ChapterRail name={NAME} chapters={chapters} current={current} />
         <main>
           <header id="top">
             <h1>{NAME}</h1>
@@ -73,5 +84,23 @@ export function App() {
         </main>
       </div>
     </WorldContext.Provider>
+  );
+}
+
+/** What the page says when the server doesn't answer: that it isn't running, and how to start it. */
+function NoServer() {
+  return (
+    <main className="no-server">
+      <h1>{NAME}</h1>
+      <div className="chart-state failed" role="alert">
+        <p>The explorer&apos;s server isn&apos;t running, so there&apos;s nothing to show yet. Start it from the repository:</p>
+        <pre>
+          <code>{SERVE}</code>
+        </pre>
+        <button type="button" onClick={() => window.location.reload()}>
+          Try again
+        </button>
+      </div>
+    </main>
   );
 }

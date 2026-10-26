@@ -1,0 +1,22 @@
+{
+  "sampling": [
+    { "rows": 200, "quota": 20, "spread": 0, "trajectories": 500 },
+    { "rows": 200, "quota": 20, "spread": 1, "trajectories": 500 },
+    { "rows": 200, "quota": 20, "spread": 2, "trajectories": 500 }
+  ],
+  "valves": [
+    { "growth": 0, "trajectories": 10 },
+    { "growth": 0.05, "trajectories": 10 },
+    { "growth": 0.2, "trajectories": 10 }
+  ],
+  "lifecycle": [
+    { "months": 6, "trajectories": 10 },
+    { "months": 12, "trajectories": 10 },
+    { "months": 36, "trajectories": 10 }
+  ],
+  "sbc": [
+    { "months": 6, "trajectories": 10 },
+    { "months": 12, "trajectories": 10 },
+    { "months": 36, "trajectories": 10 }
+  ]
+}

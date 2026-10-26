@@ -53,7 +53,7 @@ export function ChapterRail({
   current,
 }: {
   name: string;
-  chapters: readonly { key: string; title: string }[];
+  chapters: readonly { key: string; title: string; state?: "waiting" | "ready" | "failed" }[];
   current: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -92,8 +92,13 @@ export function ChapterRail({
               aria-current={c.key === current ? "location" : undefined}
               onClick={() => setOpen(false)}
             >
-              <span className="rail-number">{i + 1}</span>
-              {c.title}
+              <span className="rail-number">{i + 1}</span> {c.title}
+              {c.state !== undefined && c.state !== "ready" && (
+                <>
+                  <span className={`rail-state ${c.state}`} aria-hidden="true" />{" "}
+                  <span className="hidden-text">{c.state === "waiting" ? "(still running)" : "(failed)"}</span>
+                </>
+              )}
             </a>
           </li>
         ))}
