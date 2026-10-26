@@ -1,8 +1,7 @@
-import { useState } from "react";
-
-import { TRAJECTORIES, type Lifecycle } from "../api";
+import type { Lifecycle } from "../api";
 import { BarChart, LineChart, spreadSeries } from "../charts";
-import { Control, Status } from "../Control";
+import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import type { DemoProps } from "../story";
 import { useDemo } from "../useDemo";
 
 const FLOWS: Record<string, string> = {
@@ -23,9 +22,10 @@ function total(parts: Record<string, number[]>, months: number): number[] {
   );
 }
 
-export function LifecycleDemo() {
-  const [months, setMonths] = useState(12);
-  const { data, error, loading } = useDemo<Lifecycle>("lifecycle", { months, trajectories: TRAJECTORIES });
+export function LifecycleDemo({ name, presets }: DemoProps) {
+  const controls = useControls(presets);
+  const months = controls.values.months ?? 12;
+  const { data, error, loading } = useDemo<Lifecycle>("lifecycle", controls.query);
   const steps = data ? Array.from({ length: data.months }, (_, i) => i + 1) : [];
   return (
     <div className="demo">
@@ -34,12 +34,8 @@ export function LifecycleDemo() {
         and leaves either filled, by one of five channels, or unfilled. Every month the stock
         changes by exactly what opened, less what filled and what left unfilled.
       </p>
-      <div className="controls">
-        <Control label="Months" value={months} min={3} max={36} onChange={setMonths} />
-      </div>
-      <Status loading={loading} error={error} />
       {data && (
-        <>
+        <div className={loading ? "running" : undefined}>
           <p className="stats">
             The opening identity's largest residual: {data.identity_residual} openings.
           </p>
@@ -74,8 +70,13 @@ export function LifecycleDemo() {
               },
             ]}
           />
-        </>
+        </div>
       )}
+      <Status loading={loading} error={error} />
+      <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
+      <Adjust name={name}>
+        <Control label="Months" value={months} min={3} max={36} onChange={(v) => controls.adjust({ months: v })} />
+      </Adjust>
     </div>
   );
 }

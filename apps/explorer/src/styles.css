@@ -66,12 +66,24 @@ a { color: var(--accent); }
   .rail li a { margin-left: 0; }
 }
 
+/* A chapter's controls (E3): the presets under its chart, then Adjust's sliders. */
+.presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+.preset { position: relative; padding: 6px 12px; border: 1px solid var(--grid); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 0.9rem; cursor: pointer; }
+.preset input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.preset:hover { border-color: var(--muted); }
+.preset.chosen { border-color: var(--accent); background: var(--accent); color: var(--surface); font-weight: 600; }
+.preset:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.adjust-toggle { padding: 4px 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
+.adjust-toggle::after { content: " +"; }
+.adjust-toggle[aria-expanded="true"]::after { content: " −"; }
+.running { opacity: 0.55; }
 .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0; }
+.controls[hidden] { display: none; }
 .control { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; }
 .control input { accent-color: var(--accent); }
 .stats { font-size: 0.95rem; }
 .error { color: var(--danger); }
-.loading { color: var(--muted); }
+.loading { min-height: 1.2em; margin: 4px 0; color: var(--muted); font-size: 0.9rem; }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
 

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "./api";
 import { App, holdAnchor } from "./App";
 import { CHAPTERS } from "./story";
+import { forget } from "./useDemo";
 
 const spread = (values: number[]) => ({ mean: values, p10: values, p50: values, p90: values });
 
@@ -55,6 +56,7 @@ function serving() {
 
 afterEach(() => {
   cleanup();
+  forget();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
