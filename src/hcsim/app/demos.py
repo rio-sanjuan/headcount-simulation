@@ -22,15 +22,21 @@ is a spread: its mean, and its 10th, 50th and 90th percentiles, month by month. 
 are means, so they add up to the mean they explain.
 
 Every demo is a seeded run, so the same request gives the same answer, and each answer says its
-seed and trajectories, so a chart can say what made it. Each answer is kept, so asking again is
-free. Runs read the world through its data, as studies do.
+seed and trajectories, so a chart can say what made it, and how long it took to make. Runs read
+the world through its data, as studies do.
+
+**Kept answers.** `Explorer.answer` keeps every answer in memory, so asking again is free, and
+each chapter's presets (`PRESETS`) on disk too (`cache.Kept`), so a later start answers them at
+once. Each demo takes its own lock, so a slow chapter doesn't hold up the others.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import threading
-from collections.abc import Callable, Hashable
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
@@ -38,6 +44,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from hcsim.app.cache import Kept
 from hcsim.engine.loop import SimulationResult
 from hcsim.engine.seeding import schema_from_world, seed_state, snapshot_before
 from hcsim.guidance import pipeline as guidance
@@ -76,6 +83,29 @@ SEED: Final = 7
 TRAJECTORIES: Final = 10
 #: The percentiles a spread gives, beside its mean.
 PERCENTILES: Final = (10, 50, 90)
+#: The demos, in the story's order.
+DEMOS: Final = ("sampling", "valves", "lifecycle", "sbc")
+#: Each chapter's presets (the design's E3): three scenarios that make its point, each the full
+#: set of parameters its demo runs with. The page offers the same ones, in
+#: apps/explorer/src/presets.json, and the first it shows is the middle one.
+PRESETS: Final[dict[str, tuple[dict[str, float], ...]]] = {
+    "sampling": tuple(
+        {"rows": 200, "quota": 20, "trajectories": 500, "spread": s, "seed": 0} for s in (0, 1, 2)
+    ),
+    "valves": tuple({"growth": g, "trajectories": TRAJECTORIES} for g in (0.0, 0.05, 0.2)),
+    "lifecycle": tuple({"months": m, "trajectories": TRAJECTORIES} for m in (6, 12, 36)),
+    "sbc": tuple({"months": m, "trajectories": TRAJECTORIES} for m in (6, 12, 36)),
+}
+#: The capacity model's scope each world demo runs at, and how many runs of it a request makes.
+SCOPES: Final = {"valves": ("hcf", len(VALVES)), "lifecycle": ("hcf", 1), "sbc": ("hcf+sbc", 1)}
+#: How many times the capacity model's prediction each demo's first preset takes. The model
+#: measures runs alone: the studies' evaluators, and for the valves, rate calibration and
+#: guidance's fitting, add the rest. Measured on tiny and small, alone, on 2026-10-25: the valves
+#: took 4.9 and 5.3 times their prediction, the lifecycle 1.4, and SBC 1.3.
+OVERHEAD: Final = {"valves": 5.0, "lifecycle": 1.4, "sbc": 1.3}
+#: The bench's committed baseline, relative to the repository's root, whose capacity model
+#: estimates how long a run takes.
+BASELINE: Final = Path("benchmarks") / "baseline.json"
 
 
 class DemoError(ValueError):
@@ -137,17 +167,27 @@ def sampling(
     return out
 
 
-class Explorer:
-    """The demos that run on a world, each answer kept. `scratch` holds the plans and guidance
-    the valves demo writes."""
+def first(demo: str) -> dict[str, float]:
+    """The preset a chapter shows first: the middle one."""
+    presets = PRESETS[demo]
+    return presets[len(presets) // 2]
 
-    def __init__(self, world: Path, scratch: Path) -> None:
+
+class Explorer:
+    """The demos that run on a world, each answer kept in memory, and each preset's on disk too
+    where `kept` keeps them. `scratch` holds the plans and guidance the valves demo writes."""
+
+    def __init__(self, world: Path, scratch: Path, kept: Kept | None = None) -> None:
         if not world.is_file():
             raise DemoError(f"no world at {world}")
         self.world = world
         self.scratch = scratch
-        self._kept: dict[Hashable, Any] = {}
-        self._lock = threading.RLock()  # reentrant: a kept demo keeps the forecast it aligns
+        self.kept = kept if kept is not None else Kept(None, world, "")
+        self._answers: dict[tuple[str, str], dict[str, Any]] = {}
+        # A lock per demo, so a slow chapter doesn't hold up the others, and one for the
+        # forecast the valves demo fits once and aligns to each plan.
+        self._locks = {name: threading.Lock() for name in (*DEMOS, "forecast")}
+        self._fitted: guidance.Fitted | None = None
         with duckdb.connect(str(world), read_only=True) as con:
             last = snapshot_before(con, dt.date.max)
             self.run_date = last + dt.timedelta(days=1)
@@ -157,11 +197,60 @@ class Explorer:
         self.employees = int(heads.sum())
         self.cost_centers = int((heads > 0).sum())
 
-    def _keep(self, key: Hashable, make: Callable[[], Any]) -> Any:
-        with self._lock:
-            if key not in self._kept:
-                self._kept[key] = make()
-            return self._kept[key]
+    def answer(self, demo: str, **params: Any) -> dict[str, Any]:
+        """`demo`'s answer for `params`: kept in memory once made, and, for a preset, on disk
+        too, so a later start reads it rather than run it. A made answer says how many seconds
+        it took (`seconds`), so the page can say how long a run takes."""
+        if demo not in DEMOS:
+            raise DemoError(f"the demos are {', '.join(DEMOS)}, not {demo!r}")
+        key = (demo, json.dumps(params, sort_keys=True))
+        with self._locks[demo]:
+            if key not in self._answers:
+                preset = params in PRESETS[demo]
+                found = self.kept.get(demo, params) if preset else None
+                if found is None:
+                    start = time.perf_counter()
+                    found = self._make(demo)(**params)
+                    found["seconds"] = round(time.perf_counter() - start, 3)
+                    if preset:
+                        self.kept.put(demo, params, found)
+                self._answers[key] = found
+            return dict(self._answers[key])
+
+    def _make(self, demo: str) -> Callable[..., dict[str, Any]]:
+        makers: dict[str, Callable[..., dict[str, Any]]] = {
+            "sampling": sampling,
+            "valves": self._valves,
+            "lifecycle": self._lifecycle,
+            "sbc": self._sbc,
+        }
+        return makers[demo]
+
+    def has(self, demo: str, params: dict[str, Any]) -> bool:
+        """Whether `demo`'s answer for `params` is at hand, in memory or on disk."""
+        key = (demo, json.dumps(params, sort_keys=True))
+        return key in self._answers or self.kept.get(demo, params) is not None
+
+    def estimate(self, demo: str, baseline: Path = BASELINE) -> float | None:
+        """About how many seconds the first preset of `demo` takes to run here, from the bench's
+        capacity model in `baseline`: none if its answer is at hand, and None if there's no
+        model to ask. The model is read from the baseline's file, as the bench writes it, since
+        the bench's code brings the synthetic world with it."""
+        params = first(demo)
+        if self.has(demo, params):
+            return 0.0
+        if demo == "sampling":
+            return 0.0  # rows drawn in memory, in a few milliseconds
+        try:
+            fits = json.loads(baseline.read_text())["capacity"]["fits"]
+            scope, runs = SCOPES[demo]
+            prepare, simulate = fits[scope]["prepare"], fits[scope]["simulate"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        months = int(params.get("months", PLAN_MONTHS))
+        work = self.employees * months * int(params["trajectories"])
+        each = prepare[0] + prepare[1] * self.employees + simulate[0] + simulate[1] * work
+        return round(runs * each * OVERHEAD[demo], 1)
 
     def _run(self, guidance: Path | None = None, **fields: Any) -> SimulationResult:
         profile = StudyProfile.from_mapping(
@@ -176,11 +265,13 @@ class Explorer:
 
     def _forecast(self) -> guidance.Fitted:
         """The world's guidance forecast, fitted once: only its alignment depends on a plan."""
-        config = GuidanceConfig.from_mapping(
-            {"horizon": PLAN_MONTHS, "alignment": {"method": "greedy"}}
-        )
-        fitted: guidance.Fitted = self._keep("forecast", lambda: guidance.fit(self.world, config))
-        return fitted
+        with self._locks["forecast"]:
+            if self._fitted is None:
+                config = GuidanceConfig.from_mapping(
+                    {"horizon": PLAN_MONTHS, "alignment": {"method": "greedy"}}
+                )
+                self._fitted = guidance.fit(self.world, config)
+            return self._fitted
 
     def _aligned(self, growth: float) -> tuple[Path, Path]:
         """A plan rising evenly to `growth` above the seed, saved, and guidance aligned to it."""
@@ -210,9 +301,7 @@ class Explorer:
     def valves(self, growth: float = 0.05, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
         """One plan, rising to `growth` above the seed over six months, driven by each method:
         each run's headcount at each month-end, every cost center together, as a spread."""
-        return dict(
-            self._keep(("valves", growth, trajectories), lambda: self._valves(growth, trajectories))
-        )
+        return self.answer("valves", growth=growth, trajectories=trajectories)
 
     def _valves(self, growth: float, trajectories: int) -> dict[str, Any]:
         plan_path, guidance = self._aligned(growth)
@@ -256,11 +345,7 @@ class Explorer:
     def lifecycle(self, months: int = 12, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
         """The open-openings stock at each month-end, as a spread, and the mean of every flow in
         and out of it, month by month."""
-        return dict(
-            self._keep(
-                ("lifecycle", months, trajectories), lambda: self._lifecycle(months, trajectories)
-            )
-        )
+        return self.answer("lifecycle", months=months, trajectories=trajectories)
 
     def _lifecycle(self, months: int, trajectories: int) -> dict[str, Any]:
         r = self._run(months=months, trajectories=trajectories)
@@ -293,9 +378,7 @@ class Explorer:
         """The expense a run recognizes each month: in total, as a spread, and as the means of
         the parts the books record it in (`SBC_PARTS`) and of the grants it comes from, those made
         before the run (`seed`), by it (`sim`), and offline."""
-        return dict(
-            self._keep(("sbc", months, trajectories), lambda: self._sbc(months, trajectories))
-        )
+        return self.answer("sbc", months=months, trajectories=trajectories)
 
     def _sbc(self, months: int, trajectories: int) -> dict[str, Any]:
         r = self._run(months=months, trajectories=trajectories, scope="hcf+sbc")

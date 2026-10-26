@@ -2,11 +2,20 @@
 
 export type Draws = { histogram: number[]; mean: number; sd: number; rates: number[] };
 
-/** The page's world, and the engine that runs on it. */
-export type Health = { world: string; run_date: string; employees: number; cost_centers: number; version: string };
+/** The page's world, the engine that runs on it, and about how many seconds each chapter's first
+ * preset takes to run: none where it's kept, and null where there's no estimate. */
+export type Health = {
+  world: string;
+  run_date: string;
+  employees: number;
+  cost_centers: number;
+  version: string;
+  chapters: Record<string, { seconds: number | null }>;
+};
 
-/** What every run says about itself: how many trajectories it took, and its seed. */
-export type Ran = { trajectories: number; seed: number };
+/** What every run says about itself: how many trajectories it took, its seed, and how many
+ * seconds it took to make. */
+export type Ran = { trajectories: number; seed: number; seconds?: number };
 
 export type Sampling = Ran & {
   rows: number;
@@ -55,10 +64,6 @@ export type Sbc = Ran & {
 };
 
 export type Query = Record<string, number>;
-
-/** The trajectories the page asks a run on the world for: enough for a stable 10th and 90th
- * percentile on the tiny world. */
-export const TRAJECTORIES = 10;
 
 /** The page's world, or nothing if the server doesn't answer. */
 export async function health(): Promise<Health | undefined> {

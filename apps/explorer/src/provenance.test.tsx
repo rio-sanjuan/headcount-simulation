@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import { caption } from "./provenance";
 
-const WORLD = { world: "tiny5.duckdb", run_date: "2026-01-01", employees: 320, cost_centers: 10, version: "0.1.0.dev0" };
+const WORLD = {
+  world: "tiny5.duckdb",
+  run_date: "2026-01-01",
+  employees: 320,
+  cost_centers: 10,
+  version: "0.1.0.dev0",
+  chapters: {},
+};
 
 describe("a chart's caption", () => {
   it("names the world, its size, the start, the trajectories, the seed, and the engine", () => {

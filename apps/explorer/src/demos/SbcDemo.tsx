@@ -5,7 +5,8 @@
 
 import type { Sbc, SbcPart } from "../api";
 import { StackedBars, format, type Part } from "../charts";
-import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import { ChapterState } from "../ChapterState";
+import { Adjust, Control, Presets, useControls } from "../Control";
 import { DraftMark, type DemoProps } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
@@ -60,8 +61,7 @@ function inherited(data: Sbc, month: number): number {
 export function SbcDemo({ name, presets }: DemoProps) {
   const controls = useControls(presets);
   const months = controls.values.months ?? 12;
-  const { data, error, loading } = useDemo<Sbc>("sbc", controls.query);
-  const rateless = data !== undefined && !drawn(data).some((p) => p.name === "rate true-up");
+  const loaded = useDemo<Sbc>("sbc", controls.query);
   return (
     <div className="demo">
       <p className="lead">
@@ -69,40 +69,43 @@ export function SbcDemo({ name, presets }: DemoProps) {
         value is recognized as expense month by month. The run&apos;s expense comes from the
         equity granted before it (seed), the grants it makes (sim), and offline plans.
       </p>
-      {data && (
-        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
-          <div className={loading ? "running" : undefined}>
-            <StackedBars
-              title="Expense recognized each month, and its parts"
-              x="month"
-              y="expense"
-              xs={Array.from({ length: data.months }, (_, i) => i)}
-              parts={drawn(data)}
-              total={{
-                name: "recognized",
-                role: "subject",
-                // The bars are means, so the line they add up to is the mean, in its band.
-                values: data.total.mean,
-                band: { low: data.total.p10, high: data.total.p90 },
-              }}
-              summary={sbcSummary(data)}
-              after={
-                rateless && (
-                  <p className="summary">The forfeiture rate isn&apos;t revised on this world, so there&apos;s no rate true-up.</p>
-                )
-              }
-            />
-            <p className="lead">
-              Grants made before the run carry {inherited(data, 0)}% of the first month&apos;s expense, and{" "}
-              {inherited(data, data.months - 1)}% of the last month&apos;s, as the run&apos;s own grants take over.
-              <DraftMark />
-            </p>
-          </div>
-        </RunContext.Provider>
-      )}
-      <Status loading={loading} error={error} />
+      <ChapterState demo="sbc" query={controls.query} loaded={loaded}>
+        {(data) => {
+          const parts = drawn(data);
+          const rateless = !parts.some((p) => p.name === "rate true-up");
+          return (
+            <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+              <StackedBars
+                title="Expense recognized each month, and its parts"
+                x="month"
+                y="expense"
+                xs={Array.from({ length: data.months }, (_, i) => i)}
+                parts={parts}
+                total={{
+                  name: "recognized",
+                  role: "subject",
+                  // The bars are means, so the line they add up to is the mean, in its band.
+                  values: data.total.mean,
+                  band: { low: data.total.p10, high: data.total.p90 },
+                }}
+                summary={sbcSummary(data)}
+                after={
+                  rateless && (
+                    <p className="summary">The forfeiture rate isn&apos;t revised on this world, so there&apos;s no rate true-up.</p>
+                  )
+                }
+              />
+              <p className="lead">
+                Grants made before the run carry {inherited(data, 0)}% of the first month&apos;s expense, and{" "}
+                {inherited(data, data.months - 1)}% of the last month&apos;s, as the run&apos;s own grants take over.
+                <DraftMark />
+              </p>
+            </RunContext.Provider>
+          );
+        }}
+      </ChapterState>
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
-      <Adjust name={name}>
+      <Adjust name={name} controls={controls} seconds={loaded.data?.seconds}>
         <Control label="Months" value={months} min={3} max={36} onChange={(v) => controls.adjust({ months: v })} />
       </Adjust>
     </div>

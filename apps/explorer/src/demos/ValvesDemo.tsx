@@ -6,7 +6,8 @@ import { useState } from "react";
 
 import type { Valves } from "../api";
 import { LineChart, spreadSeries, type Series } from "../charts";
-import { Adjust, Choices, Control, Presets, Status, useControls } from "../Control";
+import { ChapterState } from "../ChapterState";
+import { Adjust, Choices, Control, Presets, useControls } from "../Control";
 import { DraftMark, type DemoProps, type Line } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
@@ -56,9 +57,8 @@ export function ValvesDemo({ name, presets }: DemoProps) {
   const controls = useControls(presets);
   const [focus, setFocus] = useState(FIRST);
   const growth = Math.round((controls.values.growth ?? 0.05) * 100);
-  const { data, error, loading } = useDemo<Valves>("valves", controls.query);
+  const loaded = useDemo<Valves>("valves", controls.query);
   const valve = VALVES[focus] ?? VALVES[FIRST];
-  const run = data?.runs[valve.method];
   return (
     <div className="demo">
       <p className="lead">
@@ -73,38 +73,42 @@ export function ValvesDemo({ name, presets }: DemoProps) {
         onChoose={setFocus}
         className="chips"
       />
-      {data && run && (
-        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
-          <div className={loading ? "running" : undefined}>
-            <LineChart
-              title={`Headcount from ${data.run_date}, every cost center together`}
-              x="month-end"
-              y="headcount"
-              xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
-              series={[
-                { name: "Plan", values: [Number.NaN, ...data.plan], role: "plan" },
-                ...VALVES.flatMap(({ method, name }): Series[] => {
-                  const r = data.runs[method];
-                  if (r === undefined) {
-                    return [];
-                  }
-                  return [method === valve.method ? spreadSeries(name, r.headcount) : { name, values: r.headcount.p50 }];
-                }),
-              ]}
-              summary={
-                <>
-                  {valve.lever.text} {ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}
-                  {valve.lever.draft && <DraftMark />}
-                </>
-              }
-              announce
-            />
-          </div>
-        </RunContext.Provider>
-      )}
-      <Status loading={loading} error={error} />
+      <ChapterState demo="valves" query={controls.query} loaded={loaded}>
+        {(data) => {
+          const run = data.runs[valve.method];
+          return (
+            <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+              <LineChart
+                title={`Headcount from ${data.run_date}, every cost center together`}
+                x="month-end"
+                y="headcount"
+                xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
+                series={[
+                  { name: "Plan", values: [Number.NaN, ...data.plan], role: "plan" },
+                  ...VALVES.flatMap(({ method, name }): Series[] => {
+                    const r = data.runs[method];
+                    if (r === undefined) {
+                      return [];
+                    }
+                    return [method === valve.method ? spreadSeries(name, r.headcount) : { name, values: r.headcount.p50 }];
+                  }),
+                ]}
+                summary={
+                  run && (
+                    <>
+                      {valve.lever.text} {ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}
+                      {valve.lever.draft && <DraftMark />}
+                    </>
+                  )
+                }
+                announce
+              />
+            </RunContext.Provider>
+          );
+        }}
+      </ChapterState>
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
-      <Adjust name={name}>
+      <Adjust name={name} controls={controls} seconds={loaded.data?.seconds}>
         <Control label="Plan's growth (%)" value={growth} min={-10} max={20} onChange={(v) => controls.adjust({ growth: v / 100 })} />
       </Adjust>
     </div>

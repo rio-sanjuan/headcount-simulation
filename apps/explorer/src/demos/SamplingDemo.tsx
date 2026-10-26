@@ -4,7 +4,8 @@
 
 import type { Sampling } from "../api";
 import { Histogram, LineChart } from "../charts";
-import { Adjust, Control, Presets, Status, useControls } from "../Control";
+import { ChapterState } from "../ChapterState";
+import { Adjust, Control, Presets, useControls } from "../Control";
 import type { DemoProps } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
@@ -70,12 +71,7 @@ export function rateSummary(data: Sampling): string {
 export function SamplingDemo({ name, presets }: DemoProps) {
   const controls = useControls(presets);
   const { rows = 200, quota = 20, spread = 1 } = controls.values;
-  const { data, error, loading } = useDemo<Sampling>("sampling", controls.query);
-  const rates = data && {
-    quota: grouped(data.quota.rates),
-    independent: grouped(data.independent.rates),
-    probability: grouped(data.probabilities),
-  };
+  const loaded = useDemo<Sampling>("sampling", controls.query);
   return (
     <div className="demo">
       <p className="lead">
@@ -83,38 +79,44 @@ export function SamplingDemo({ name, presets }: DemoProps) {
         which (quota sampling). Drawing every row on its own at the same rates expects the count,
         but misses it from draw to draw.
       </p>
-      {data && rates && (
-        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed, rows: data.rows }}>
-          <div className={loading ? "running" : undefined}>
-            <Histogram
-              title="How many rows each trajectory drew"
-              x="rows drawn"
-              y="trajectories"
-              bins={data.bins}
-              subject={{ name: "Quota sampling", counts: data.quota.histogram }}
-              context={{ name: "Independent draws", counts: data.independent.histogram }}
-              cap={CAP}
-              summary={countSummary(data)}
-            />
-            <LineChart
-              title="How often each row was drawn, likeliest first"
-              x={`row, in groups of ${groupSize(data.probabilities.length)}`}
-              y="share of trajectories"
-              xs={rates.quota.starts}
-              labelAt="start"
-              series={[
-                { name: "Quota sampling", values: rates.quota.means, role: "subject" },
-                { name: "Independent draws", values: rates.independent.means },
-                { name: "Probability", values: rates.probability.means, role: "plan" },
-              ]}
-              summary={rateSummary(data)}
-            />
-          </div>
-        </RunContext.Provider>
-      )}
-      <Status loading={loading} error={error} />
+      <ChapterState demo="sampling" query={controls.query} loaded={loaded}>
+        {(data) => {
+          const rates = {
+            quota: grouped(data.quota.rates),
+            independent: grouped(data.independent.rates),
+            probability: grouped(data.probabilities),
+          };
+          return (
+            <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed, rows: data.rows }}>
+              <Histogram
+                title="How many rows each trajectory drew"
+                x="rows drawn"
+                y="trajectories"
+                bins={data.bins}
+                subject={{ name: "Quota sampling", counts: data.quota.histogram }}
+                context={{ name: "Independent draws", counts: data.independent.histogram }}
+                cap={CAP}
+                summary={countSummary(data)}
+              />
+              <LineChart
+                title="How often each row was drawn, likeliest first"
+                x={`row, in groups of ${groupSize(data.probabilities.length)}`}
+                y="share of trajectories"
+                xs={rates.quota.starts}
+                labelAt="start"
+                series={[
+                  { name: "Quota sampling", values: rates.quota.means, role: "subject" },
+                  { name: "Independent draws", values: rates.independent.means },
+                  { name: "Probability", values: rates.probability.means, role: "plan" },
+                ]}
+                summary={rateSummary(data)}
+              />
+            </RunContext.Provider>
+          );
+        }}
+      </ChapterState>
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />
-      <Adjust name={name}>
+      <Adjust name={name} controls={controls} seconds={loaded.data?.seconds}>
         <Control label="Rows" value={rows} min={20} max={1000} step={10} onChange={(v) => controls.adjust({ rows: v, quota: Math.min(quota, v) })} />
         <Control label="Quota" value={Math.min(quota, rows)} min={1} max={rows} onChange={(v) => controls.adjust({ quota: v })} />
         <Control label="Spread of probabilities" value={spread} min={0} max={2} step={0.1} onChange={(v) => controls.adjust({ spread: v })} />
