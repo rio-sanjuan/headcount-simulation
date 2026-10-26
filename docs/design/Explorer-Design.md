@@ -1,6 +1,7 @@
 # The explorer's design
 
-**Status:** decided, not built (#647). All ten decisions are settled, and the build is tracked in #650.
+**Status:** built (#650). All ten decisions are settled (#647) and built, in the pull requests
+[the build](#the-build) lists.
 
 The explorer is the local, interactive demo of the engine (M9.2), built on FastAPI and React
 (decision D6). This doc records its design, one decision at a time, each sketched with real
@@ -562,20 +563,44 @@ minutes, almost all of it fitting guidance.
 
 ## The build
 
-Tracked in #650, one issue per piece, each naming the decisions it builds:
+Tracked in #650, one issue per piece, each naming the decisions it builds, and built in one pull
+request each:
 
-| Issue | Builds | Depends on |
-|---|---|---|
-| #651 | E4: the chart language, with percentiles from the API | |
-| #652 | E1, E2: one page in four chapters, with the chapter rail | |
-| #653 | E3: presets, then Adjust | #652 |
-| #654 | E5: the sampling chapter | #651 |
-| #655 | E6: the valves chapter | #651 |
-| #656 | E7: the lifecycle chapter | #651 |
-| #657 | E8: the SBC chapter | #651 |
-| #658 | E9: a provenance caption under every chart | #651 |
-| #659 | E10: kept answers, `hcsim app prepare`, and the edge states | #653 |
-| #660 | The chapters' prose and preset labels, for the maintainer's review | |
+| Issue | Builds | Depends on | Built in |
+|---|---|---|---|
+| #651 | E4: the chart language, with percentiles from the API | | #662 |
+| #652 | E1, E2: one page in four chapters, with the chapter rail | | #663 |
+| #653 | E3: presets, then Adjust | #652 | #664 |
+| #654 | E5: the sampling chapter | #651 | #665 |
+| #655 | E6: the valves chapter | #651 | #666 |
+| #656 | E7: the lifecycle chapter | #651 | #667 |
+| #657 | E8: the SBC chapter | #651 | #668 |
+| #658 | E9: a provenance caption under every chart | #651 | #669 |
+| #659 | E10: kept answers, `hcsim app prepare`, and the edge states | #653 | #670 |
+| #660 | The chapters' prose and preset labels, for the maintainer's review | | #671 |
+
+**Where the build settled what the design left open:**
+
+- **Charts take their column's measured width** (E4), rather than scaling a fixed drawing, so their
+  text keeps its size in a narrow window. A label nudged off its line gets a short leader to it.
+- **Each answer says what ran** (E9): its seed and trajectories, and how many seconds it took, so
+  a caption names the run that was made, and Adjust knows when a chapter is slow (E10).
+- **The rate chart's labels sit at its left** (E5), as proposed, so its y axis moves to the right.
+- **The lifecycle's identity counts unfilled exits as closed** (E7): for a year on tiny it reads
+  "46.7 opened = 43.7 closed + 3.0 more open". The 38.4 E7 quotes is the fills alone.
+- **The presets live in `apps/explorer/src/presets.json`** (E3, E10), which the page reads. The
+  server keeps its own copy, `PRESETS`, for `hcsim app prepare` and the cache, and a test holds
+  the two equal.
+- **The time left comes from the bench's capacity model** (E10), read from
+  `benchmarks/baseline.json`, since the bench's code brings the synthetic world with it, which the
+  app mustn't import. The model measures runs alone, so each chapter's estimate is scaled by what
+  it measured beyond them: about five times for the valves (rate calibration and guidance's fit),
+  1.4 times for the lifecycle, and 1.3 times for SBC.
+- **The page asks for the world first, then the presets four at a time** (E10). A browser opens
+  about six connections to a server, and with all twelve presets at once, the world's answer
+  waited behind the runs.
+- **A slow chapter's sliders** (E10) run when a drag is let go, and after a second's rest when the
+  keyboard moves them.
 
 ## Decisions
 
