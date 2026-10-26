@@ -114,9 +114,10 @@ figure.chart svg { display: block; max-width: 100%; height: auto; overflow: visi
 .ribbon-label { font-size: 12px; fill: var(--muted); }
 .ribbon-total { fill: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .stock { fill: var(--accent); }
+.zero { stroke: var(--muted); stroke-width: 1; }
 .summary { margin: 8px 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.45; }
 .bar.subject { fill: var(--accent); }
-.bar.context.shade-1 { fill: var(--context); fill-opacity: 0.45; }
-.bar.context.shade-2 { fill: var(--context); fill-opacity: 0.75; }
+.bar.context.shade-1 { fill: var(--context); fill-opacity: 0.3; }
+.bar.context.shade-2 { fill: var(--context); fill-opacity: 0.55; }
 .bar.context.shade-3 { fill: var(--context); }
 .bar.plan { fill: var(--ink); }

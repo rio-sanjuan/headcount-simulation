@@ -713,3 +713,111 @@ export function FlowDiagram({
     </Figure>
   );
 }
+
+/** A part of a whole, stacked in a bar per month: its values, and its shade of gray. */
+export type Part = { name: string; values: number[]; shade: 1 | 2 | 3 };
+
+/** Where each part's segment lies in each month's bar: positive parts stacked up from zero, and
+ * negative parts down from it, each in the order given. */
+export function stack(parts: Part[], months: number): { from: number; to: number }[][] {
+  const up = new Array<number>(months).fill(0);
+  const down = new Array<number>(months).fill(0);
+  return parts.map((p) =>
+    Array.from({ length: months }, (_, i) => {
+      const v = p.values[i] ?? 0;
+      const base = v >= 0 ? (up[i] ?? 0) : (down[i] ?? 0);
+      if (v >= 0) {
+        up[i] = base + v;
+      } else {
+        down[i] = base + v;
+      }
+      return { from: base, to: base + v };
+    }),
+  );
+}
+
+/** A bar per month split into its parts, in grays, positive parts above the zero line and
+ * negative ones below, with the total they add up to as the subject's line and band. Each part
+ * and the total are labelled at the right. */
+export function StackedBars({
+  parts,
+  total,
+  xs,
+  ...axes
+}: Axes & { parts: Part[]; total: Series; xs: number[] }) {
+  const months = xs.length;
+  const stacks = stack(parts, months);
+  const all = [
+    0,
+    ...stacks.flatMap((segments) => segments.flatMap((s) => [s.from, s.to])),
+    ...total.values,
+    ...(total.band?.low ?? []),
+    ...(total.band?.high ?? []),
+  ].filter(Number.isFinite);
+  const yTicks = ticks(Math.min(...all), Math.max(...all));
+  return (
+    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
+      {(width) => {
+        const right = width - gutter([total.name, ...parts.map((p) => p.name)], width);
+        const y = scale(yTicks[0] ?? 0, yTicks.at(-1) ?? 1, HEIGHT - PAD.bottom, PAD.top);
+        const slot = (right - PAD.left) / Math.max(months, 1);
+        const bar = Math.min(BAR_MAX, slot * 0.7);
+        const x = (i: number) => PAD.left + (i + 0.5) * slot;
+        const shown = labelled(months, Math.min(12, (right - PAD.left) / X_LABEL_ROOM));
+        // Each part's label beside its segment in the last month, and the total's beside its end.
+        const last = months - 1;
+        const wanted = [
+          ...parts.map((p, k) => {
+            const s = stacks[k]?.[last] ?? { from: 0, to: 0 };
+            return { name: p.name, role: "context", at: y((s.from + s.to) / 2) };
+          }),
+          { name: total.name, role: "subject", at: y(total.values[last] ?? 0) },
+        ];
+        const placed = nudge(
+          wanted.map((w) => w.at),
+          LABEL_GAP,
+          PAD.top,
+          HEIGHT - PAD.bottom,
+        );
+        return (
+          <>
+            <Axis axes={axes} yTicks={yTicks} y={y} right={right} />
+            {xs.map((v, i) =>
+              shown(i) ? (
+                <text key={v} className="tick" x={x(i)} y={HEIGHT - PAD.bottom + 16} textAnchor="middle">
+                  {v}
+                </text>
+              ) : null,
+            )}
+            {parts.map((p, k) => (
+              <g key={p.name}>
+                {(stacks[k] ?? []).map((s, i) => {
+                  // A 2 px gap of the surface between touching segments: each gives up 1 px.
+                  const top = Math.min(y(s.from), y(s.to)) + 1;
+                  const height = Math.abs(y(s.to) - y(s.from)) - 2;
+                  return height > 0 ? (
+                    <rect key={i} className={`bar context shade-${p.shade}`} x={x(i) - bar / 2} y={top} width={bar} height={height} />
+                  ) : null;
+                })}
+              </g>
+            ))}
+            <line className="zero" x1={PAD.left} x2={right} y1={y(0)} y2={y(0)} />
+            {total.band && <path className="band subject" d={bandPath(total.band, x, y)} />}
+            <polyline className="line subject" points={points(total.values, x, y)} />
+            {wanted.map((w, k) => {
+              const at = placed[k] ?? w.at;
+              return (
+                <g key={`${w.name}-label`}>
+                  {Math.abs(at - w.at) > 3 && <line className="leader" x1={right + 2} y1={w.at} x2={right + 8} y2={at} />}
+                  <text className={`end-label ${w.role}`} x={right + 10} y={at + 4}>
+                    {w.name}
+                  </text>
+                </g>
+              );
+            })}
+          </>
+        );
+      }}
+    </Figure>
+  );
+}
