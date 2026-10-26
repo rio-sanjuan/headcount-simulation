@@ -8,35 +8,24 @@ import type { Valves } from "../api";
 import { LineChart, spreadSeries, type Series } from "../charts";
 import { ChapterState } from "../ChapterState";
 import { Adjust, Choices, Control, Presets, useControls } from "../Control";
-import { DraftMark, type DemoProps, type Line } from "../story";
+import type { DemoProps } from "../story";
 import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
 /** The valves, in the order the chapter explains them: each method's name in the plan's terms,
- * and the lever it pulls. The levers are placeholders, for the maintainer's review in #660. */
-export const VALVES: readonly { method: string; name: string; lever: Line }[] = [
-  {
-    method: "none",
-    name: "No valve",
-    lever: { text: "With no valve, the run follows the world's own rates and ignores the plan.", draft: true },
-  },
+ * and the lever it pulls. */
+export const VALVES: readonly { method: string; name: string; lever: string }[] = [
+  { method: "none", name: "No valve", lever: "With no valve, the run follows the world's own rates." },
   {
     method: "supply",
     name: "Supply",
-    lever: {
-      text: "Supply opens the requisitions the plan's growth needs, and heads arrive only as they fill, months later.",
-      draft: true,
-    },
+    lever: "Supply opens the requisitions the plan's growth calls for, and heads arrive as they fill.",
   },
-  {
-    method: "demand",
-    name: "Flow",
-    lever: { text: "Flow aligns guidance's hires and exits to the plan, month by month.", draft: true },
-  },
+  { method: "demand", name: "Flow", lever: "Flow aligns guidance's hires and exits to the plan, month by month." },
   {
     method: "rate_calibration",
     name: "Rate",
-    lever: { text: "Rate calibrates the domains' rates, so an unguided run drifts toward the plan.", draft: true },
+    lever: "Rate calibrates the domains' rates, so a run without guidance drifts toward the plan.",
   },
 ];
 /** The valve in focus at first: Supply, the first the chapter explains. */
@@ -61,11 +50,6 @@ export function ValvesDemo({ name, presets }: DemoProps) {
   const valve = VALVES[focus] ?? VALVES[FIRST];
   return (
     <div className="demo">
-      <p className="lead">
-        A plan for every cost center, rising evenly over six months, and the valve each alignment
-        method drives toward it: the requisitions growth opens (supply), guidance aligned to the
-        plan (flow), or calibrated domain rates (rate).
-      </p>
       <Choices
         label="Valve in focus"
         options={VALVES.map((v) => v.name)}
@@ -93,14 +77,7 @@ export function ValvesDemo({ name, presets }: DemoProps) {
                     return [method === valve.method ? spreadSeries(name, r.headcount) : { name, values: r.headcount.p50 }];
                   }),
                 ]}
-                summary={
-                  run && (
-                    <>
-                      {valve.lever.text} {ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}
-                      {valve.lever.draft && <DraftMark />}
-                    </>
-                  )
-                }
+                summary={run && `${valve.lever} ${ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}`}
                 announce
               />
             </RunContext.Provider>

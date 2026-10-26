@@ -74,11 +74,6 @@ export function SamplingDemo({ name, presets }: DemoProps) {
   const loaded = useDemo<Sampling>("sampling", controls.query);
   return (
     <div className="demo">
-      <p className="lead">
-        Where guidance sets a count, the engine draws exactly that many rows, the model choosing
-        which (quota sampling). Drawing every row on its own at the same rates expects the count,
-        but misses it from draw to draw.
-      </p>
       <ChapterState demo="sampling" query={controls.query} loaded={loaded}>
         {(data) => {
           const rates = {

@@ -94,11 +94,6 @@ export function LifecycleDemo({ name, presets }: DemoProps) {
   const loaded = useDemo<Lifecycle>("lifecycle", controls.query);
   return (
     <div className="demo">
-      <p className="lead">
-        A requisition opens (for growth, a campus class, or a backfill), waits as open openings,
-        and leaves either filled, by one of five channels, or unfilled. Every month the stock
-        changes by exactly what opened, less what filled and what left unfilled.
-      </p>
       <ChapterState demo="lifecycle" query={controls.query} loaded={loaded}>
         {(data) => {
           const through = flows(data);

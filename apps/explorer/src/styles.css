@@ -37,7 +37,10 @@ header h1 { margin: 0 0 4px; font-size: 1.75rem; }
 .chapter h2 { margin: 0 0 8px; font-size: 1.4rem; }
 .chapter-number { margin: 0 0 4px; color: var(--muted); font-size: 0.8rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .hand-on { margin-top: 24px; color: var(--muted); font-style: italic; line-height: 1.55; }
-.draft { display: inline-block; padding: 0 6px; border: 1px dashed var(--muted); border-radius: 4px; color: var(--muted); font-size: 0.75rem; font-style: normal; text-transform: uppercase; letter-spacing: 0.04em; }
+.intro { color: var(--muted); line-height: 1.55; }
+.intro b { color: var(--ink); font-weight: 600; }
+.intro ul { padding-left: 20px; }
+.intro li { margin: 4px 0; }
 a { color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
