@@ -46,6 +46,34 @@ export function useControls(presets: readonly Preset[]) {
   };
 }
 
+/** A radio group of named choices, drawn as a row of pills. Native radio inputs, so the arrow
+ * keys move through them. */
+export function Choices({
+  label,
+  options,
+  chosen,
+  onChoose,
+  className,
+}: {
+  label: string;
+  options: readonly string[];
+  chosen: number;
+  onChoose: (i: number) => void;
+  className: string;
+}) {
+  const group = useId();
+  return (
+    <div className={`choices ${className}`} role="radiogroup" aria-label={label}>
+      {options.map((option, i) => (
+        <label key={option} className={i === chosen ? "choice chosen" : "choice"}>
+          <input type="radio" name={group} checked={i === chosen} onChange={() => onChoose(i)} />
+          {option}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** A chapter's presets, a radio group labelled with the chapter's name. */
 export function Presets({
   name,
@@ -58,17 +86,7 @@ export function Presets({
   chosen: number;
   onChoose: (i: number) => void;
 }) {
-  const group = useId();
-  return (
-    <div className="presets" role="radiogroup" aria-label={name}>
-      {presets.map((p, i) => (
-        <label key={p.label} className={i === chosen ? "preset chosen" : "preset"}>
-          <input type="radio" name={group} checked={i === chosen} onChange={() => onChoose(i)} />
-          {p.label}
-        </label>
-      ))}
-    </div>
-  );
+  return <Choices label={name} options={presets.map((p) => p.label)} chosen={chosen} onChoose={onChoose} className="presets" />;
 }
 
 /** "Adjust": a disclosure that holds a chapter's sliders, named for its chapter, so each chapter's
