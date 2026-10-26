@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import hcsim
 from hcsim.app import cli
 from hcsim.app.demos import (
     FILLED,
     OPENED,
     SBC_PARTS,
+    SEED,
     VALVES,
     DemoError,
     Explorer,
@@ -152,8 +154,33 @@ def test_an_explorer_needs_its_world(tmp_path: Path) -> None:
 # --- the API ----------------------------------------------------------------------------------
 
 
+def test_the_health_route_names_the_run_behind_every_chart(
+    client: TestClient, explorer: Explorer
+) -> None:
+    health = client.get("/api/health").json()
+    assert health == {
+        "world": "tiny.duckdb",
+        "run_date": explorer.run_date.isoformat(),
+        "employees": explorer.employees,
+        "cost_centers": explorer.cost_centers,
+        "version": hcsim.__version__,
+    }
+    # Every run starts from the world's seed, so its headcount starts at the world's size.
+    start = explorer.valves(growth=0.05, trajectories=4)["runs"]["none"]["headcount"]["p50"][0]
+    assert explorer.employees == start
+    assert 0 < explorer.cost_centers <= explorer.employees
+
+
+def test_each_demo_says_its_seed_and_trajectories(explorer: Explorer) -> None:
+    life = explorer.lifecycle(months=6, trajectories=3)
+    assert (life["seed"], life["trajectories"]) == (SEED, 3)
+    assert explorer.sbc(months=6, trajectories=2)["trajectories"] == 2
+    assert explorer.valves(growth=0.05, trajectories=4)["seed"] == SEED
+    s = sampling(rows=50, quota=5, trajectories=20, seed=3)
+    assert (s["rows"], s["trajectories"], s["seed"]) == (50, 20, 3)
+
+
 def test_the_api_serves_each_demo(client: TestClient) -> None:
-    assert client.get("/api/health").json()["world"] == "tiny.duckdb"
     s = client.get("/api/sampling", params={"rows": 50, "quota": 5, "trajectories": 20})
     assert s.status_code == 200
     assert s.json()["quota"]["mean"] == 5

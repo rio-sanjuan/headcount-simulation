@@ -6,6 +6,8 @@
 
 import { useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
+import { Provenance } from "./provenance";
+
 /** What a series is to its chart: the subject the chapter is about, context beside it, or the
  * plan it's measured against. */
 export type Role = "subject" | "context" | "plan";
@@ -224,6 +226,7 @@ function Figure({
       </div>
       {!summaryAbove && said}
       {after}
+      <Provenance />
     </figure>
   );
 }

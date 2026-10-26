@@ -7,6 +7,7 @@ import type { Sbc, SbcPart } from "../api";
 import { StackedBars, format, type Part } from "../charts";
 import { Adjust, Control, Presets, Status, useControls } from "../Control";
 import { DraftMark, type DemoProps } from "../story";
+import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
 /** Each part, as the chart draws it: its name, and its gray, lighter for net expense and lightest
@@ -69,33 +70,35 @@ export function SbcDemo({ name, presets }: DemoProps) {
         equity granted before it (seed), the grants it makes (sim), and offline plans.
       </p>
       {data && (
-        <div className={loading ? "running" : undefined}>
-          <StackedBars
-            title="Expense recognized each month, and its parts"
-            x="month"
-            y="expense"
-            xs={Array.from({ length: data.months }, (_, i) => i)}
-            parts={drawn(data)}
-            total={{
-              name: "recognized",
-              role: "subject",
-              // The bars are means, so the line they add up to is the mean, in its band.
-              values: data.total.mean,
-              band: { low: data.total.p10, high: data.total.p90 },
-            }}
-            summary={sbcSummary(data)}
-            after={
-              rateless && (
-                <p className="summary">The forfeiture rate isn&apos;t revised on this world, so there&apos;s no rate true-up.</p>
-              )
-            }
-          />
-          <p className="lead">
-            Grants made before the run carry {inherited(data, 0)}% of the first month&apos;s expense, and{" "}
-            {inherited(data, data.months - 1)}% of the last month&apos;s, as the run&apos;s own grants take over.
-            <DraftMark />
-          </p>
-        </div>
+        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+          <div className={loading ? "running" : undefined}>
+            <StackedBars
+              title="Expense recognized each month, and its parts"
+              x="month"
+              y="expense"
+              xs={Array.from({ length: data.months }, (_, i) => i)}
+              parts={drawn(data)}
+              total={{
+                name: "recognized",
+                role: "subject",
+                // The bars are means, so the line they add up to is the mean, in its band.
+                values: data.total.mean,
+                band: { low: data.total.p10, high: data.total.p90 },
+              }}
+              summary={sbcSummary(data)}
+              after={
+                rateless && (
+                  <p className="summary">The forfeiture rate isn&apos;t revised on this world, so there&apos;s no rate true-up.</p>
+                )
+              }
+            />
+            <p className="lead">
+              Grants made before the run carry {inherited(data, 0)}% of the first month&apos;s expense, and{" "}
+              {inherited(data, data.months - 1)}% of the last month&apos;s, as the run&apos;s own grants take over.
+              <DraftMark />
+            </p>
+          </div>
+        </RunContext.Provider>
       )}
       <Status loading={loading} error={error} />
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />

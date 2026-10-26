@@ -13,6 +13,9 @@ const sampling = CHAPTERS.find((c) => c.key === "sampling")!;
 function answer(spread: number) {
   const drawn = Math.round(spread * 10);
   return {
+    rows: 2,
+    trajectories: 10,
+    seed: 0,
     probabilities: [0.3, 0.2],
     expected: spread,
     bins: [drawn, drawn + 1],

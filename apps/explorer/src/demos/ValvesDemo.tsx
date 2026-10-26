@@ -8,6 +8,7 @@ import type { Valves } from "../api";
 import { LineChart, spreadSeries, type Series } from "../charts";
 import { Adjust, Choices, Control, Presets, Status, useControls } from "../Control";
 import { DraftMark, type DemoProps, type Line } from "../story";
+import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
 /** The valves, in the order the chapter explains them: each method's name in the plan's terms,
@@ -73,31 +74,33 @@ export function ValvesDemo({ name, presets }: DemoProps) {
         className="chips"
       />
       {data && run && (
-        <div className={loading ? "running" : undefined}>
-          <LineChart
-            title={`Headcount from ${data.run_date}, every cost center together`}
-            x="month-end"
-            y="headcount"
-            xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
-            series={[
-              { name: "Plan", values: [Number.NaN, ...data.plan], role: "plan" },
-              ...VALVES.flatMap(({ method, name }): Series[] => {
-                const r = data.runs[method];
-                if (r === undefined) {
-                  return [];
-                }
-                return [method === valve.method ? spreadSeries(name, r.headcount) : { name, values: r.headcount.p50 }];
-              }),
-            ]}
-            summary={
-              <>
-                {valve.lever.text} {ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}
-                {valve.lever.draft && <DraftMark />}
-              </>
-            }
-            announce
-          />
-        </div>
+        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+          <div className={loading ? "running" : undefined}>
+            <LineChart
+              title={`Headcount from ${data.run_date}, every cost center together`}
+              x="month-end"
+              y="headcount"
+              xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
+              series={[
+                { name: "Plan", values: [Number.NaN, ...data.plan], role: "plan" },
+                ...VALVES.flatMap(({ method, name }): Series[] => {
+                  const r = data.runs[method];
+                  if (r === undefined) {
+                    return [];
+                  }
+                  return [method === valve.method ? spreadSeries(name, r.headcount) : { name, values: r.headcount.p50 }];
+                }),
+              ]}
+              summary={
+                <>
+                  {valve.lever.text} {ending(run.headcount.p50.at(-1) ?? Number.NaN, data.plan.at(-1) ?? Number.NaN)}
+                  {valve.lever.draft && <DraftMark />}
+                </>
+              }
+              announce
+            />
+          </div>
+        </RunContext.Provider>
       )}
       <Status loading={loading} error={error} />
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />

@@ -6,6 +6,7 @@ import type { Sampling } from "../api";
 import { Histogram, LineChart } from "../charts";
 import { Adjust, Control, Presets, Status, useControls } from "../Control";
 import type { DemoProps } from "../story";
+import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
 /** The histogram's height, in trajectories, so the independent draws' spread reads clearly. */
@@ -83,31 +84,33 @@ export function SamplingDemo({ name, presets }: DemoProps) {
         but misses it from draw to draw.
       </p>
       {data && rates && (
-        <div className={loading ? "running" : undefined}>
-          <Histogram
-            title="How many rows each trajectory drew"
-            x="rows drawn"
-            y="trajectories"
-            bins={data.bins}
-            subject={{ name: "Quota sampling", counts: data.quota.histogram }}
-            context={{ name: "Independent draws", counts: data.independent.histogram }}
-            cap={CAP}
-            summary={countSummary(data)}
-          />
-          <LineChart
-            title="How often each row was drawn, likeliest first"
-            x={`row, in groups of ${groupSize(data.probabilities.length)}`}
-            y="share of trajectories"
-            xs={rates.quota.starts}
-            labelAt="start"
-            series={[
-              { name: "Quota sampling", values: rates.quota.means, role: "subject" },
-              { name: "Independent draws", values: rates.independent.means },
-              { name: "Probability", values: rates.probability.means, role: "plan" },
-            ]}
-            summary={rateSummary(data)}
-          />
-        </div>
+        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed, rows: data.rows }}>
+          <div className={loading ? "running" : undefined}>
+            <Histogram
+              title="How many rows each trajectory drew"
+              x="rows drawn"
+              y="trajectories"
+              bins={data.bins}
+              subject={{ name: "Quota sampling", counts: data.quota.histogram }}
+              context={{ name: "Independent draws", counts: data.independent.histogram }}
+              cap={CAP}
+              summary={countSummary(data)}
+            />
+            <LineChart
+              title="How often each row was drawn, likeliest first"
+              x={`row, in groups of ${groupSize(data.probabilities.length)}`}
+              y="share of trajectories"
+              xs={rates.quota.starts}
+              labelAt="start"
+              series={[
+                { name: "Quota sampling", values: rates.quota.means, role: "subject" },
+                { name: "Independent draws", values: rates.independent.means },
+                { name: "Probability", values: rates.probability.means, role: "plan" },
+              ]}
+              summary={rateSummary(data)}
+            />
+          </div>
+        </RunContext.Provider>
       )}
       <Status loading={loading} error={error} />
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />

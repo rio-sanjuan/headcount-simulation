@@ -7,6 +7,7 @@ import type { Lifecycle } from "../api";
 import { FlowDiagram, LineChart, spreadSeries, type Flow } from "../charts";
 import { Adjust, Control, Presets, Status, useControls } from "../Control";
 import type { DemoProps } from "../story";
+import { RunContext } from "../provenance";
 import { useDemo } from "../useDemo";
 
 /** The flows in: each requisition type that opens openings, its ribbon's name, and how the line
@@ -99,28 +100,30 @@ export function LifecycleDemo({ name, presets }: DemoProps) {
         changes by exactly what opened, less what filled and what left unfilled.
       </p>
       {data && through && (
-        <div className={loading ? "running" : undefined}>
-          <FlowDiagram
-            title={`Openings over ${data.months} months, per trajectory`}
-            inflows={through.inflows}
-            outflows={through.outflows}
-            stock={{ name: "open openings", start: data.open.mean[0] ?? 0, end: data.open.mean.at(-1) ?? 0 }}
-            summary={identity(through.inflows, through.outflows)}
-            after={
-              through.empty.length > 0 && (
-                <p className="summary">Nothing flowed through {listed(through.empty, "or", true)} on this world.</p>
-              )
-            }
-          />
-          <LineChart
-            title="Open openings at each month-end"
-            x="month-end"
-            y="openings"
-            xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
-            series={[spreadSeries("open", data.open)]}
-            summary={stockSummary(data.open)}
-          />
-        </div>
+        <RunContext.Provider value={{ trajectories: data.trajectories, seed: data.seed }}>
+          <div className={loading ? "running" : undefined}>
+            <FlowDiagram
+              title={`Openings over ${data.months} months, per trajectory`}
+              inflows={through.inflows}
+              outflows={through.outflows}
+              stock={{ name: "open openings", start: data.open.mean[0] ?? 0, end: data.open.mean.at(-1) ?? 0 }}
+              summary={identity(through.inflows, through.outflows)}
+              after={
+                through.empty.length > 0 && (
+                  <p className="summary">Nothing flowed through {listed(through.empty, "or", true)} on this world.</p>
+                )
+              }
+            />
+            <LineChart
+              title="Open openings at each month-end"
+              x="month-end"
+              y="openings"
+              xs={Array.from({ length: data.months + 1 }, (_, i) => i)}
+              series={[spreadSeries("open", data.open)]}
+              summary={stockSummary(data.open)}
+            />
+          </div>
+        </RunContext.Provider>
       )}
       <Status loading={loading} error={error} />
       <Presets name={name} presets={presets} chosen={controls.chosen} onChoose={controls.choose} />

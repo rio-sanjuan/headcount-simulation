@@ -21,8 +21,9 @@ A run's headcount, its open openings, and its total expense vary across trajecto
 is a spread: its mean, and its 10th, 50th and 90th percentiles, month by month. Flows and parts
 are means, so they add up to the mean they explain.
 
-Every demo is a seeded run, so the same request gives the same answer, and each answer is kept,
-so asking again is free. Runs read the world through its data, as studies do.
+Every demo is a seeded run, so the same request gives the same answer, and each answer says its
+seed and trajectories, so a chart can say what made it. Each answer is kept, so asking again is
+free. Runs read the world through its data, as studies do.
 """
 
 from __future__ import annotations
@@ -68,6 +69,8 @@ SBC_PARTS: Final = {
     "attrition": "trueup_attrition",
     "rate": "trueup_rate",
 }
+#: The seed every run on the world takes, so the same request always gives the same answer.
+SEED: Final = 7
 #: The trajectories a run takes unless asked for others: enough for a stable 10th and 90th
 #: percentile on the tiny world.
 TRAJECTORIES: Final = 10
@@ -120,7 +123,8 @@ def sampling(
     low = int(min(c.min() for c in counts.values()))
     high = int(max(c.max() for c in counts.values()))
     bins = list(range(low, high + 1))
-    out: dict[str, Any] = {"probabilities": _rounded(p), "expected": round(float(p.sum()), 4)}
+    out: dict[str, Any] = {"rows": rows, "trajectories": trajectories, "seed": seed}
+    out |= {"probabilities": _rounded(p), "expected": round(float(p.sum()), 4)}
     out["bins"] = bins
     for name in counts:
         c = counts[name]
@@ -146,7 +150,12 @@ class Explorer:
         self._lock = threading.RLock()  # reentrant: a kept demo keeps the forecast it aligns
         with duckdb.connect(str(world), read_only=True) as con:
             last = snapshot_before(con, dt.date.max)
-        self.run_date = last + dt.timedelta(days=1)
+            self.run_date = last + dt.timedelta(days=1)
+            state, _ = seed_state(con, schema_from_world(con), self.run_date)
+        heads = np.asarray(state.headcount)
+        #: The world's size where its runs start: its employees, and the cost centers they're in.
+        self.employees = int(heads.sum())
+        self.cost_centers = int((heads > 0).sum())
 
     def _keep(self, key: Hashable, make: Callable[[], Any]) -> Any:
         with self._lock:
@@ -156,7 +165,7 @@ class Explorer:
 
     def _run(self, guidance: Path | None = None, **fields: Any) -> SimulationResult:
         profile = StudyProfile.from_mapping(
-            {"name": "explorer", "seed": 7, "mode": "unguided", "scope": "hcf"} | fields
+            {"name": "explorer", "seed": SEED, "mode": "unguided", "scope": "hcf"} | fields
         )
         return run_study(profile, self.world, guidance).simulated
 
@@ -220,7 +229,7 @@ class Explorer:
                 "evaluators": ["invariants", "plan_alignment"],
             }
             profile = StudyProfile.from_mapping(
-                {"name": f"valves-{method}", "seed": 7, "scope": "hcf"} | fields
+                {"name": f"valves-{method}", "seed": SEED, "scope": "hcf"} | fields
             )
             run = run_study(profile, self.world, guidance if demand else None)
             heads = run.simulated.headcount.sum(axis=2)  # (trajectories, months + 1)
@@ -236,6 +245,8 @@ class Explorer:
         return {
             "months": PLAN_MONTHS,
             "run_date": self.run_date.isoformat(),
+            "seed": SEED,
+            "trajectories": trajectories,
             "plan": plan,
             "runs": runs,
         }
@@ -267,6 +278,8 @@ class Explorer:
         return {
             "months": months,
             "run_date": self.run_date.isoformat(),
+            "seed": SEED,
+            "trajectories": trajectories,
             "open": _spread(stock),
             "opened": {s: _rounded(v.mean(axis=0)) for s, v in opened.items()},
             "filled": {s: _rounded(v.mean(axis=0)) for s, v in filled.items()},
@@ -310,6 +323,8 @@ class Explorer:
         return {
             "months": months,
             "run_date": self.run_date.isoformat(),
+            "seed": SEED,
+            "trajectories": trajectories,
             "total": _spread(np.stack(totals)),
             "parts": {name: _rounded(v) for name, v in parts.items()},
             "origins": {name: _rounded(v) for name, v in sorted(origins.items())},

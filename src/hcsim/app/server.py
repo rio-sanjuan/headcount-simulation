@@ -15,6 +15,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 
+from hcsim import __version__
 from hcsim.app.demos import TRAJECTORIES, DemoError, Explorer, sampling
 
 #: The most trajectories a request for a run on the world may ask for.
@@ -38,8 +39,16 @@ def create_app(world: Path, static: Path | None = None, scratch: Path | None = N
         return result
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"world": world.name, "run_date": explorer.run_date.isoformat()}
+    def health() -> dict[str, Any]:
+        """The run behind every chart: the world, its size, the month its runs start, and the
+        engine's version."""
+        return {
+            "world": world.name,
+            "run_date": explorer.run_date.isoformat(),
+            "employees": explorer.employees,
+            "cost_centers": explorer.cost_centers,
+            "version": __version__,
+        }
 
     @app.get("/api/sampling")
     def sampling_demo(

@@ -11,6 +11,8 @@ const spread = (values: number[]) => ({ mean: values, p10: values.map((v) => v -
 
 /** Two months: net expense, a vesting true-up in the first, an attrition true-up in both. */
 const YEAR: Sbc = {
+  trajectories: 10,
+  seed: 7,
   months: 2,
   run_date: "2026-01-01",
   total: spread([260_000, 220_000]),
