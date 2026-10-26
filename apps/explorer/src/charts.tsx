@@ -4,7 +4,7 @@
 // colour; and each line labelled at its end rather than in a legend. The colours are the
 // tokens in styles.css, so a chart follows the page's light or dark theme.
 
-import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 /** What a series is to its chart: the subject the chapter is about, context beside it, or the
  * plan it's measured against. */
@@ -164,49 +164,85 @@ export function useWidth(ref: RefObject<HTMLElement | null>): number {
   return width;
 }
 
-type Axes = { title: string; x: string; y: string };
+/** What every chart says beside its drawing: its title, its axes' titles, and a line of text
+ * that sums up what it shows, for anyone who can't see the drawing. */
+type Axes = { title: string; x: string; y: string; summary?: string; after?: ReactNode };
 
-/** A chart's frame: its title, the drawing at the column's width, and what follows it. */
+/** A chart's frame: its title, the drawing at the column's width, its summary, and what follows
+ * it. */
 function Figure({
   title,
+  summary,
   children,
   after,
 }: {
   title: string;
+  summary?: string;
   children: (width: number) => ReactNode;
   after?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref);
+  const id = useId();
   return (
     <figure className="chart">
       <figcaption>{title}</figcaption>
       <div className="plot" ref={ref}>
-        <svg viewBox={`0 0 ${width} ${HEIGHT}`} width={width} height={HEIGHT} role="img" aria-label={title}>
+        <svg
+          viewBox={`0 0 ${width} ${HEIGHT}`}
+          width={width}
+          height={HEIGHT}
+          role="img"
+          aria-label={title}
+          aria-describedby={summary === undefined ? undefined : id}
+        >
           {children(width)}
         </svg>
       </div>
+      {summary !== undefined && (
+        <p className="summary" id={id}>
+          {summary}
+        </p>
+      )}
       {after}
     </figure>
   );
 }
 
-/** The y axis's gridlines and ticks, and both axes' titles. */
-function Axis({ axes, yTicks, y, right }: { axes: Axes; yTicks: number[]; y: (v: number) => number; right: number }) {
+/** The y axis's gridlines and ticks, at the plot's left or right, and both axes' titles. */
+function Axis({
+  axes,
+  yTicks,
+  y,
+  left = PAD.left,
+  right,
+  width,
+  side = "left",
+}: {
+  axes: Axes;
+  yTicks: number[];
+  y: (v: number) => number;
+  left?: number;
+  right: number;
+  width?: number;
+  side?: "left" | "right";
+}) {
+  const atLeft = side === "left";
+  const title = atLeft ? 12 : (width ?? right + PAD.left) - 6;
   return (
     <g>
       {yTicks.map((t) => (
         <g key={t}>
-          <line className="grid" x1={PAD.left} x2={right} y1={y(t)} y2={y(t)} />
-          <text className="tick" x={PAD.left - 6} y={y(t) + 4} textAnchor="end">
+          <line className="grid" x1={left} x2={right} y1={y(t)} y2={y(t)} />
+          <text className="tick" x={atLeft ? left - 6 : right + 6} y={y(t) + 4} textAnchor={atLeft ? "end" : "start"}>
             {format(t)}
           </text>
         </g>
       ))}
-      <text className="axis-title" x={(PAD.left + right) / 2} y={HEIGHT - 4} textAnchor="middle">
+      <text className="axis-title" x={(left + right) / 2} y={HEIGHT - 4} textAnchor="middle">
         {axes.x}
       </text>
-      <text className="axis-title" x={12} y={HEIGHT / 2} transform={`rotate(-90 12 ${HEIGHT / 2})`} textAnchor="middle">
+      <text className="axis-title" x={title} y={HEIGHT / 2} transform={`rotate(-90 ${title} ${HEIGHT / 2})`} textAnchor="middle">
         {axes.y}
       </text>
     </g>
@@ -226,14 +262,10 @@ function roleOf(s: Series): Role {
 /** The subject drawn last, so it sits on top; the plan before it; context first. */
 const DRAW_ORDER: Record<Role, number> = { context: 0, plan: 1, subject: 2 };
 
-function lastFinite(values: number[]): number | undefined {
-  for (let i = values.length - 1; i >= 0; i--) {
-    const v = values[i];
-    if (v !== undefined && Number.isFinite(v)) {
-      return v;
-    }
-  }
-  return undefined;
+/** A series' last finite value, or its first. */
+function endOf(values: number[], at: "start" | "end"): number | undefined {
+  const finite = values.filter(Number.isFinite);
+  return at === "end" ? finite.at(-1) : finite[0];
 }
 
 function points(values: number[], x: (i: number) => number, y: (v: number) => number): string {
@@ -251,14 +283,15 @@ function bandPath(band: Band, x: (i: number) => number, y: (v: number) => number
   return `M${top.join("L")}L${bottom.join("L")}Z`;
 }
 
-/** Lines over a shared x axis, `xs[k]` the k-th point of every series, each labelled at its end.
+/** Lines over a shared x axis, `xs[k]` the k-th point of every series, each labelled at its end,
+ * or at its start where the lines differ most there (`labelAt`), with the y axis then at the right.
  * A value that isn't finite, such as a month a plan has no target for, is left out of its line. */
 export function LineChart({
   series,
   xs,
-  after,
+  labelAt = "end",
   ...axes
-}: Axes & { series: Series[]; xs: number[]; after?: ReactNode }) {
+}: Axes & { series: Series[]; xs: number[]; labelAt?: "start" | "end" }) {
   const all = series
     .flatMap((s) => [...s.values, ...(s.band?.low ?? []), ...(s.band?.high ?? [])])
     .filter(Number.isFinite);
@@ -267,16 +300,22 @@ export function LineChart({
   const yTicks = ticks(lo, hi);
   const ordered = [...series].sort((a, b) => DRAW_ORDER[roleOf(a)] - DRAW_ORDER[roleOf(b)]);
   return (
-    <Figure title={axes.title} after={after}>
+    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
       {(width) => {
-        const right = width - gutter(series.map((s) => s.name), width);
+        const room = gutter(series.map((s) => s.name), width);
+        const atEnd = labelAt === "end";
+        const left = atEnd ? PAD.left : room;
+        const right = atEnd ? width - room : width - PAD.left;
         const y = scale(Math.min(lo, yTicks[0] ?? lo), Math.max(hi, yTicks.at(-1) ?? hi), HEIGHT - PAD.bottom, PAD.top);
-        const xv = scale(xs[0] ?? 0, xs.at(-1) ?? 1, PAD.left, right);
+        const xv = scale(xs[0] ?? 0, xs.at(-1) ?? 1, left, right);
         const x = (i: number) => xv(xs[i] ?? i);
-        const shown = labelled(xs.length, Math.min(12, (right - PAD.left) / X_LABEL_ROOM));
+        const shown = labelled(xs.length, Math.min(12, (right - left) / X_LABEL_ROOM));
+        // Labels sit in the gutter, beside the plot's edge, with a leader if nudged off their line.
+        const edge = atEnd ? right : left;
+        const toward = atEnd ? 1 : -1;
         const ends = ordered.flatMap((s) => {
-          const last = lastFinite(s.values);
-          return last === undefined ? [] : [{ s, wanted: y(last) }];
+          const end = endOf(s.values, labelAt);
+          return end === undefined ? [] : [{ s, wanted: y(end) }];
         });
         const placed = nudge(
           ends.map((e) => e.wanted),
@@ -286,7 +325,7 @@ export function LineChart({
         );
         return (
           <>
-            <Axis axes={axes} yTicks={yTicks} y={y} right={right} />
+            <Axis axes={axes} yTicks={yTicks} y={y} left={left} right={right} width={width} side={atEnd ? "left" : "right"} />
             {xs.map((v, i) =>
               shown(i) ? (
                 <text key={v} className="tick" x={x(i)} y={HEIGHT - PAD.bottom + 16} textAnchor="middle">
@@ -305,9 +344,14 @@ export function LineChart({
               return (
                 <g key={`${e.s.name}-label`}>
                   {Math.abs(at - e.wanted) > 3 && (
-                    <line className="leader" x1={right + 2} y1={e.wanted} x2={right + 8} y2={at} />
+                    <line className="leader" x1={edge + 2 * toward} y1={e.wanted} x2={edge + 8 * toward} y2={at} />
                   )}
-                  <text className={`end-label ${roleOf(e.s)}`} x={right + 10} y={at + 4}>
+                  <text
+                    className={`end-label ${roleOf(e.s)}`}
+                    x={edge + 10 * toward}
+                    y={at + 4}
+                    textAnchor={atEnd ? "start" : "end"}
+                  >
                     {e.s.name}
                   </text>
                 </g>
@@ -318,6 +362,32 @@ export function LineChart({
       }}
     </Figure>
   );
+}
+
+/** Places labels centred over their marks, each at its `y` unless it would sit on a label placed
+ * before it, then lifted over that one, and each kept between `left` and `right`. */
+export function liftApart(
+  wanted: readonly { x: number; y: number; text: string }[],
+  left: number,
+  right: number,
+): { x: number; y: number }[] {
+  const placed: { x: number; y: number; half: number }[] = [];
+  for (const w of wanted) {
+    const half = (w.text.length * CHAR_WIDTH) / 2;
+    const x = Math.min(Math.max(w.x, left + half), right - half);
+    let y = w.y;
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const other of placed) {
+        if (Math.abs(other.x - x) < other.half + half + 4 && Math.abs(other.y - y) < LABEL_GAP) {
+          y = other.y - LABEL_GAP;
+          moved = true;
+        }
+      }
+    }
+    placed.push({ x, y, half });
+  }
+  return placed;
 }
 
 /** A bar from the baseline `y0` to `y1`, `width` wide, its end away from the baseline rounded. */
@@ -343,18 +413,13 @@ export function barPath(x: number, width: number, y0: number, y1: number): strin
 
 /** Bars per category, one bar for each series side by side. Each series is labelled over its
  * tallest bar, and labels that would collide are lifted apart. */
-export function BarChart({
-  series,
-  categories,
-  after,
-  ...axes
-}: Axes & { series: Series[]; categories: (string | number)[]; after?: ReactNode }) {
+export function BarChart({ series, categories, ...axes }: Axes & { series: Series[]; categories: (string | number)[] }) {
   const all = series.flatMap((s) => s.values);
   const hi = Math.max(0, ...all);
   const lo = Math.min(0, ...all);
   const yTicks = ticks(lo, hi);
   return (
-    <Figure title={axes.title} after={after}>
+    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
       {(width) => {
         const right = width - 12;
         // Room above the tallest bar for the series' labels.
@@ -364,24 +429,15 @@ export function BarChart({
         const bar = Math.min(BAR_MAX, (slot * 0.8) / Math.max(series.length, 1));
         const group = bar * series.length;
         const left = (i: number, k: number) => PAD.left + i * slot + (slot - group) / 2 + k * bar;
-        // Each series' label over its tallest bar, lifted over any label it would sit on.
-        const labels: { x: number; y: number; half: number }[] = [];
-        series.forEach((s, k) => {
-          const i = s.values.reduce((best, v, j) => (Math.abs(v) > Math.abs(s.values[best] ?? 0) ? j : best), 0);
-          const half = (s.name.length * CHAR_WIDTH) / 2;
-          const centre = Math.min(Math.max(left(i, k) + bar / 2, PAD.left + half), right - half);
-          let at = Math.min(y(s.values[i] ?? 0), y(0)) - 6;
-          for (let moved = true; moved; ) {
-            moved = false;
-            for (const other of labels) {
-              if (Math.abs(other.x - centre) < other.half + half + 4 && Math.abs(other.y - at) < LABEL_GAP) {
-                at = other.y - LABEL_GAP;
-                moved = true;
-              }
-            }
-          }
-          labels.push({ x: centre, y: at, half });
-        });
+        // Each series' label over its tallest bar.
+        const labels = liftApart(
+          series.map((s, k) => {
+            const i = s.values.reduce((best, v, j) => (Math.abs(v) > Math.abs(s.values[best] ?? 0) ? j : best), 0);
+            return { x: left(i, k) + bar / 2, y: Math.min(y(s.values[i] ?? 0), y(0)) - 6, text: s.name };
+          }),
+          PAD.left,
+          right,
+        );
         return (
           <>
             <Axis axes={axes} yTicks={yTicks} y={y} right={right} />
@@ -413,6 +469,99 @@ export function BarChart({
                   {s.name}
                 </text>
               ))}
+          </>
+        );
+      }}
+    </Figure>
+  );
+}
+
+/** How many trajectories drew each count: the context's bars in gray, and the subject's in front,
+ * narrower, in the accent. The height is capped at `cap` trajectories, or the context's tallest
+ * bar if that's taller, so the context's spread reads clearly. A subject bar taller than that runs
+ * off the top with a break mark, labelled with its count. */
+export function Histogram({
+  bins,
+  subject,
+  context,
+  cap,
+  ...axes
+}: Axes & {
+  bins: number[];
+  subject: { name: string; counts: number[] };
+  context: { name: string; counts: number[] };
+  cap: number;
+}) {
+  const total = subject.counts.reduce((a, b) => a + b, 0);
+  const yTicks = ticks(0, Math.max(cap, ...context.counts));
+  const ceiling = yTicks.at(-1) ?? cap;
+  return (
+    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
+      {(width) => {
+        const right = width - 12;
+        const top = PAD.top + LABEL_GAP * 2; // room above the plot for the labels
+        const y = scale(0, ceiling, HEIGHT - PAD.bottom, top);
+        const slot = (right - PAD.left) / Math.max(bins.length, 1);
+        const bar = Math.min(BAR_MAX, slot * 0.8);
+        const narrow = Math.max(3, bar / 2);
+        const centre = (i: number) => PAD.left + (i + 0.5) * slot;
+        const shown = labelled(bins.length, Math.min(12, (right - PAD.left) / X_LABEL_ROOM));
+        const tallest = context.counts.reduce((best, v, i) => (v > (context.counts[best] ?? 0) ? i : best), 0);
+        const peaks = subject.counts.flatMap((v, i) => (v > 0 ? [i] : []));
+        const end = (v: number) => (v > ceiling ? top - 6 : y(v));
+        // The centre of a label `half` wide over the bar at `at`, running away from the subject's
+        // bar at `subject`, so it doesn't cross it.
+        const awayFrom = (subject: number, at: number, half: number) =>
+          at >= subject ? Math.max(at - bar / 2, subject + narrow / 2 + 4) + half : Math.min(at + bar / 2, subject - narrow / 2 - 4) - half;
+        const wanted = [
+          ...peaks.map((i) => {
+            const v = subject.counts[i] ?? 0;
+            const text = `${subject.name}: ${v === total ? `all ${total}` : v}`;
+            return { x: centre(i), y: end(v) - 6, text, role: "subject" };
+          }),
+          {
+            x: awayFrom(centre(peaks[0] ?? tallest), centre(tallest), (context.name.length * CHAR_WIDTH) / 2),
+            y: y(context.counts[tallest] ?? 0) - 6,
+            text: context.name,
+            role: "context",
+          },
+        ];
+        const labels = liftApart(wanted, PAD.left, right);
+        return (
+          <>
+            <Axis axes={axes} yTicks={yTicks} y={y} right={right} />
+            {bins.map((b, i) => (
+              <g key={b}>
+                <path className="bar context shade-3" d={barPath(centre(i) - bar / 2 + 1, bar - 2, y(0), y(context.counts[i] ?? 0))} />
+                {shown(i) && (
+                  <text className="tick" x={centre(i)} y={HEIGHT - PAD.bottom + 16} textAnchor="middle">
+                    {b}
+                  </text>
+                )}
+              </g>
+            ))}
+            {peaks.map((i) => {
+              const v = subject.counts[i] ?? 0;
+              const x0 = centre(i) - narrow / 2;
+              const broken = v > ceiling;
+              return (
+                <g key={`${subject.name}-${i}`}>
+                  <path className="bar subject" d={barPath(x0, narrow, y(0), end(v))} />
+                  {broken && (
+                    // A break across the bar, under the plot's top: it runs further than drawn.
+                    <path
+                      className="break"
+                      d={`M${x0 - 3},${top + 9}L${x0 + narrow + 3},${top + 3}M${x0 - 3},${top + 15}L${x0 + narrow + 3},${top + 9}`}
+                    />
+                  )}
+                </g>
+              );
+            })}
+            {wanted.map((w, k) => (
+              <text key={w.text} className={`end-label ${w.role}`} x={labels[k]?.x} y={labels[k]?.y} textAnchor="middle">
+                {w.text}
+              </text>
+            ))}
           </>
         );
       }}
