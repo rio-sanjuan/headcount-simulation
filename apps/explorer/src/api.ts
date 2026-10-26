@@ -33,13 +33,18 @@ export type Lifecycle = {
   identity_residual: number;
 };
 
+/** The parts the books record SBC in: they add up to what's recognized. */
+export type SbcPart = "net" | "vesting" | "attrition" | "rate";
+
 export type Sbc = {
   months: number;
   run_date: string;
+  /** The expense recognized each month, across trajectories. */
   total: Spread;
-  recognized: Record<string, number[]>;
-  grants: Record<string, number>;
-  example_grant: { award_month?: number; vest_months?: number[]; shares?: number[] };
+  /** Each part's mean, month by month. */
+  parts: Record<SbcPart, number[]>;
+  /** The mean expense from the grants made before the run (seed), by it (sim), and offline. */
+  origins: Record<string, number[]>;
 };
 
 export type Query = Record<string, number>;

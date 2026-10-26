@@ -10,7 +10,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hcsim.app import cli
-from hcsim.app.demos import FILLED, OPENED, VALVES, DemoError, Explorer, _spread, sampling
+from hcsim.app.demos import (
+    FILLED,
+    OPENED,
+    SBC_PARTS,
+    VALVES,
+    DemoError,
+    Explorer,
+    _spread,
+    sampling,
+)
 from hcsim.app.server import create_app
 from hcsim.synth.config import preset
 from hcsim.synth.world import generate_world, write_world
@@ -118,19 +127,21 @@ def test_the_lifecycle_balances_the_open_openings(explorer: Explorer) -> None:
     assert change == pytest.approx(inflow - outflow, abs=1e-3)  # each mean rounded
 
 
-def test_the_sbc_layer_shows_expense_grants_and_a_schedule(explorer: Explorer) -> None:
+def test_the_sbc_layer_splits_expense_into_parts_that_add_up_to_it(explorer: Explorer) -> None:
     out = explorer.sbc(months=6, trajectories=2)
-    assert {"seed", "sim"} <= set(out["recognized"])
-    assert all(len(v) == 6 for v in out["recognized"].values())
     assert_spread(out["total"], 6)
-    # The parts are means, so they add up to the total's mean.
-    parts = sum(np.array(v) for v in out["recognized"].values())
+    assert set(out["parts"]) == set(SBC_PARTS)
+    assert all(len(v) == 6 for v in out["parts"].values())
+    # The parts are means, so they add up to the total's mean, month by month.
+    parts = sum(np.array(v) for v in out["parts"].values())
     assert parts == pytest.approx(out["total"]["mean"], abs=1e-3)
-    assert out["grants"]["new_hire"] > 0
-    grant = out["example_grant"]
-    assert grant["vest_months"] == sorted(grant["vest_months"])
-    assert len(grant["shares"]) == len(grant["vest_months"])
-    assert all(s > 0 for s in grant["shares"])
+    assert min(out["parts"]["net"]) > 0
+    assert min(out["parts"]["attrition"]) <= 0  # a leaver's unvested tranches reverse expense
+    # So do the grants it comes from: those made before the run, and by it.
+    assert {"seed", "sim"} <= set(out["origins"])
+    origins = sum(np.array(v) for v in out["origins"].values())
+    assert origins == pytest.approx(out["total"]["mean"], abs=1e-3)
+    assert {"grants", "example_grant", "recognized"}.isdisjoint(out)
 
 
 def test_an_explorer_needs_its_world(tmp_path: Path) -> None:
@@ -155,7 +166,7 @@ def test_the_api_serves_each_demo(client: TestClient) -> None:
     v = client.get("/api/valves", params={"growth": 0.02, "trajectories": 1}).json()
     assert set(v["runs"]) == set(VALVES)
     sbc = client.get("/api/sbc", params={"months": 3, "trajectories": 1}).json()
-    assert "seed" in sbc["recognized"]
+    assert set(sbc["parts"]) == set(SBC_PARTS)
 
 
 def test_the_api_bounds_and_explains_bad_requests(client: TestClient) -> None:

@@ -36,9 +36,8 @@ const ANSWERS: Record<string, unknown> = {
     months: 2,
     run_date: "2026-01-01",
     total: spread([10, 12]),
-    recognized: { seed: [8, 9], sim: [2, 3] },
-    grants: { new_hire: 2 },
-    example_grant: {},
+    parts: { net: [11, 11], vesting: [1, 3], attrition: [-2, -2], rate: [0, 0] },
+    origins: { seed: [8, 9], sim: [2, 3] },
   },
 };
 

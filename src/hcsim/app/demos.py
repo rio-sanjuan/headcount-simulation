@@ -12,9 +12,10 @@
   every flow in and out of it: the requisitions opened by growth, campus, and backfill; those
   that exit unfilled; and the openings each fill channel takes. The opening identity holds
   exactly, and its residual says so.
-- **The SBC layer** (`sbc`): the expense a run recognizes each month, in total and by part (the
-  seed's equity, the run's own grants, and the offline stream), the grants it makes by award
-  type, and one new-hire grant's vesting schedule.
+- **The SBC layer** (`sbc`): the expense a run recognizes each month, in total and split two
+  ways: into the parts the books record (the net expense and the vesting, attrition and rate
+  true-ups), and by the grants it comes from (the seed's equity, the run's own grants, and the
+  offline stream).
 
 A run's headcount, its open openings, and its total expense vary across trajectories, so each
 is a spread: its mean, and its 10th, 50th and 90th percentiles, month by month. Flows and parts
@@ -41,7 +42,7 @@ from hcsim.engine.seeding import schema_from_world, seed_state, snapshot_before
 from hcsim.guidance import pipeline as guidance
 from hcsim.guidance.config import GuidanceConfig
 from hcsim.model.core.alignment_builders import synthetic
-from hcsim.model.core.schema import AWARD_TYPE, COST_CENTER
+from hcsim.model.core.schema import COST_CENTER
 from hcsim.model.ml.sampling import bernoulli, quota_select
 from hcsim.studies.harness import run_study
 from hcsim.studies.profile import StudyProfile
@@ -58,6 +59,15 @@ PLAN_MONTHS: Final = 6
 #: The flows into and out of the open-openings stock.
 OPENED: Final = ("G", "G_camp", "B_att", "B_tr")
 FILLED: Final = ("F_ext", "F_conv", "F_tr", "F_camp", "F_pend")
+#: The parts the books record SBC in, each a column of a run's SBC frame: the net expense, each
+#: tranche's value spread over its service less expected forfeitures, and the true-ups at a vest,
+#: at a leaver's exit, and when the forfeiture rate is revised. They add up to what's recognized.
+SBC_PARTS: Final = {
+    "net": "net",
+    "vesting": "trueup_vesting",
+    "attrition": "trueup_attrition",
+    "rate": "trueup_rate",
+}
 #: The trajectories a run takes unless asked for others: enough for a stable 10th and 90th
 #: percentile on the tiny world.
 TRAJECTORIES: Final = 10
@@ -267,66 +277,40 @@ class Explorer:
     # --- the SBC layer ------------------------------------------------------------------------
 
     def sbc(self, months: int = 12, trajectories: int = TRAJECTORIES) -> dict[str, Any]:
-        """The expense a run recognizes each month, in total as a spread and by part as means,
-        its grants by award type, and one new-hire grant's vesting schedule."""
+        """The expense a run recognizes each month: in total, as a spread, and as the means of
+        the parts the books record it in (`SBC_PARTS`) and of the grants it comes from, those made
+        before the run (`seed`), by it (`sim`), and offline."""
         return dict(
             self._keep(("sbc", months, trajectories), lambda: self._sbc(months, trajectories))
         )
 
     def _sbc(self, months: int, trajectories: int) -> dict[str, Any]:
         r = self._run(months=months, trajectories=trajectories, scope="hcf+sbc")
-        parts: dict[str, np.ndarray] = {}
+        everything = range(months)
         totals: list[np.ndarray] = []
-        grants: dict[str, float] = {}
-        example: dict[str, Any] = {}
-        labels = r.config.schema.vocabulary(AWARD_TYPE).labels
+        parts = {name: np.zeros(months) for name in SBC_PARTS}
+        origins: dict[str, np.ndarray] = {}
+        share = 1 / len(r.trajectories)
         for t in r.trajectories:
-            if t.sbc is None or t.tranches is None:
+            if t.sbc is None:
                 raise DemoError("an SBC run kept no SBC")
             window = t.sbc[t.sbc["month"].between(0, months - 1)]
-            total = window.groupby("month")["recognized"].sum()
-            totals.append(total.reindex(range(months), fill_value=0.0).to_numpy())
+            monthly = (
+                window.groupby("month")[["recognized", *SBC_PARTS.values()]]
+                .sum()
+                .reindex(everything, fill_value=0.0)
+            )
+            totals.append(monthly["recognized"].to_numpy())
+            for name, column in SBC_PARTS.items():
+                parts[name] += monthly[column].to_numpy() * share
             by = window.groupby(["part", "month"])["recognized"].sum()
-            for part in by.index.get_level_values(0).unique():
-                series = by.xs(part).reindex(range(months), fill_value=0.0).to_numpy()
-                parts[str(part)] = parts.get(str(part), np.zeros(months)) + series / len(
-                    r.trajectories
-                )
-            tr = t.tranches
-            awarded = (tr.award_month >= 0) & (tr.award_month < months) & ~tr.cancelled
-            keys = pd.DataFrame(
-                {
-                    "holder": tr.holder[awarded],
-                    "month": tr.award_month[awarded],
-                    "type": tr.award_type[awarded],
-                }
-            ).drop_duplicates()
-            counts = keys["type"].value_counts()
-            for code, n in zip(
-                counts.index.to_numpy(dtype=np.int64), counts.to_numpy(), strict=True
-            ):
-                name = labels[int(code)]
-                grants[name] = grants.get(name, 0.0) + float(n) / len(r.trajectories)
-            if not example:
-                new_hire = labels.index("new_hire") if "new_hire" in labels else -1
-                mine = np.flatnonzero(awarded & (tr.award_type == new_hire))
-                if len(mine):
-                    first = mine[0]
-                    same = (tr.holder == tr.holder[first]) & (
-                        tr.award_month == tr.award_month[first]
-                    )
-                    same &= tr.award_type == new_hire
-                    rows = np.flatnonzero(same)
-                    example = {
-                        "award_month": int(tr.award_month[first]),
-                        "vest_months": [int(v) for v in tr.vest_month[rows]],
-                        "shares": [round(float(s), 4) for s in tr.shares[rows]],
-                    }
+            for origin in by.index.get_level_values(0).unique():
+                series = by.xs(origin).reindex(everything, fill_value=0.0).to_numpy()
+                origins[str(origin)] = origins.get(str(origin), np.zeros(months)) + series * share
         return {
             "months": months,
             "run_date": self.run_date.isoformat(),
             "total": _spread(np.stack(totals)),
-            "recognized": {p: _rounded(v) for p, v in sorted(parts.items())},
-            "grants": {k: round(v, 4) for k, v in sorted(grants.items())},
-            "example_grant": example,
+            "parts": {name: _rounded(v) for name, v in parts.items()},
+            "origins": {name: _rounded(v) for name, v in sorted(origins.items())},
         }
