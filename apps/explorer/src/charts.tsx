@@ -166,18 +166,28 @@ export function useWidth(ref: RefObject<HTMLElement | null>): number {
 
 /** What every chart says beside its drawing: its title, its axes' titles, and a line of text
  * that sums up what it shows, for anyone who can't see the drawing. */
-type Axes = { title: string; x: string; y: string; summary?: string; after?: ReactNode };
+type Axes = {
+  title: string;
+  x: string;
+  y: string;
+  summary?: ReactNode;
+  /** Whether a change to the summary is announced, as when a control changes what's in focus. */
+  announce?: boolean;
+  after?: ReactNode;
+};
 
 /** A chart's frame: its title, the drawing at the column's width, its summary, and what follows
  * it. */
 function Figure({
   title,
   summary,
+  announce,
   children,
   after,
 }: {
   title: string;
-  summary?: string;
+  summary?: ReactNode;
+  announce?: boolean;
   children: (width: number) => ReactNode;
   after?: ReactNode;
 }) {
@@ -200,7 +210,7 @@ function Figure({
         </svg>
       </div>
       {summary !== undefined && (
-        <p className="summary" id={id}>
+        <p className="summary" id={id} aria-live={announce ? "polite" : undefined}>
           {summary}
         </p>
       )}
@@ -300,7 +310,7 @@ export function LineChart({
   const yTicks = ticks(lo, hi);
   const ordered = [...series].sort((a, b) => DRAW_ORDER[roleOf(a)] - DRAW_ORDER[roleOf(b)]);
   return (
-    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
+    <Figure title={axes.title} summary={axes.summary} announce={axes.announce} after={axes.after}>
       {(width) => {
         const room = gutter(series.map((s) => s.name), width);
         const atEnd = labelAt === "end";
@@ -419,7 +429,7 @@ export function BarChart({ series, categories, ...axes }: Axes & { series: Serie
   const lo = Math.min(0, ...all);
   const yTicks = ticks(lo, hi);
   return (
-    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
+    <Figure title={axes.title} summary={axes.summary} announce={axes.announce} after={axes.after}>
       {(width) => {
         const right = width - 12;
         // Room above the tallest bar for the series' labels.
@@ -496,7 +506,7 @@ export function Histogram({
   const yTicks = ticks(0, Math.max(cap, ...context.counts));
   const ceiling = yTicks.at(-1) ?? cap;
   return (
-    <Figure title={axes.title} summary={axes.summary} after={axes.after}>
+    <Figure title={axes.title} summary={axes.summary} announce={axes.announce} after={axes.after}>
       {(width) => {
         const right = width - 12;
         const top = PAD.top + LABEL_GAP * 2; // room above the plot for the labels

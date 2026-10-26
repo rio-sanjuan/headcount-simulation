@@ -98,19 +98,24 @@ export function presetsToFetch(chapters: readonly Chapter[]): { demo: string; qu
   return [...first, ...rest];
 }
 
+/** The mark after a draft's text. */
+export function DraftMark() {
+  return (
+    <>
+      {" "}
+      <span className="draft" title="Placeholder text, for the maintainer's review in #660">
+        draft
+      </span>
+    </>
+  );
+}
+
 /** A paragraph of the story, marked when it's a draft. */
 export function Prose({ line, className }: { line: Line; className?: string }) {
   return (
     <p className={className}>
       {line.text}
-      {line.draft && (
-        <>
-          {" "}
-          <span className="draft" title="Placeholder text, for the maintainer's review in #660">
-            draft
-          </span>
-        </>
-      )}
+      {line.draft && <DraftMark />}
     </p>
   );
 }

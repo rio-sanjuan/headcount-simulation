@@ -67,12 +67,16 @@ a { color: var(--accent); }
 }
 
 /* A chapter's controls (E3): the presets under its chart, then Adjust's sliders. */
-.presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
-.preset { position: relative; padding: 6px 12px; border: 1px solid var(--grid); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 0.9rem; cursor: pointer; }
-.preset input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
-.preset:hover { border-color: var(--muted); }
-.preset.chosen { border-color: var(--accent); background: var(--accent); color: var(--surface); font-weight: 600; }
-.preset:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+.choice { position: relative; padding: 6px 12px; border: 1px solid var(--grid); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 0.9rem; cursor: pointer; }
+.choice input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.choice:hover { border-color: var(--muted); }
+.choice.chosen { border-color: var(--accent); background: var(--accent); color: var(--surface); font-weight: 600; }
+.choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Chips choose what a chart puts in focus: smaller than presets, and outlined when chosen. */
+.chips { gap: 6px; margin: 12px 0 0; }
+.chips .choice { padding: 3px 10px; font-size: 0.85rem; }
+.chips .choice.chosen { background: var(--surface); color: var(--accent); }
 .adjust-toggle { padding: 4px 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer; }
 .adjust-toggle::after { content: " +"; }
 .adjust-toggle[aria-expanded="true"]::after { content: " −"; }
