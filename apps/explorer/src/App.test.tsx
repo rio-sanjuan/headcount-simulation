@@ -89,7 +89,7 @@ describe("the story", () => {
       "The SBC layer",
     ]);
     await waitFor(() => expect(screen.getByText(/Quota sampling drew 1 row in all 10 trajectories/)).toBeTruthy());
-    await waitFor(() => expect(screen.getByText(/largest residual: 0 openings/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("4.0 opened = 2.0 closed + 2.0 more open")).toBeTruthy());
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("hcsim explorer");
   });
 
