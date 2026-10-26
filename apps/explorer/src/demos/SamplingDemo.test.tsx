@@ -8,6 +8,9 @@ import { countSummary, grouped, rateSummary } from "./SamplingDemo";
 afterEach(cleanup);
 
 const DATA: Sampling = {
+  rows: 40,
+  trajectories: 500,
+  seed: 0,
   probabilities: Array.from({ length: 40 }, (_, i) => (i < 2 ? 1 : 0.5)),
   expected: 21,
   bins: [8, 9, 10, 20, 31],

@@ -1,6 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
+import { health, type Health } from "./api";
 import { ChapterRail, useChapterInView } from "./ChapterRail";
+import { WorldContext } from "./provenance";
 import { CHAPTERS, Prose, presetsToFetch } from "./story";
 import { prefetch } from "./useDemo";
 
@@ -43,23 +45,33 @@ export function App() {
   const current = useChapterInView(KEYS);
   useEffect(() => holdAnchor(window.location.hash), []);
   useEffect(() => prefetch(presetsToFetch(CHAPTERS)), []);
+  const [world, setWorld] = useState<Health | undefined>(undefined);
+  useEffect(() => {
+    let current = true;
+    void health().then((answer) => current && setWorld(answer));
+    return () => {
+      current = false;
+    };
+  }, []);
   return (
-    <div className="page">
-      <ChapterRail name={NAME} chapters={CHAPTERS} current={current} />
-      <main>
-        <header id="top">
-          <h1>{NAME}</h1>
-          <p className="lead">An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
-        </header>
-        {CHAPTERS.map(({ key, title, Demo, presets, handOn }, i) => (
-          <section key={key} id={key} className="chapter" aria-labelledby={`${key}-title`}>
-            <p className="chapter-number">Chapter {i + 1}</p>
-            <h2 id={`${key}-title`}>{title}</h2>
-            <Demo name={title} presets={presets} />
-            <Prose line={handOn} className="hand-on" />
-          </section>
-        ))}
-      </main>
-    </div>
+    <WorldContext.Provider value={world}>
+      <div className="page">
+        <ChapterRail name={NAME} chapters={CHAPTERS} current={current} />
+        <main>
+          <header id="top">
+            <h1>{NAME}</h1>
+            <p className="lead">An interactive look at how the headcount and SBC simulator works, on a synthetic world.</p>
+          </header>
+          {CHAPTERS.map(({ key, title, Demo, presets, handOn }, i) => (
+            <section key={key} id={key} className="chapter" aria-labelledby={`${key}-title`}>
+              <p className="chapter-number">Chapter {i + 1}</p>
+              <h2 id={`${key}-title`}>{title}</h2>
+              <Demo name={title} presets={presets} />
+              <Prose line={handOn} className="hand-on" />
+            </section>
+          ))}
+        </main>
+      </div>
+    </WorldContext.Provider>
   );
 }

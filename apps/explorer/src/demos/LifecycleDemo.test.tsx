@@ -11,6 +11,8 @@ const spread = (values: number[]) => ({ mean: values, p10: values.map((v) => v -
 
 /** A year on a world like tiny: growth and backfill in, external fills and unfilled exits out. */
 const YEAR: Lifecycle = {
+  trajectories: 10,
+  seed: 7,
   months: 3,
   run_date: "2026-01-01",
   open: spread([18, 19, 20, 21]),

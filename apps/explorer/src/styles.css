@@ -115,6 +115,8 @@ figure.chart svg { display: block; max-width: 100%; height: auto; overflow: visi
 .ribbon-total { fill: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .stock { fill: var(--accent); }
 .zero { stroke: var(--muted); stroke-width: 1; }
+/* The run behind a chart (E9): its frame's last line, under a hairline. */
+.provenance { margin: 10px 0 0; padding-top: 6px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 0.75rem; line-height: 1.4; }
 .summary { margin: 8px 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.45; }
 .bar.subject { fill: var(--accent); }
 .bar.context.shade-1 { fill: var(--context); fill-opacity: 0.3; }

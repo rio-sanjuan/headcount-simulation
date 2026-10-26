@@ -8,6 +8,8 @@ import { ValvesDemo, ending } from "./ValvesDemo";
 const spread = (values: number[]) => ({ mean: values, p10: values.map((v) => v - 1), p50: values, p90: values.map((v) => v + 1) });
 
 const ANSWER = {
+  trajectories: 10,
+  seed: 7,
   months: 2,
   run_date: "2026-01-01",
   plan: [330, 336],

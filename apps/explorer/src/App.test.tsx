@@ -10,7 +10,11 @@ const spread = (values: number[]) => ({ mean: values, p10: values, p50: values, 
 
 /** An answer for each demo, as the API gives it. */
 const ANSWERS: Record<string, unknown> = {
+  health: { world: "tiny5.duckdb", run_date: "2026-01-01", employees: 320, cost_centers: 10, version: "0.1.0" },
   sampling: {
+    rows: 2,
+    trajectories: 10,
+    seed: 0,
     probabilities: [0.3, 0.2],
     expected: 0.5,
     bins: [0, 1],
@@ -18,12 +22,16 @@ const ANSWERS: Record<string, unknown> = {
     independent: { histogram: [5, 5], mean: 0.5, sd: 0.5, rates: [0.3, 0.2] },
   },
   valves: {
+    trajectories: 10,
+    seed: 7,
     months: 2,
     run_date: "2026-01-01",
     plan: [101, 102],
     runs: { supply: { valve: "supply", headcount: spread([100, 100.5, 101]), bias_mean: 1 } },
   },
   lifecycle: {
+    trajectories: 10,
+    seed: 7,
     months: 2,
     run_date: "2026-01-01",
     open: spread([5, 6, 7]),
@@ -33,6 +41,8 @@ const ANSWERS: Record<string, unknown> = {
     identity_residual: 0,
   },
   sbc: {
+    trajectories: 10,
+    seed: 7,
     months: 2,
     run_date: "2026-01-01",
     total: spread([10, 12]),
@@ -90,6 +100,16 @@ describe("the story", () => {
     await waitFor(() => expect(screen.getByText(/Quota sampling drew 1 row in all 10 trajectories/)).toBeTruthy());
     await waitFor(() => expect(screen.getByText("4.0 opened = 2.0 closed + 2.0 more open")).toBeTruthy());
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("hcsim explorer");
+  });
+
+  it("ends every chart with a caption naming the run behind it", async () => {
+    vi.stubGlobal("fetch", serving());
+    const { container } = render(<App />);
+    await waitFor(() => expect(container.querySelectorAll("figure.chart")).toHaveLength(6));
+    await waitFor(() => expect(container.querySelector("#valves .provenance")?.textContent).toMatch(/^Run on/));
+    const captions = [...container.querySelectorAll("figure.chart")].map((f) => f.lastElementChild?.textContent);
+    expect(captions.filter((c) => c?.startsWith("Run on tiny5.duckdb (320 employees, 10 cost centers) from 2026-01"))).toHaveLength(4);
+    expect(captions.filter((c) => c === "2 synthetic rows · 10 trajectories · seed 0 · hcsim 0.1.0")).toHaveLength(2);
   });
 
   it("marks the text that waits for review as a draft", () => {

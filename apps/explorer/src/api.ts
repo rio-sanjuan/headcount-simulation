@@ -2,7 +2,14 @@
 
 export type Draws = { histogram: number[]; mean: number; sd: number; rates: number[] };
 
-export type Sampling = {
+/** The page's world, and the engine that runs on it. */
+export type Health = { world: string; run_date: string; employees: number; cost_centers: number; version: string };
+
+/** What every run says about itself: how many trajectories it took, and its seed. */
+export type Ran = { trajectories: number; seed: number };
+
+export type Sampling = Ran & {
+  rows: number;
   probabilities: number[];
   expected: number;
   bins: number[];
@@ -16,14 +23,14 @@ export type Spread = { mean: number[]; p10: number[]; p50: number[]; p90: number
 
 export type ValveRun = { valve: string; headcount: Spread; bias_mean: number };
 
-export type Valves = {
+export type Valves = Ran & {
   months: number;
   run_date: string;
   plan: number[];
   runs: Record<string, ValveRun>;
 };
 
-export type Lifecycle = {
+export type Lifecycle = Ran & {
   months: number;
   run_date: string;
   open: Spread;
@@ -36,7 +43,7 @@ export type Lifecycle = {
 /** The parts the books record SBC in: they add up to what's recognized. */
 export type SbcPart = "net" | "vesting" | "attrition" | "rate";
 
-export type Sbc = {
+export type Sbc = Ran & {
   months: number;
   run_date: string;
   /** The expense recognized each month, across trajectories. */
@@ -52,6 +59,16 @@ export type Query = Record<string, number>;
 /** The trajectories the page asks a run on the world for: enough for a stable 10th and 90th
  * percentile on the tiny world. */
 export const TRAJECTORIES = 10;
+
+/** The page's world, or nothing if the server doesn't answer. */
+export async function health(): Promise<Health | undefined> {
+  try {
+    const response = await fetch("/api/health");
+    return response.ok ? ((await response.json()) as Health) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** GET one demo, with its parameters, refusing an answer that isn't OK with the API's reason. */
 export async function get<T>(demo: string, query: Query): Promise<T> {
