@@ -181,27 +181,40 @@ type Axes = {
 function Figure({
   title,
   summary,
+  summaryAbove = false,
   announce,
+  height = HEIGHT,
   children,
   after,
 }: {
   title: string;
   summary?: ReactNode;
+  /** Whether the summary leads the drawing rather than follows it. */
+  summaryAbove?: boolean;
   announce?: boolean;
+  /** The drawing's height, or how it follows the width. */
+  height?: number | ((width: number) => number);
   children: (width: number) => ReactNode;
   after?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref);
   const id = useId();
+  const tall = typeof height === "number" ? height : height(width);
+  const said = summary !== undefined && (
+    <p className={summaryAbove ? "summary above" : "summary"} id={id} aria-live={announce ? "polite" : undefined}>
+      {summary}
+    </p>
+  );
   return (
     <figure className="chart">
       <figcaption>{title}</figcaption>
+      {summaryAbove && said}
       <div className="plot" ref={ref}>
         <svg
-          viewBox={`0 0 ${width} ${HEIGHT}`}
+          viewBox={`0 0 ${width} ${tall}`}
           width={width}
-          height={HEIGHT}
+          height={tall}
           role="img"
           aria-label={title}
           aria-describedby={summary === undefined ? undefined : id}
@@ -209,11 +222,7 @@ function Figure({
           {children(width)}
         </svg>
       </div>
-      {summary !== undefined && (
-        <p className="summary" id={id} aria-live={announce ? "polite" : undefined}>
-          {summary}
-        </p>
-      )}
+      {!summaryAbove && said}
       {after}
     </figure>
   );
@@ -572,6 +581,132 @@ export function Histogram({
                 {w.text}
               </text>
             ))}
+          </>
+        );
+      }}
+    </Figure>
+  );
+}
+
+/** A flow into or out of a stock, and its total over the run. */
+export type Flow = { name: string; total: number };
+
+/** The vertical gap between ribbons, which holds each one's label: one line, or two in a narrow
+ * chart, the total under the name, so a long name doesn't run into the stock. */
+const RIBBON_GAP = 18;
+const RIBBON_GAP_NARROW = 32;
+const NARROW = 480;
+/** The stock's box, between the ribbons in and the ribbons out. */
+const STOCK_WIDTH = 16;
+
+/** One flow's ribbon: a band `thickness` thick, from `(x0, y0)` to `(x1, y1)`, its edges curved. */
+export function ribbonPath(x0: number, y0: number, x1: number, y1: number, thickness: number): string {
+  const mid = (x0 + x1) / 2;
+  return [
+    `M${x0},${y0}`,
+    `C${mid},${y0} ${mid},${y1} ${x1},${y1}`,
+    `V${y1 + thickness}`,
+    `C${mid},${y1 + thickness} ${mid},${y0 + thickness} ${x0},${y0 + thickness}`,
+    "Z",
+  ].join("");
+}
+
+/** Where each of `totals` sits in a stack `scale` high per unit, from `top`, `gap` apart. */
+function stacked(totals: number[], scale: number, top: number, gap: number): number[] {
+  const out: number[] = [];
+  let at = top;
+  for (const t of totals) {
+    out.push(at);
+    at += t * scale + gap;
+  }
+  return out;
+}
+
+/** Flows through a stock: what flowed in at the left, and out at the right, each a ribbon as wide
+ * as its total, and the stock as the accent box between, labelled with its count at the start
+ * and at the end. The scale is set by the larger side, so the diagram keeps its size, and each
+ * ribbon's total is printed beside it. Its height grows with the ribbons it draws. */
+export function FlowDiagram({
+  title,
+  inflows,
+  outflows,
+  stock,
+  summary,
+  after,
+}: {
+  title: string;
+  inflows: Flow[];
+  outflows: Flow[];
+  stock: { name: string; start: number; end: number };
+  summary?: ReactNode;
+  after?: ReactNode;
+}) {
+  const sum = (flows: Flow[]) => flows.reduce((a, f) => a + f.total, 0);
+  const most = Math.max(inflows.length, outflows.length, 1);
+  const top = 44; // room for the stock's labels
+  const band = 120 + 24 * Math.max(0, most - 2); // the stock's height, which the larger side fills
+  const gapFor = (width: number) => (width < NARROW ? RIBBON_GAP_NARROW : RIBBON_GAP);
+  const height = (width: number) => top + gapFor(width) + band + (gapFor(width) * (most - 1)) / 2 + 12;
+  const scale = band / Math.max(sum(inflows), sum(outflows), 1e-9);
+  const total = (v: number) => v.toFixed(1);
+  return (
+    <Figure title={title} summary={summary} summaryAbove after={after} height={height}>
+      {(width) => {
+        const gap = gapFor(width);
+        const twoLines = width < NARROW;
+        const centre = width / 2;
+        const boxLeft = centre - STOCK_WIDTH / 2;
+        const boxRight = centre + STOCK_WIDTH / 2;
+        // At the box, each side's ribbons meet it in one stack; at the edges, each starts on its
+        // own, with its label in the gap above it. Both stacks are centred on the box.
+        const boxTop = top + gap;
+        const centred = (flows: Flow[], gap: number) => {
+          const tall = sum(flows) * scale + gap * (flows.length - 1);
+          return stacked(
+            flows.map((f) => f.total),
+            scale,
+            boxTop + (band - tall) / 2,
+            gap,
+          );
+        };
+        const side = (flows: Flow[], into: boolean) => {
+          const outer = centred(flows, gap);
+          const inner = centred(flows, 0);
+          return flows.map((f, k) => {
+            const y0 = outer[k] ?? 0;
+            const y1 = inner[k] ?? 0;
+            const thickness = f.total * scale;
+            const d = into ? ribbonPath(0, y0, boxLeft, y1, thickness) : ribbonPath(boxRight, y1, width, y0, thickness);
+            return (
+              <g key={f.name}>
+                <path className="ribbon" d={d} />
+                {twoLines ? (
+                  <text className="ribbon-label" x={into ? 0 : width} y={y0 - 18} textAnchor={into ? "start" : "end"}>
+                    {f.name}
+                    <tspan className="ribbon-total" x={into ? 0 : width} dy={13}>
+                      {total(f.total)}
+                    </tspan>
+                  </text>
+                ) : (
+                  <text className="ribbon-label" x={into ? 0 : width} y={y0 - 5} textAnchor={into ? "start" : "end"}>
+                    {f.name} <tspan className="ribbon-total">{total(f.total)}</tspan>
+                  </text>
+                )}
+              </g>
+            );
+          });
+        };
+        return (
+          <>
+            {side(inflows, true)}
+            {side(outflows, false)}
+            <rect className="stock" x={boxLeft} y={boxTop} width={STOCK_WIDTH} height={band} rx={3} />
+            <text className="end-label" x={centre} y={top - 22} textAnchor="middle">
+              {stock.name}
+            </text>
+            <text className="end-label subject" x={centre} y={top - 6} textAnchor="middle">
+              {total(stock.start)} → {total(stock.end)}
+            </text>
           </>
         );
       }}
